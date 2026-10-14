@@ -7,8 +7,9 @@ from django.db import models
 
 
 def certificate_upload_path(instance, filename):
+    owner_part = instance.owner_id or "unclaimed"
     return (
-        f"certificates/{instance.owner_id}/"
+        f"certificates/{owner_part}/"
         f"{uuid.uuid4().hex}_{filename}"
     )
 
@@ -29,8 +30,17 @@ class Certificate(models.Model):
 
     owner = models.ForeignKey(
         settings.AUTH_USER_MODEL,
-        on_delete=models.CASCADE,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
         related_name="certificates",
+    )
+    recipient_email = models.EmailField(
+        max_length=254,
+        blank=True,
+        default="",
+        db_index=True,
+        help_text="Normalized recipient email address.",
     )
     title = models.CharField(max_length=200)
     issuer = models.CharField(max_length=200)
@@ -101,15 +111,26 @@ class Certificate(models.Model):
 
     def clean(self):
         super().clean()
+        from django.core.exceptions import ValidationError
         if self.recipient_name and len(self.recipient_name.strip()) >= 30:
-            from django.core.exceptions import ValidationError
             raise ValidationError({"recipient_name": "Student name must be 1–29 characters."})
+        if self.start_date and self.end_date and self.end_date < self.start_date:
+            raise ValidationError({"end_date": "End date cannot be earlier than start date."})
 
     def save(self, *args, **kwargs):
         self.certificate_number = self.certificate_number.strip().upper()
         if self.recipient_name:
             self.recipient_name = self.recipient_name.strip()
+        if self.recipient_email:
+            self.recipient_email = self.recipient_email.strip().lower()
+        elif self.owner and getattr(self.owner, "email", None):
+            self.recipient_email = self.owner.email.strip().lower()
         super().save(*args, **kwargs)
+
+    @property
+    def is_claimed(self):
+        """True when the certificate is associated with a registered user account."""
+        return self.owner_id is not None
 
     @property
     def has_pdf(self):

@@ -13,6 +13,8 @@ class AuditLog(models.Model):
         CSV_VALIDATED = "CSV_VALIDATED", "CSV Validated"
         BATCH_GENERATED = "BATCH_GENERATED", "Batch Generated"
         CERTIFICATE_GENERATED = "CERTIFICATE_GENERATED", "Certificate Generated"
+        CERTIFICATE_REISSUED = "CERTIFICATE_REISSUED", "Certificate Reissued"
+        CERTIFICATE_CLAIMED = "CERTIFICATE_CLAIMED", "Certificate Claimed"
         EMAIL_RETRY = "EMAIL_RETRY", "Email Retry"
         USER_REGISTERED = "USER_REGISTERED", "User Registered"
         USER_LOGIN = "USER_LOGIN", "User Login"

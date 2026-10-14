@@ -74,6 +74,7 @@ class UserProfileSerializer(serializers.ModelSerializer):
     last_name = serializers.CharField(source="user.last_name", required=False, allow_blank=True)
     role = serializers.SerializerMethodField()
     mfa_enabled = serializers.BooleanField(read_only=True)
+    email_verified = serializers.BooleanField(read_only=True)
 
     class Meta:
         model = UserProfile
@@ -87,6 +88,7 @@ class UserProfileSerializer(serializers.ModelSerializer):
             "phone",
             "organization",
             "mfa_enabled",
+            "email_verified",
             "created_at",
         ]
         read_only_fields = [
@@ -95,6 +97,7 @@ class UserProfileSerializer(serializers.ModelSerializer):
             "email",
             "role",
             "mfa_enabled",
+            "email_verified",
             "created_at",
         ]
 
@@ -119,6 +122,7 @@ class AdminUserSerializer(serializers.ModelSerializer):
     """Read-only serializer for admin user listing. No passwords or secrets."""
     role = serializers.SerializerMethodField()
     mfa_enabled = serializers.SerializerMethodField()
+    email_verified = serializers.SerializerMethodField()
     full_name = serializers.SerializerMethodField()
 
     class Meta:
@@ -133,6 +137,7 @@ class AdminUserSerializer(serializers.ModelSerializer):
             "role",
             "is_active",
             "mfa_enabled",
+            "email_verified",
             "date_joined",
         ]
 
@@ -143,6 +148,12 @@ class AdminUserSerializer(serializers.ModelSerializer):
             return obj.profile.role
         except Exception:
             return "USER"
+
+    def get_email_verified(self, obj):
+        try:
+            return obj.profile.email_verified
+        except Exception:
+            return False
 
     def get_mfa_enabled(self, obj):
         try:

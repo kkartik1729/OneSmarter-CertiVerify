@@ -33,6 +33,10 @@ class UserProfile(models.Model):
     )
     mfa_enabled_at = models.DateTimeField(null=True, blank=True)
 
+    # Email verification tracking
+    email_verified = models.BooleanField(default=False, db_index=True)
+    email_verified_at = models.DateTimeField(null=True, blank=True)
+
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -150,5 +154,33 @@ class PasswordResetToken(models.Model):
 
     def __str__(self):
         return f"PasswordResetToken for {self.user.username} (used={self.is_used})"
+
+
+class EmailVerificationToken(models.Model):
+    """
+    Dedicated model for account email verification via 6-digit OTP or link token.
+    Cryptographically secure, single-use, time-limited.
+    """
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="email_verification_tokens",
+    )
+    token_hash = models.CharField(max_length=64, db_index=True)
+    otp_hash = models.CharField(max_length=64, blank=True, default="", db_index=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    expires_at = models.DateTimeField()
+    is_used = models.BooleanField(default=False)
+    used_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def is_valid(self):
+        from django.utils import timezone
+        return not self.is_used and timezone.now() <= self.expires_at
+
+    def __str__(self):
+        return f"EmailVerificationToken for {self.user.username} (used={self.is_used})"
 
 

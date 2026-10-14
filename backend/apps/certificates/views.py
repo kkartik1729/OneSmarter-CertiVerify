@@ -9,7 +9,8 @@ from datetime import datetime
 from PIL import Image
 from django.contrib.auth import get_user_model
 from django.core.files.base import ContentFile
-from django.db import transaction
+from django.db import models, transaction
+from django.db.models import Q
 from django.http import FileResponse, HttpResponse
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
@@ -66,7 +67,18 @@ class CertificateListCreateView(generics.ListCreateAPIView):
         )
         if is_certiverify_admin(self.request.user):
             return qs
-        return qs.filter(owner=self.request.user)
+
+        user = self.request.user
+        if user and user.is_authenticated:
+            profile = getattr(user, "profile", None)
+            if profile and getattr(profile, "email_verified", False):
+                from apps.certificates.services import claim_unclaimed_certificates_for_user
+                claim_unclaimed_certificates_for_user(user)
+
+        # Re-evaluate queryset AFTER claiming so newly-claimed certs appear immediately
+        return Certificate.objects.select_related("owner").prefetch_related(
+            "pdf_document"
+        ).filter(owner=self.request.user)
 
     def get_serializer_context(self):
         ctx = super().get_serializer_context()
@@ -84,17 +96,20 @@ class CertificateListCreateView(generics.ListCreateAPIView):
             file_hash = digest.hexdigest()
             uploaded_file.seek(0)
 
-        # Determine owner:
-        # If admin, use selected owner from validated_data, otherwise default to self.request.user
-        # If normal user, always assign to self.request.user
+        # Determine owner & recipient_email:
         if is_certiverify_admin(self.request.user):
-            owner = serializer.validated_data.get("owner", self.request.user)
+            owner = serializer.validated_data.get("owner", None)
+            recipient_email = serializer.validated_data.get("recipient_email", "")
+            if not recipient_email and owner and owner.email:
+                recipient_email = owner.email.lower()
         else:
             owner = self.request.user
+            recipient_email = self.request.user.email.lower()
 
         with transaction.atomic():
             certificate = serializer.save(
                 owner=owner,
+                recipient_email=recipient_email,
                 file_sha256=file_hash,
             )
 
@@ -118,11 +133,15 @@ class CertificateListCreateView(generics.ListCreateAPIView):
                 actor=self.request.user,
                 target_type="Certificate",
                 target_id=certificate.id,
-                description=f"Certificate created and assigned to {owner.username}",
+                description=(
+                    f"Certificate created and assigned to "
+                    f"{owner.username if owner else (recipient_email or 'unregistered recipient')}"
+                ),
                 metadata={
                     "certificate_number": certificate.certificate_number,
-                    "owner_id": owner.id,
-                    "owner_username": owner.username,
+                    "owner_id": owner.id if owner else None,
+                    "owner_username": owner.username if owner else None,
+                    "recipient_email": recipient_email,
                 },
                 ip_address=self.request.META.get("REMOTE_ADDR"),
             )
@@ -684,8 +703,9 @@ def validate_student_name(val: str) -> tuple:
 class CSVTemplateDownloadView(APIView):
     """
     GET /api/certificates/generate/csv-template/
-    Downloads the simplified 2-column CSV template:
-    student_name,student_email
+    Downloads the CSV template:
+    - Default/simple: student_name,student_email
+    - Full (?columns=full): student_name,student_email,course_name,start_date,end_date,issue_date
     """
     permission_classes = [AllowAny]
     authentication_classes = [OptionalJWTAuthentication]
@@ -693,10 +713,13 @@ class CSVTemplateDownloadView(APIView):
     def get(self, request):
         buffer = io.StringIO()
         writer = csv.writer(buffer)
-        writer.writerow(["student_name", "student_email"])
-        writer.writerow(["Kartik Hande", "kartik@example.com"])
-        writer.writerow(["Rahul Sharma", "rahul@example.com"])
-        response = HttpResponse(buffer.getvalue(), content_type="text/csv; charset=utf-8")
+        if request.query_params.get("columns") == "full" or request.query_params.get("format") == "full":
+            writer.writerow(["student_name", "student_email", "course_name", "start_date", "end_date", "issue_date"])
+            writer.writerow(["Kartik Hande", "kartik@example.com", "Node", "24/07/2026", "24/08/2026", "14/10/2026"])
+        else:
+            writer.writerow(["student_name", "student_email"])
+            writer.writerow(["Kartik Hande", "kartik@example.com"])
+        response = HttpResponse(buffer.getvalue(), content_type="text/csv")
         response["Content-Disposition"] = 'attachment; filename="certificate_upload_template.csv"'
         return response
 
@@ -839,18 +862,16 @@ class ValidateCSVView(APIView):
             # 2. Student email & registered user lookup
             email = student_email_raw.lower()
             user_id = None
+            has_account = False
             if not email:
                 errors.append("Student email is required.")
             elif "@" not in email or "." not in email.split("@")[-1]:
                 errors.append(f"Invalid email format: '{student_email_raw}'.")
             else:
                 user = User.objects.filter(email__iexact=email).first()
-                if not user:
-                    errors.append(
-                        f"Student email '{student_email_raw}' is not registered. Please register the user account first."
-                    )
-                else:
+                if user:
                     user_id = user.id
+                    has_account = True
                     if not user.is_active:
                         errors.append(f"Student account '{student_email_raw}' is inactive.")
 
@@ -874,7 +895,7 @@ class ValidateCSVView(APIView):
 
             if "start_date" in parsed_dates and "end_date" in parsed_dates:
                 if parsed_dates["end_date"] < parsed_dates["start_date"]:
-                    errors.append("Course end date cannot be earlier than start date.")
+                    errors.append(f"Row {row_idx}: End date cannot be earlier than start date.")
 
             # Format dates in DD/MM/YYYY for UI display
             disp_start = parsed_dates["start_date"].strftime("%d/%m/%Y") if "start_date" in parsed_dates else start_date_str
@@ -882,12 +903,14 @@ class ValidateCSVView(APIView):
             disp_issue = parsed_dates["issue_date"].strftime("%d/%m/%Y") if "issue_date" in parsed_dates else issue_date_str
 
             # 5. Check duplicate certificate
-            if user_id and cname:
-                already_issued = Certificate.objects.filter(
-                    owner_id=user_id,
-                    course_name__iexact=cname,
-                ).exists()
-                if already_issued:
+            if cname and email:
+                dup_qs = Certificate.objects.filter(course_name__iexact=cname)
+                if user_id:
+                    dup_qs = dup_qs.filter(models.Q(owner_id=user_id) | models.Q(recipient_email__iexact=email))
+                else:
+                    dup_qs = dup_qs.filter(recipient_email__iexact=email)
+
+                if dup_qs.exists():
                     errors.append(f"A certificate for '{cname}' has already been issued to this student.")
 
             is_valid = len(errors) == 0
@@ -905,6 +928,7 @@ class ValidateCSVView(APIView):
                 "end_date": disp_end,
                 "issue_date": disp_issue,
                 "user_id": user_id,
+                "has_account": has_account,
                 "is_valid": is_valid,
                 "errors": errors,
             })
@@ -1021,20 +1045,17 @@ class BulkGenerateView(APIView):
                 })
                 continue
 
-            # Lookup student
+            # Lookup student (optional for unregistered recipients)
             user = User.objects.filter(email__iexact=student_email).first()
-            if not user:
-                failed_count += 1
-                error_report.append({
-                    "row_number": row_num,
-                    "student_name": student_name,
-                    "student_email": student_email,
-                    "error": f"Student '{student_email}' is not a registered user.",
-                })
-                continue
 
             # Duplicate check
-            if Certificate.objects.filter(owner=user, course_name__iexact=course_name).exists():
+            dup_qs = Certificate.objects.filter(course_name__iexact=course_name)
+            if user:
+                dup_qs = dup_qs.filter(models.Q(owner=user) | models.Q(recipient_email__iexact=student_email))
+            else:
+                dup_qs = dup_qs.filter(recipient_email__iexact=student_email)
+
+            if dup_qs.exists():
                 skipped_duplicates += 1
                 error_report.append({
                     "row_number": row_num,
@@ -1051,7 +1072,7 @@ class BulkGenerateView(APIView):
 
             date_err = s_err or e_err or i_err
             if not date_err and end_date < start_date:
-                date_err = "Course end date cannot be earlier than start date."
+                date_err = "End date cannot be earlier than start date."
 
             if date_err:
                 failed_count += 1
@@ -1086,6 +1107,7 @@ class BulkGenerateView(APIView):
                 with transaction.atomic():
                     cert = Certificate(
                         owner=user,
+                        recipient_email=student_email,
                         title=cert_title,
                         issuer=issuer_name,
                         certificate_number=cert_num,
@@ -1117,14 +1139,15 @@ class BulkGenerateView(APIView):
                     except Exception as pdf_err:
                         logger.warning("Failed to generate/store PDF for cert %s: %s", cert_num, pdf_err)
 
-                    # In-app notification
-                    Notification.objects.create(
-                        recipient=user,
-                        notification_type=Notification.NotificationType.CERTIFICATE_CREATED,
-                        title=f"New Certificate Issued: {course_name}",
-                        message=f"Your certificate ({cert_num}) for {course_name} has been issued and is available in My Certificates.",
-                        certificate=cert,
-                    )
+                    # In-app notification only if user account exists
+                    if user:
+                        Notification.objects.create(
+                            recipient=user,
+                            notification_type=Notification.NotificationType.CERTIFICATE_CREATED,
+                            title=f"New Certificate Issued: {course_name}",
+                            message=f"Your certificate ({cert_num}) for {course_name} has been issued and is available in My Certificates.",
+                            certificate=cert,
+                        )
 
                 # Send email notification outside atomic transaction
                 email_ok, email_err = send_certificate_issued_email(cert)
@@ -1212,7 +1235,10 @@ class SingleGenerateView(APIView):
         if not template_id:
             return Response({"detail": "Certificate template is required."}, status=status.HTTP_400_BAD_REQUEST)
         if not (user_id or student_email):
-            return Response({"detail": "Registered student account is required."}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({"detail": "Student recipient email is required."}, status=status.HTTP_400_BAD_REQUEST)
+
+        if student_email and ("@" not in student_email or "." not in student_email.split("@")[-1]):
+            return Response({"detail": f"Invalid email format: '{student_email}'."}, status=status.HTTP_400_BAD_REQUEST)
 
         # Validate student name length (1-29 chars)
         student_name, name_err = validate_student_name(raw_student_name)
@@ -1235,17 +1261,14 @@ class SingleGenerateView(APIView):
         if not template.image or not template.image.storage.exists(template.image.name):
             return Response({"detail": "Template image file is missing from storage."}, status=status.HTTP_400_BAD_REQUEST)
 
-        # Lookup student user
+        # Lookup student user (optional — unregistered recipients supported)
         user = None
         if user_id:
             user = User.objects.filter(pk=user_id).first()
         if not user and student_email:
             user = User.objects.filter(email__iexact=student_email).first()
-
-        if not user:
-            return Response({
-                "detail": "Selected student is not registered in the system. Please register the user account first."
-            }, status=status.HTTP_400_BAD_REQUEST)
+        if user and not student_email:
+            student_email = user.email.lower()
 
         course_name = (request.data.get("course_name") or "").strip() or course.name
         certificate_title = (request.data.get("certificate_title") or "").strip() or course.title or "Certificate of Completion"
@@ -1254,7 +1277,12 @@ class SingleGenerateView(APIView):
         layout_settings = request.data.get("layout_settings")
 
         # Check duplicate & reissue rules
-        existing_cert = Certificate.objects.filter(owner=user, course_name__iexact=course_name).first()
+        dup_qs = Certificate.objects.filter(course_name__iexact=course_name)
+        if user:
+            dup_qs = dup_qs.filter(models.Q(owner=user) | models.Q(recipient_email__iexact=student_email))
+        else:
+            dup_qs = dup_qs.filter(recipient_email__iexact=student_email)
+        existing_cert = dup_qs.first()
         reissue = request.data.get("reissue") in (True, "true", "1")
         if existing_cert and not reissue:
             return Response({
@@ -1298,6 +1326,7 @@ class SingleGenerateView(APIView):
             with transaction.atomic():
                 cert = Certificate(
                     owner=user,
+                    recipient_email=student_email,
                     title=certificate_title,
                     issuer=issuer_name,
                     certificate_number=cert_num,
@@ -1328,13 +1357,14 @@ class SingleGenerateView(APIView):
                 except Exception as pdf_err:
                     logger.warning("Failed to generate/store PDF for single cert %s: %s", cert_num, pdf_err)
 
-                Notification.objects.create(
-                    recipient=user,
-                    notification_type=Notification.NotificationType.CERTIFICATE_CREATED,
-                    title=f"New Certificate Issued: {course_name}",
-                    message=f"Your certificate ({cert_num}) for {course_name} has been issued and is available in My Certificates.",
-                    certificate=cert,
-                )
+                if user:
+                    Notification.objects.create(
+                        recipient=user,
+                        notification_type=Notification.NotificationType.CERTIFICATE_CREATED,
+                        title=f"New Certificate Issued: {course_name}",
+                        message=f"Your certificate ({cert_num}) for {course_name} has been issued and is available in My Certificates.",
+                        certificate=cert,
+                    )
 
             # Send email
             email_ok, email_err = send_certificate_issued_email(cert)
@@ -1348,11 +1378,12 @@ class SingleGenerateView(APIView):
                 actor=request.user,
                 target_type="Certificate",
                 target_id=cert.id,
-                description=f"{'Reissued' if existing_cert else 'Generated'} single certificate {cert_num} for {user.username} ({course_name})",
+                description=f"{'Reissued' if existing_cert else 'Generated'} single certificate {cert_num} for {user.username if user else student_email} ({course_name})",
                 metadata={
                     "certificate_number": cert_num,
                     "student_name": student_name,
-                    "student_id": user.id,
+                    "student_id": user.id if user else None,
+                    "recipient_email": student_email,
                     "course_id": course.id,
                     "template_id": template.id,
                     "email_sent": email_ok,

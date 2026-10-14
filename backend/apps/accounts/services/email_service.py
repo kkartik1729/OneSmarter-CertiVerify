@@ -54,6 +54,7 @@ def send_account_email(
     message: str,
     html_message: Optional[str] = None,
     reply_to: Optional[str] = None,
+    attachments: Optional[list[tuple[str, bytes, str]]] = None,
 ) -> bool:
     """
     Send an email safely through Django's configured email backend.
@@ -62,7 +63,8 @@ def send_account_email(
     1. Credentials/passwords are NEVER logged.
     2. Uses DEFAULT_FROM_EMAIL and centrally configured reply-to address.
     3. Supports HTML with plain-text fallback.
-    4. Handles connection timeouts, authentication failures, and delivery rejections cleanly.
+    4. Handles attachments cleanly (filename, raw_bytes, mime_type).
+    5. Handles connection timeouts, authentication failures, and delivery rejections cleanly.
     """
     clean_recipient = (recipient_email or "").strip()
     if not clean_recipient or "@" not in clean_recipient:
@@ -91,6 +93,12 @@ def send_account_email(
 
         if html_message:
             msg.attach_alternative(html_message, "text/html")
+
+        if attachments:
+            for att in attachments:
+                if len(att) == 3:
+                    att_filename, att_content, att_mimetype = att
+                    msg.attach(att_filename, att_content, att_mimetype)
 
         sent_count = msg.send(fail_silently=False)
         if sent_count < 1:
@@ -400,3 +408,40 @@ def send_password_reset_otp_email(user, otp: str) -> bool:
     )
 
     return send_account_email(user.email, subject, plain_text, html)
+
+
+def send_email_verification_otp_email(user, otp: str) -> bool:
+    """Send 6-digit email OTP for verifying user email address on registration/profile."""
+    name = (getattr(user, "first_name", "") or getattr(user, "username", "")).strip() or "User"
+    subject = "OneSmarter CertiVerify — Verify Your Email Address"
+
+    plain_text = (
+        f"Hello {name},\n\n"
+        "Thank you for registering with OneSmarter CertiVerify.\n\n"
+        "To verify your email address and link any issued certificates to your account, "
+        f"enter the following 6-digit verification code:\n\n"
+        f"    {otp}\n\n"
+        "This code is valid for 24 hours.\n\n"
+        "If you did not register for a OneSmarter CertiVerify account, please ignore this email.\n\n"
+        "Regards,\n"
+        "OneSmarter Support\n"
+    )
+
+    content_html = f"""
+      <p style="margin: 0 0 14px 0;">Thank you for registering with OneSmarter CertiVerify.</p>
+      <p style="margin: 0 0 14px 0;">To verify your email address and link any issued certificates to your account, please enter the following 6-digit verification code:</p>
+      <div style="background-color: #f8fafc; border: 2px dashed #cbd5e1; border-radius: 12px; padding: 20px; text-align: center; margin: 20px 0;">
+        <span style="font-family: monospace; font-size: 32px; font-weight: 700; letter-spacing: 6px; color: #0d9488;">{otp}</span>
+      </div>
+      <p style="margin: 0 0 14px 0; font-size: 13px; color: #64748b;">This verification code is valid for 24 hours.</p>
+      <p style="margin: 0; font-size: 13px; color: #64748b;">If you did not register for an account, you can safely ignore this email.</p>
+    """
+
+    html = _render_email_html(
+        title="Verify Your Email Address",
+        greeting=f"Hello {name},",
+        content_html=content_html,
+    )
+
+    return send_account_email(user.email, subject, plain_text, html)
+

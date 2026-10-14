@@ -33,8 +33,9 @@ from .emails import (
     send_password_changed_notification_email,
     send_password_reset_email,
     send_password_reset_otp_email,
+    send_email_verification_otp_email,
 )
-from .models import MFARecoveryToken, PasswordResetRequest, PasswordResetToken, UserProfile
+from .models import EmailVerificationToken, MFARecoveryToken, PasswordResetRequest, PasswordResetToken, UserProfile
 from .serializers import RegisterSerializer, UserProfileSerializer
 
 logger = logging.getLogger(__name__)
@@ -74,10 +75,44 @@ class MFAChallengeToken(Token):
 
 
 class RegisterView(generics.CreateAPIView):
-    """Register a new standard user."""
+    """Register a new standard user and send email verification OTP."""
 
     serializer_class = RegisterSerializer
     permission_classes = [AllowAny]
+
+    def create(self, request, *args, **kwargs):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        user = serializer.save()
+
+        # Generate 6-digit OTP and token
+        otp = f"{secrets.randbelow(1_000_000):06d}"
+        otp_hash = hashlib.sha256(otp.encode("utf-8")).hexdigest()
+        token = secrets.token_urlsafe(32)
+        token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+        EmailVerificationToken.objects.create(
+            user=user,
+            token_hash=token_hash,
+            otp_hash=otp_hash,
+            expires_at=timezone.now() + timedelta(hours=24),
+        )
+
+        try:
+            send_email_verification_otp_email(user, otp)
+        except Exception as e:
+            logger.warning("Failed to send verification email to %s: %s", user.email, e)
+
+        headers = self.get_success_headers(serializer.data)
+        return Response(
+            {
+                "user": serializer.data,
+                "message": "Registration successful. Please verify your email using the verification code sent to your inbox.",
+                "email": user.email,
+            },
+            status=status.HTTP_201_CREATED,
+            headers=headers,
+        )
 
 
 class CurrentUserView(APIView):
@@ -1155,4 +1190,152 @@ class PasswordResetCompleteView(APIView):
             },
             status=status.HTTP_200_OK,
         )
+
+
+class VerifyEmailView(APIView):
+    """
+    Verify a user's email address using 6-digit OTP or link token.
+    Once email is verified, immediately triggers auto-claiming of any
+    unclaimed certificates associated with this email.
+    """
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        email = str(request.data.get("email", "")).strip().lower()
+        otp = str(request.data.get("otp", "")).strip()
+        token = str(request.data.get("token", "")).strip()
+
+        user = None
+        if request.user and request.user.is_authenticated:
+            user = request.user
+        elif email:
+            user = User.objects.filter(email__iexact=email).first()
+
+        if not user:
+            return Response(
+                {"detail": "User not found or email required."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if not otp and not token:
+            return Response(
+                {"detail": "Verification code (OTP) or token is required."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        profile = get_or_sync_profile(user)
+
+        # Find matching token
+        token_record = None
+        now = timezone.now()
+        active_tokens = EmailVerificationToken.objects.filter(
+            user=user,
+            is_used=False,
+            expires_at__gte=now,
+        ).order_by("-created_at")
+
+        if otp:
+            otp_hash = hashlib.sha256(otp.encode("utf-8")).hexdigest()
+            token_record = active_tokens.filter(otp_hash=otp_hash).first()
+        elif token:
+            token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
+            token_record = active_tokens.filter(token_hash=token_hash).first()
+
+        if not token_record:
+            return Response(
+                {"detail": "Invalid or expired verification code."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # Mark token as used
+        token_record.is_used = True
+        token_record.used_at = now
+        token_record.save(update_fields=["is_used", "used_at"])
+
+        # Mark profile as email_verified
+        profile.email_verified = True
+        profile.email_verified_at = now
+        profile.save(update_fields=["email_verified", "email_verified_at", "updated_at"])
+
+        # Trigger auto-claiming of certificates
+        from apps.certificates.services import claim_unclaimed_certificates_for_user
+        claimed_certs = claim_unclaimed_certificates_for_user(user)
+
+        return Response(
+            {
+                "detail": "Email verified successfully.",
+                "email_verified": True,
+                "claimed_count": len(claimed_certs),
+                "claimed_certificate_numbers": [c.certificate_number for c in claimed_certs],
+            },
+            status=status.HTTP_200_OK,
+        )
+
+
+class ResendVerificationEmailView(APIView):
+    """
+    Resend email verification OTP to a registered user.
+    """
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        email = str(request.data.get("email", "")).strip().lower()
+        user = None
+        if request.user and request.user.is_authenticated:
+            user = request.user
+        elif email:
+            user = User.objects.filter(email__iexact=email).first()
+
+        if not user:
+            # Prevent email enumeration: return standard success message even if not found
+            return Response(
+                {"detail": "If an account exists with this email, a verification code has been sent."},
+                status=status.HTTP_200_OK,
+            )
+
+        profile = get_or_sync_profile(user)
+        if profile.email_verified:
+            return Response(
+                {"detail": "Email is already verified."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # Rate limit: check if a token was created in the last 60 seconds
+        recent_token = EmailVerificationToken.objects.filter(
+            user=user,
+            created_at__gte=timezone.now() - timedelta(seconds=60),
+        ).first()
+        if recent_token:
+            return Response(
+                {"detail": "Please wait a moment before requesting another verification code."},
+                status=status.HTTP_429_TOO_MANY_REQUESTS,
+            )
+
+        # Invalidate previous unused tokens
+        EmailVerificationToken.objects.filter(user=user, is_used=False).update(
+            is_used=True, used_at=timezone.now()
+        )
+
+        otp = f"{secrets.randbelow(1_000_000):06d}"
+        otp_hash = hashlib.sha256(otp.encode("utf-8")).hexdigest()
+        token = secrets.token_urlsafe(32)
+        token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+        EmailVerificationToken.objects.create(
+            user=user,
+            token_hash=token_hash,
+            otp_hash=otp_hash,
+            expires_at=timezone.now() + timedelta(hours=24),
+        )
+
+        try:
+            send_email_verification_otp_email(user, otp)
+        except Exception as e:
+            logger.warning("Failed to resend verification email to %s: %s", user.email, e)
+
+        return Response(
+            {"detail": "Verification code has been sent to your email."},
+            status=status.HTTP_200_OK,
+        )
+
 

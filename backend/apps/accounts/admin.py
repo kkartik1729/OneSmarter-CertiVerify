@@ -1,7 +1,7 @@
 
 from django.contrib import admin
 
-from .models import MFARecoveryToken, PasswordResetRequest, PasswordResetToken, UserProfile
+from .models import EmailVerificationToken, MFARecoveryToken, PasswordResetRequest, PasswordResetToken, UserProfile
 
 
 @admin.register(UserProfile)
@@ -43,4 +43,12 @@ class PasswordResetTokenAdmin(admin.ModelAdmin):
     list_filter = ("is_used", "purpose", "created_at")
     search_fields = ("user__username", "user__email")
     readonly_fields = ("token_hash", "created_at", "expires_at", "used_at")
+
+
+@admin.register(EmailVerificationToken)
+class EmailVerificationTokenAdmin(admin.ModelAdmin):
+    list_display = ("user", "is_used", "created_at", "expires_at")
+    list_filter = ("is_used", "created_at")
+    search_fields = ("user__username", "user__email")
+    readonly_fields = ("token_hash", "otp_hash", "created_at", "expires_at", "used_at")
 

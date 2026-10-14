@@ -15,11 +15,15 @@ from .views import (
     PasswordResetValidateTokenView,
     PasswordResetVerifyView,
     PasswordResetCompleteView,
+    VerifyEmailView,
+    ResendVerificationEmailView,
 )
 from .admin_views import AdminUserListView, AdminUserDetailView
 
 urlpatterns = [
     path("register/", RegisterView.as_view(), name="register"),
+    path("verify-email/", VerifyEmailView.as_view(), name="verify_email"),
+    path("resend-verification/", ResendVerificationEmailView.as_view(), name="resend_verification"),
     path("login/", MFALoginView.as_view(), name="login"),
     path("token/refresh/", TokenRefreshView.as_view(), name="token_refresh"),
     path("me/", CurrentUserView.as_view(), name="current_user"),

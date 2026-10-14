@@ -33,11 +33,18 @@ class CertificateSerializer(serializers.ModelSerializer):
     owner = serializers.PrimaryKeyRelatedField(
         queryset=User.objects.all(),
         required=False,
+        allow_null=True,
     )
     owner_username = serializers.CharField(
         source="owner.username",
         read_only=True,
+        default=None,
     )
+    recipient_email = serializers.EmailField(
+        required=False,
+        allow_blank=True,
+    )
+    is_claimed = serializers.BooleanField(read_only=True)
     # Read-only fields for PDF metadata — null when no PDF is stored
     has_pdf = serializers.SerializerMethodField()
     pdf_download_url = serializers.SerializerMethodField()
@@ -52,6 +59,8 @@ class CertificateSerializer(serializers.ModelSerializer):
             "id",
             "owner",
             "owner_username",
+            "recipient_email",
+            "is_claimed",
             "title",
             "issuer",
             "certificate_number",
@@ -83,6 +92,7 @@ class CertificateSerializer(serializers.ModelSerializer):
         read_only_fields = [
             "id",
             "owner_username",
+            "is_claimed",
             "file_sha256",
             "has_pdf",
             "pdf_download_url",
@@ -195,25 +205,35 @@ class CertificateSerializer(serializers.ModelSerializer):
         return value
 
     def validate(self, attrs):
+        # 1. Date validation: end_date >= start_date
+        start_date = attrs.get("start_date") or (self.instance.start_date if self.instance else None)
+        end_date = attrs.get("end_date") or (self.instance.end_date if self.instance else None)
+        if start_date and end_date and end_date < start_date:
+            raise serializers.ValidationError({
+                "end_date": "End date cannot be earlier than start date."
+            })
+
         request = self.context.get("request")
         user = getattr(request, "user", None)
 
         if user and user.is_authenticated:
             if is_certiverify_admin(user):
+                owner = attrs.get("owner")
+                recipient_email = (attrs.get("recipient_email") or "").strip().lower()
+
                 # When admin creates a certificate
                 if self.instance is None:
-                    owner = attrs.get("owner")
-                    if not owner:
+                    if not owner and not recipient_email:
                         raise serializers.ValidationError({
-                            "owner_id": "Please select a registered user account to assign this certificate to."
+                            "owner_id": "Please select a registered user account or enter a recipient email address.",
+                            "recipient_email": "Please select a registered user account or enter a recipient email address.",
                         })
-                    if not owner.is_active:
+                    if owner and not owner.is_active:
                         raise serializers.ValidationError({
                             "owner_id": "Selected user account is inactive."
                         })
                 else:
                     # When admin updates a certificate
-                    owner = attrs.get("owner")
                     if owner and not owner.is_active:
                         raise serializers.ValidationError({
                             "owner_id": "Selected user account is inactive."
@@ -226,6 +246,8 @@ class CertificateSerializer(serializers.ModelSerializer):
                         "owner": "You cannot assign certificates to other user accounts."
                     })
                 attrs["owner"] = user
+                if not attrs.get("recipient_email") and user.email:
+                    attrs["recipient_email"] = user.email.lower()
         return attrs
 
 

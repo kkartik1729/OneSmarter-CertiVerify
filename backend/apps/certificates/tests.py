@@ -497,16 +497,18 @@ class CertificateGenerationTests(TestCase):
 
         self.assertEqual(res.status_code, 200)
         self.assertEqual(res.data["total_rows"], 2)
-        self.assertEqual(res.data["valid_rows_count"], 1)
-        self.assertEqual(res.data["invalid_rows_count"], 1)
-        self.assertFalse(res.data["is_valid"])
+        self.assertEqual(res.data["valid_rows_count"], 2)
+        self.assertEqual(res.data["invalid_rows_count"], 0)
+        self.assertTrue(res.data["is_valid"])
 
         rows = res.data["rows"]
         self.assertTrue(rows[0]["is_valid"])
         self.assertEqual(rows[0]["user_id"], self.student.id)
+        self.assertTrue(rows[0]["has_account"])
 
-        self.assertFalse(rows[1]["is_valid"])
-        self.assertTrue(any("not registered" in err for err in rows[1]["errors"]))
+        self.assertTrue(rows[1]["is_valid"])
+        self.assertIsNone(rows[1]["user_id"])
+        self.assertFalse(rows[1]["has_account"])
 
     def test_single_certificate_generation_and_verification(self):
         self.client.force_authenticate(user=self.admin)
@@ -750,6 +752,162 @@ class CertificateGenerationTests(TestCase):
         self.assertEqual(dl_res.status_code, 200)
         self.assertIn("attachment", dl_res["Content-Disposition"])
         self.assertIn(cert_num, dl_res["Content-Disposition"])
+
+    def test_date_validation_scenarios(self):
+        """Test end_date < start_date rejected, == accepted, > accepted."""
+        from django.core.exceptions import ValidationError
+        # 1. Earlier end date rejected
+        cert_invalid = Certificate(
+            recipient_name="Student One",
+            recipient_email="student1@example.com",
+            title="Course Title",
+            issuer="OneSmarter",
+            certificate_number="OSCV-DATE-001",
+            issue_date="2026-10-14",
+            start_date="2026-08-01",
+            end_date="2026-07-01",
+        )
+        with self.assertRaises(ValidationError) as ctx:
+            cert_invalid.clean()
+        self.assertIn("End date cannot be earlier than start date.", str(ctx.exception))
+
+        # 2. Equal end date accepted
+        cert_equal = Certificate(
+            recipient_name="Student Two",
+            recipient_email="student2@example.com",
+            title="Course Title",
+            issuer="OneSmarter",
+            certificate_number="OSCV-DATE-002",
+            issue_date="2026-10-14",
+            start_date="2026-08-01",
+            end_date="2026-08-01",
+        )
+        cert_equal.clean()  # should not raise
+
+        # 3. Later end date accepted
+        cert_later = Certificate(
+            recipient_name="Student Three",
+            recipient_email="student3@example.com",
+            title="Course Title",
+            issuer="OneSmarter",
+            certificate_number="OSCV-DATE-003",
+            issue_date="2026-10-14",
+            start_date="2026-08-01",
+            end_date="2026-09-01",
+        )
+        cert_later.clean()  # should not raise
+
+    def test_single_certificate_to_unregistered_email(self):
+        """Admin can issue certificate directly to an unregistered email address."""
+        from django.core import mail
+        mail.outbox = []
+        self.client.force_authenticate(user=self.admin)
+        unreg_email = "unregistered.student@example.com"
+        res = self.client.post("/api/certificates/generate/single/", {
+            "course_id": self.course.id,
+            "template_id": self.template.id,
+            "student_email": unreg_email,
+            "student_name": "Unregistered Student",
+            "start_date": "2026-07-01",
+            "end_date": "2026-10-01",
+            "issue_date": "2026-10-14",
+        }, format="json")
+        self.assertEqual(res.status_code, 201)
+        cert_number = res.data["certificate_number"]
+        
+        # Verify in DB
+        cert = Certificate.objects.get(certificate_number=cert_number)
+        self.assertIsNone(cert.owner)
+        self.assertEqual(cert.recipient_email, unreg_email)
+        self.assertFalse(cert.is_claimed)
+        self.assertTrue(cert.email_sent)
+        
+        # Verify PDF attachment in sent email
+        self.assertTrue(len(mail.outbox) >= 1)
+        sent_email = mail.outbox[-1]
+        self.assertIn(unreg_email, sent_email.to)
+        self.assertTrue(any(att[0].endswith(".pdf") for att in sent_email.attachments))
+
+        # Verify public verification without login
+        self.client.logout()
+        verify_res = self.client.get(f"/api/certificates/verify/{cert_number}/")
+        self.assertEqual(verify_res.status_code, 200)
+        self.assertEqual(verify_res.data["certificate_number"], cert_number)
+        self.assertEqual(verify_res.data["verification_result"], "VERIFIED")
+        self.assertTrue(verify_res.data["found"])
+
+    def test_unregistered_recipient_account_claiming_lifecycle(self):
+        """Lifecycle: Unregistered cert issued -> user registers -> email verified -> auto-claimed."""
+        from apps.certificates.services import claim_unclaimed_certificates_for_user
+        from apps.notifications.models import Notification
+        from apps.audit.models import AuditLog
+
+        # 1. Issue cert to unregistered email
+        unreg_email = "lifecycle.student@example.com"
+        cert = Certificate.objects.create(
+            owner=None,
+            recipient_email=unreg_email,
+            recipient_name="Lifecycle Student",
+            title="Course of Excellence",
+            course_name="Full Stack Python",
+            issuer="OneSmarter, Inc.",
+            certificate_number="OSCV-2026-LIFE001",
+            issue_date="2026-10-14",
+            start_date="2026-07-01",
+            end_date="2026-10-01",
+        )
+        self.assertFalse(cert.is_claimed)
+
+        # 2. Student registers with the same email
+        reg_res = self.client.post("/api/accounts/register/", {
+            "username": "lifecyclestudent",
+            "email": unreg_email,
+            "password": "StrongPassword@123",
+            "password_confirm": "StrongPassword@123",
+        }, format="json")
+        self.assertEqual(reg_res.status_code, 201)
+
+        user = get_user_model().objects.get(username="lifecyclestudent")
+        self.assertFalse(user.profile.email_verified)
+
+        # Attempt claiming before email is verified: should NOT claim
+        claimed_before = claim_unclaimed_certificates_for_user(user)
+        self.assertEqual(len(claimed_before), 0)
+        cert.refresh_from_db()
+        self.assertIsNone(cert.owner)
+
+        # 3. Verify email directly via profile and service to test claiming logic
+        user.profile.email_verified = True
+        user.profile.save()
+
+        claimed = claim_unclaimed_certificates_for_user(user)
+        self.assertEqual(len(claimed), 1)
+
+        cert.refresh_from_db()
+        self.assertEqual(cert.owner, user)
+        self.assertTrue(cert.is_claimed)
+
+        # Verify in-app notification created
+        notif = Notification.objects.filter(recipient=user, certificate=cert).first()
+        self.assertIsNotNone(notif)
+        self.assertIn("Certificate Linked", notif.title)
+
+        # Verify audit log recorded
+        audit = AuditLog.objects.filter(target_id=cert.id, action=AuditLog.Action.CERTIFICATE_CLAIMED).first()
+        self.assertIsNotNone(audit)
+
+        # 4. Different email cannot claim already claimed certificate
+        diff_user = get_user_model().objects.create_user(
+            username="diffuser",
+            email="different@example.com",
+            password="StrongPassword@123",
+        )
+        diff_user.profile.email_verified = True
+        diff_user.profile.save()
+        claimed_diff = claim_unclaimed_certificates_for_user(diff_user)
+        self.assertEqual(len(claimed_diff), 0)
+        cert.refresh_from_db()
+        self.assertEqual(cert.owner, user)
 
 
 

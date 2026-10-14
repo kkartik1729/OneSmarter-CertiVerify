@@ -14,6 +14,7 @@ from apps.accounts.services.email_service import (
     send_password_changed_notification_email,
     send_mfa_reset_notification_email,
     send_password_reset_otp_email,
+    send_email_verification_otp_email,
 )
 
 __all__ = [
@@ -26,4 +27,5 @@ __all__ = [
     "send_password_changed_notification_email",
     "send_mfa_reset_notification_email",
     "send_password_reset_otp_email",
+    "send_email_verification_otp_email",
 ]

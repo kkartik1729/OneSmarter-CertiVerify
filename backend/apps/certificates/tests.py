@@ -1,0 +1,812 @@
+from datetime import date
+
+from django.contrib.auth import get_user_model
+from django.test import TestCase
+from rest_framework.test import APIClient
+
+from apps.certificates.models import Certificate
+
+User = get_user_model()
+
+
+class CertificateModelTests(TestCase):
+    """Test certificate model behavior."""
+
+    def setUp(self):
+        self.user = User.objects.create_user(
+            username="certificate_user",
+            password="TestPass123!",
+        )
+
+    def create_certificate(self, **overrides):
+        data = {
+            "owner": self.user,
+            "title": "Python Programming",
+            "issuer": "OneSmarter Inc.",
+            "certificate_number": "CERT-TEST-001",
+            "recipient_name": "Test Recipient",
+            "issue_date": date(2026, 10, 9),
+        }
+        data.update(overrides)
+        return Certificate.objects.create(**data)
+
+    def test_certificate_number_is_normalized(self):
+        certificate = self.create_certificate(
+            certificate_number=" cert-test-abc "
+        )
+        self.assertEqual(
+            certificate.certificate_number,
+            "CERT-TEST-ABC",
+        )
+
+    def test_certificate_defaults_to_pending(self):
+        certificate = self.create_certificate()
+        self.assertEqual(
+            certificate.status,
+            Certificate.Status.PENDING,
+        )
+
+    def test_certificate_file_is_optional(self):
+        certificate = self.create_certificate()
+        self.assertFalse(certificate.file)
+
+
+class CertificateAPITests(TestCase):
+    """Test certificate API endpoints."""
+
+    def setUp(self):
+        self.user = User.objects.create_user(
+            username="certificate_api_user",
+            password="TestPass123!",
+        )
+        self.other_user = User.objects.create_user(
+            username="other_certificate_user",
+            password="TestPass123!",
+        )
+        self.client = APIClient()
+
+        self.certificate = Certificate.objects.create(
+            owner=self.user,
+            title="Python Programming",
+            issuer="OneSmarter Inc.",
+            certificate_number="CERT-API-001",
+            recipient_name="Test Recipient",
+            issue_date=date(2026, 10, 9),
+            status=Certificate.Status.VERIFIED,
+        )
+
+    def test_existing_certificate_is_verified(self):
+        response = self.client.get(
+            "/api/certificates/verify/CERT-API-001/"
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.data["found"])
+        self.assertEqual(
+            response.data["verification_result"],
+            "VERIFIED",
+        )
+        self.assertEqual(
+            response.data["message"],
+            "This certificate number matches a record issued by OneSmarter-CertiVerify. The presence of this record confirms the certificate was issued through this system.",
+        )
+
+    def test_verification_is_case_insensitive(self):
+        response = self.client.get(
+            "/api/certificates/verify/cert-api-001/"
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.data["found"])
+        self.assertEqual(
+            response.data["verification_result"],
+            "VERIFIED",
+        )
+
+    def test_pending_certificate_is_verified_if_found(self):
+        self.certificate.status = Certificate.Status.PENDING
+        self.certificate.save()
+
+        response = self.client.get(
+            "/api/certificates/verify/CERT-API-001/"
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.data["found"])
+        self.assertEqual(
+            response.data["verification_result"],
+            "VERIFIED",
+        )
+
+    def test_rejected_certificate_is_verified_if_found(self):
+        self.certificate.status = Certificate.Status.REJECTED
+        self.certificate.rejection_reason = "Invalid certificate"
+        self.certificate.save()
+
+        response = self.client.get(
+            "/api/certificates/verify/CERT-API-001/"
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.data["found"])
+        self.assertEqual(
+            response.data["verification_result"],
+            "VERIFIED",
+        )
+
+    def test_unknown_certificate_returns_not_verified(self):
+        response = self.client.get(
+            "/api/certificates/verify/UNKNOWN-CERT/"
+        )
+
+        self.assertEqual(response.status_code, 404)
+        self.assertFalse(response.data["found"])
+        self.assertEqual(
+            response.data["verification_result"],
+            "NOT_VERIFIED",
+        )
+
+    def test_verification_is_public_without_authentication(self):
+        response = self.client.get(
+            "/api/certificates/verify/CERT-API-001/"
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.data["found"])
+
+    def test_certificate_list_requires_authentication(self):
+        response = self.client.get("/api/certificates/")
+
+        self.assertEqual(response.status_code, 401)
+
+    def test_user_sees_only_own_certificates(self):
+        Certificate.objects.create(
+            owner=self.other_user,
+            title="Java Programming",
+            issuer="Another Issuer",
+            certificate_number="CERT-OTHER-001",
+            recipient_name="Other Recipient",
+            issue_date=date(2026, 10, 9),
+        )
+
+        self.client.force_authenticate(user=self.user)
+        response = self.client.get("/api/certificates/")
+
+        self.assertEqual(response.status_code, 200)
+
+        if isinstance(response.data, dict):
+            results = response.data.get("results", [])
+        else:
+            results = response.data
+
+        certificate_numbers = [
+            item["certificate_number"] for item in results
+        ]
+
+        self.assertIn("CERT-API-001", certificate_numbers)
+        self.assertNotIn("CERT-OTHER-001", certificate_numbers)
+
+    def test_user_can_create_certificate_without_file(self):
+        self.client.force_authenticate(user=self.user)
+
+        response = self.client.post(
+            "/api/certificates/",
+            {
+                "title": "Django Development",
+                "issuer": "OneSmarter Inc.",
+                "certificate_number": "cert-new-001",
+                "recipient_name": "Test Recipient",
+                "issue_date": "2026-10-10",
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(
+            response.data["certificate_number"],
+            "CERT-NEW-001",
+        )
+        self.assertEqual(
+            response.data["status"],
+            Certificate.Status.PENDING,
+        )
+        self.assertTrue(
+            Certificate.objects.filter(
+                owner=self.user,
+                certificate_number="CERT-NEW-001",
+            ).exists()
+        )
+
+    def test_admin_can_retrieve_user_selection_list(self):
+        admin_user = User.objects.create_superuser(
+            username="admin_selector_user",
+            password="TestPass123!",
+            email="admin_selector@example.com",
+        )
+        self.client.force_authenticate(user=admin_user)
+        response = self.client.get("/api/accounts/admin/users/")
+
+        self.assertEqual(response.status_code, 200)
+        data = response.data if isinstance(response.data, list) else response.data.get("results", [])
+        usernames = [u["username"] for u in data]
+        self.assertIn(self.user.username, usernames)
+        # Ensure no sensitive fields are present
+        for u in data:
+            self.assertNotIn("password", u)
+            self.assertNotIn("mfa_secret", u)
+            self.assertNotIn("totp_secret", u)
+
+    def test_normal_user_cannot_retrieve_user_selection_list(self):
+        self.client.force_authenticate(user=self.user)
+        response = self.client.get("/api/accounts/admin/users/")
+        self.assertEqual(response.status_code, 403)
+
+    def test_admin_creates_certificate_assigned_to_selected_user(self):
+        admin_user = User.objects.create_superuser(
+            username="admin_creator_user",
+            password="TestPass123!",
+            email="admin_creator@example.com",
+        )
+        self.client.force_authenticate(user=admin_user)
+
+        response = self.client.post(
+            "/api/certificates/",
+            {
+                "title": "Cloud Architecture",
+                "issuer": "OneSmarter Inc.",
+                "certificate_number": "CERT-OWNER-001",
+                "recipient_name": "Kartik Hande",
+                "issue_date": "2026-10-12",
+                "owner_id": self.user.id,
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.data["certificate_number"], "CERT-OWNER-001")
+        self.assertEqual(response.data["owner_username"], self.user.username)
+
+        # Verify PostgreSQL database owner
+        cert = Certificate.objects.get(certificate_number="CERT-OWNER-001")
+        self.assertEqual(cert.owner_id, self.user.id)
+        self.assertEqual(cert.owner.username, self.user.username)
+
+    def test_admin_creation_requires_valid_owner(self):
+        admin_user = User.objects.create_superuser(
+            username="admin_req_owner_user",
+            password="TestPass123!",
+            email="admin_req@example.com",
+        )
+        self.client.force_authenticate(user=admin_user)
+
+        # Creating without owner_id
+        response = self.client.post(
+            "/api/certificates/",
+            {
+                "title": "Cloud Architecture",
+                "issuer": "OneSmarter Inc.",
+                "certificate_number": "CERT-NO-OWNER-001",
+                "recipient_name": "Kartik Hande",
+                "issue_date": "2026-10-12",
+            },
+            format="json",
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("owner_id", response.data)
+
+    def test_normal_user_cannot_assign_certificate_to_another_account(self):
+        self.client.force_authenticate(user=self.user)
+
+        # Normal user attempts to pass another user's ID as owner
+        response = self.client.post(
+            "/api/certificates/",
+            {
+                "title": "Security Specialist",
+                "issuer": "OneSmarter Inc.",
+                "certificate_number": "CERT-SPOOF-001",
+                "recipient_name": "Spoofed Recipient",
+                "issue_date": "2026-10-12",
+                "owner_id": self.other_user.id,
+            },
+            format="json",
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("owner", response.data)
+
+    def test_assigned_user_sees_certificate_in_my_certificates(self):
+        # Create certificate owned by self.user
+        Certificate.objects.create(
+            owner=self.user,
+            title="Assigned Certificate",
+            issuer="OneSmarter Inc.",
+            certificate_number="CERT-ASSIGNED-001",
+            recipient_name="Assigned User",
+            issue_date=date(2026, 10, 12),
+        )
+
+        # Authenticate as self.user
+        self.client.force_authenticate(user=self.user)
+        response = self.client.get("/api/certificates/")
+        self.assertEqual(response.status_code, 200)
+
+        data = response.data if isinstance(response.data, list) else response.data.get("results", [])
+        cert_nums = [c["certificate_number"] for c in data]
+        self.assertIn("CERT-ASSIGNED-001", cert_nums)
+
+        # Authenticate as other_user -> must NOT see it
+        self.client.force_authenticate(user=self.other_user)
+        response2 = self.client.get("/api/certificates/")
+        self.assertEqual(response2.status_code, 200)
+        data2 = response2.data if isinstance(response2.data, list) else response2.data.get("results", [])
+        cert_nums2 = [c["certificate_number"] for c in data2]
+        self.assertNotIn("CERT-ASSIGNED-001", cert_nums2)
+
+    def test_other_user_cannot_access_private_certificate_detail(self):
+        # Certificate belongs to self.user
+        self.client.force_authenticate(user=self.other_user)
+        response = self.client.get(f"/api/certificates/{self.certificate.id}/")
+        self.assertEqual(response.status_code, 403)
+
+    def test_admin_can_reassign_certificate_owner(self):
+        admin_user = User.objects.create_superuser(
+            username="admin_reassigner",
+            password="TestPass123!",
+            email="reassign@example.com",
+        )
+        self.client.force_authenticate(user=admin_user)
+
+        response = self.client.patch(
+            f"/api/certificates/{self.certificate.id}/",
+            {"owner_id": self.other_user.id},
+            format="json",
+        )
+        self.assertEqual(response.status_code, 200)
+
+        self.certificate.refresh_from_db()
+        self.assertEqual(self.certificate.owner_id, self.other_user.id)
+
+    def test_normal_user_cannot_reassign_certificate_owner(self):
+        self.client.force_authenticate(user=self.user)
+
+        response = self.client.patch(
+            f"/api/certificates/{self.certificate.id}/",
+            {"owner_id": self.other_user.id},
+            format="json",
+        )
+        self.assertEqual(response.status_code, 403)
+
+
+class CertificateGenerationTests(TestCase):
+    """Test the complete certificate generation and distribution suite."""
+
+    def setUp(self):
+        self.client = APIClient()
+        self.admin = User.objects.create_superuser(
+            username="admin_gen",
+            password="TestPassword123!",
+            email="admin_gen@onesmarter.com",
+        )
+        if hasattr(self.admin, "profile"):
+            self.admin.profile.role = "ADMIN"
+            self.admin.profile.save()
+
+        self.student = User.objects.create_user(
+            username="student_kartik",
+            password="TestPassword123!",
+            email="kartik@example.com",
+            first_name="Kartik",
+            last_name="Hande",
+        )
+        self.other_student = User.objects.create_user(
+            username="other_student",
+            password="TestPassword123!",
+            email="other@example.com",
+        )
+
+        # Create dummy template image
+        from io import BytesIO
+        from PIL import Image
+        from django.core.files.uploadedfile import SimpleUploadedFile
+        from apps.certificates.models import CertificateTemplate, Course
+
+        img = Image.new("RGB", (1000, 750), color=(250, 248, 240))
+        buf = BytesIO()
+        img.save(buf, format="PNG")
+        buf.seek(0)
+        uploaded = SimpleUploadedFile("template.png", buf.read(), content_type="image/png")
+
+        self.template = CertificateTemplate.objects.create(
+            name="OneSmarter Official Template",
+            image=uploaded,
+            uploaded_by=self.admin,
+        )
+
+        self.course = Course.objects.create(
+            name="Full Stack Python",
+            title="Certificate of Completion",
+            issuer="OneSmarter, Inc.",
+            start_date=date(2026, 7, 1),
+            end_date=date(2026, 10, 1),
+            created_by=self.admin,
+        )
+
+    def test_csv_template_download(self):
+        self.client.force_authenticate(user=self.admin)
+        res = self.client.get("/api/certificates/generate/csv-template/")
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(res["Content-Type"], "text/csv")
+        content = res.content.decode("utf-8")
+        self.assertIn("student_name,student_email", content)
+        self.assertNotIn("course_name", content)
+
+    def test_validate_simplified_two_column_csv(self):
+        self.client.force_authenticate(user=self.admin)
+        csv_content = (
+            "student_name,student_email\n"
+            "Kartik Hande,kartik@example.com\n"
+        )
+        from django.core.files.uploadedfile import SimpleUploadedFile
+        csv_file = SimpleUploadedFile("two_column.csv", csv_content.encode("utf-8"), content_type="text/csv")
+
+        res = self.client.post("/api/certificates/generate/validate-csv/", {
+            "file": csv_file,
+            "course_id": self.course.id,
+            "batch_course_name": "Overridden Batch Course",
+            "batch_start_date": "2026-07-01",
+            "batch_end_date": "2026-10-01",
+            "batch_issue_date": "2026-10-14",
+        }, format="multipart")
+
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(res.data["total_rows"], 1)
+        self.assertEqual(res.data["valid_rows_count"], 1)
+        row = res.data["rows"][0]
+        self.assertTrue(row["is_valid"])
+        self.assertEqual(row["student_name"], "Kartik Hande")
+        self.assertEqual(row["course_name"], "Overridden Batch Course")
+        self.assertEqual(row["start_date"], "01/07/2026")
+
+
+    def test_course_validation(self):
+        self.client.force_authenticate(user=self.admin)
+        # Invalid date: end_date < start_date
+        res = self.client.post("/api/certificates/courses/", {
+            "name": "Invalid Course",
+            "title": "Cert",
+            "issuer": "Issuer",
+            "start_date": "2026-10-01",
+            "end_date": "2026-09-01",
+        }, format="json")
+        self.assertEqual(res.status_code, 400)
+        self.assertIn("end_date", res.data)
+
+    def test_validate_csv_with_registered_and_unregistered_users(self):
+        self.client.force_authenticate(user=self.admin)
+        csv_content = (
+            "student_name,student_email,course_name,start_date,end_date,issue_date\n"
+            "Kartik Hande,kartik@example.com,Full Stack Python,2026-07-01,2026-10-01,2026-10-13\n"
+            "Unknown Student,unknown@example.com,Full Stack Python,2026-07-01,2026-10-01,2026-10-13\n"
+        )
+        from django.core.files.uploadedfile import SimpleUploadedFile
+        csv_file = SimpleUploadedFile("roster.csv", csv_content.encode("utf-8"), content_type="text/csv")
+
+        res = self.client.post("/api/certificates/generate/validate-csv/", {
+            "file": csv_file,
+            "course_id": self.course.id,
+        }, format="multipart")
+
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(res.data["total_rows"], 2)
+        self.assertEqual(res.data["valid_rows_count"], 1)
+        self.assertEqual(res.data["invalid_rows_count"], 1)
+        self.assertFalse(res.data["is_valid"])
+
+        rows = res.data["rows"]
+        self.assertTrue(rows[0]["is_valid"])
+        self.assertEqual(rows[0]["user_id"], self.student.id)
+
+        self.assertFalse(rows[1]["is_valid"])
+        self.assertTrue(any("not registered" in err for err in rows[1]["errors"]))
+
+    def test_single_certificate_generation_and_verification(self):
+        self.client.force_authenticate(user=self.admin)
+        res = self.client.post("/api/certificates/generate/single/", {
+            "course_id": self.course.id,
+            "template_id": self.template.id,
+            "user_id": self.student.id,
+            "student_name": "Kartik Hande",
+            "start_date": "2026-07-01",
+            "end_date": "2026-10-01",
+            "issue_date": "2026-10-13",
+        }, format="json")
+
+        self.assertEqual(res.status_code, 201)
+        cert_num = res.data["certificate_number"]
+        self.assertTrue(cert_num.startswith("OSCV-"))
+
+        # Verify database record
+        cert = Certificate.objects.get(certificate_number=cert_num)
+        self.assertEqual(cert.owner, self.student)
+        self.assertEqual(cert.recipient_name, "Kartik Hande")
+        self.assertTrue(cert.file)
+        self.assertTrue(cert.file_sha256)
+
+        # Verify in-app notification created
+        from apps.notifications.models import Notification
+        notif = Notification.objects.filter(recipient=self.student, certificate=cert).first()
+        self.assertIsNotNone(notif)
+
+        # Public verification works
+        verify_client = APIClient()
+        verify_res = verify_client.get(f"/api/certificates/verify/{cert_num}/")
+        self.assertEqual(verify_res.status_code, 200)
+        self.assertEqual(verify_res.data["verification_result"], "VERIFIED")
+
+        # Owner can view image
+        self.client.force_authenticate(user=self.student)
+        # Verify PDF document is stored and can be downloaded by owner
+        self.assertTrue(cert.has_pdf)
+        pdf_res = self.client.get(f"/api/certificates/{cert.id}/pdf/download/")
+        self.assertEqual(pdf_res.status_code, 200)
+        self.assertIn("application/pdf", pdf_res["Content-Type"])
+
+        # Another student cannot view image
+        self.client.force_authenticate(user=self.other_student)
+        forbidden_res = self.client.get(f"/api/certificates/{cert.id}/image/")
+        self.assertEqual(forbidden_res.status_code, 403)
+
+    def test_template_deletion_protection(self):
+        from apps.certificates.models import GenerationBatch
+        self.client.force_authenticate(user=self.admin)
+        # Template in use by batch cannot be deleted
+        GenerationBatch.objects.create(
+            course=self.course,
+            template=self.template,
+            created_by=self.admin,
+        )
+        del_res = self.client.delete(f"/api/certificates/templates/{self.template.id}/")
+        self.assertEqual(del_res.status_code, 400)
+        self.assertIn("Cannot delete template", str(del_res.data))
+
+        # Unused template can be safely deleted
+        from django.core.files.uploadedfile import SimpleUploadedFile
+        from apps.certificates.models import CertificateTemplate
+        unused_img = SimpleUploadedFile("unused.png", b"\x89PNG\r\n\x1a\n" + b"\x00" * 50, content_type="image/png")
+        unused_tpl = CertificateTemplate.objects.create(name="Unused Template", image=unused_img)
+        del_res2 = self.client.delete(f"/api/certificates/templates/{unused_tpl.id}/")
+        self.assertEqual(del_res2.status_code, 204)
+        self.assertFalse(CertificateTemplate.objects.filter(id=unused_tpl.id).exists())
+
+    def test_bulk_generation_and_duplicate_skipping(self):
+        self.client.force_authenticate(user=self.admin)
+        rows = [
+            {
+                "row_number": 2,
+                "student_name": "Kartik Hande",
+                "student_email": "kartik@example.com",
+                "course_name": self.course.name,
+                "start_date": "2026-07-01",
+                "end_date": "2026-10-01",
+                "issue_date": "2026-10-13",
+            }
+        ]
+
+        # First run: creates certificate
+        res1 = self.client.post("/api/certificates/generate/bulk/", {
+            "course_id": self.course.id,
+            "template_id": self.template.id,
+            "rows": rows,
+        }, format="json")
+        self.assertEqual(res1.status_code, 201)
+        self.assertEqual(res1.data["successful"], 1)
+        self.assertEqual(res1.data["skipped_duplicates"], 0)
+
+        # Second run: duplicate certificate skipped
+        res2 = self.client.post("/api/certificates/generate/bulk/", {
+            "course_id": self.course.id,
+            "template_id": self.template.id,
+            "rows": rows,
+        }, format="json")
+        self.assertEqual(res2.status_code, 201)
+        self.assertEqual(res2.data["successful"], 0)
+        self.assertEqual(res2.data["skipped_duplicates"], 1)
+
+    def test_retry_email_endpoint(self):
+        self.client.force_authenticate(user=self.admin)
+        cert = Certificate.objects.create(
+            owner=self.student,
+            title="Cert",
+            issuer="OneSmarter, Inc.",
+            certificate_number="OSCV-RETRY-001",
+            recipient_name="Kartik Hande",
+            issue_date=date(2026, 10, 13),
+            course=self.course,
+            email_sent=False,
+            email_error="SMTP server temporarily unreachable",
+        )
+
+        res = self.client.post(f"/api/certificates/{cert.id}/retry-email/")
+        self.assertEqual(res.status_code, 200)
+        cert.refresh_from_db()
+        # Either succeeded or recorded safe error, never crashes
+        self.assertIn("success", res.data)
+
+    def test_dd_mm_yyyy_date_parsing_and_name_validation(self):
+        """Test strict DD/MM/YYYY dates and 1-29 char student name constraints."""
+        from apps.certificates.views import parse_date_flexible, validate_student_name
+
+        # 1. 24/07/2026 -> 24 July 2026
+        d1, err1 = parse_date_flexible("24/07/2026")
+        self.assertIsNone(err1)
+        self.assertEqual(d1, date(2026, 7, 24))
+
+        # 2. 24/08/2026 -> 24 August 2026
+        d2, err2 = parse_date_flexible("24/08/2026")
+        self.assertIsNone(err2)
+        self.assertEqual(d2, date(2026, 8, 24))
+
+        # 3. 13/10/2026 -> 13 October 2026
+        d3, err3 = parse_date_flexible("13/10/2026")
+        self.assertIsNone(err3)
+        self.assertEqual(d3, date(2026, 10, 13))
+
+        # 4. Strict Day/Month order (04/05/2026 -> 4 May 2026, NOT April 5)
+        d4, err4 = parse_date_flexible("04/05/2026")
+        self.assertIsNone(err4)
+        self.assertEqual(d4.day, 4)
+        self.assertEqual(d4.month, 5)
+
+        # 5. Invalid date
+        d_inv, err_inv = parse_date_flexible("31/02/2026")
+        self.assertIsNone(d_inv)
+        self.assertIn("invalid", err_inv.lower())
+
+        # 6. Student name length: 1–29 chars accepted
+        valid_name, n_err = validate_student_name("  Kartik Hande  ")
+        self.assertIsNone(n_err)
+        self.assertEqual(valid_name, "Kartik Hande")
+        self.assertEqual(len(valid_name), 12)
+
+        # 7. Student name length: 30+ chars rejected
+        long_name = "Alexander Bartholomew Christopher"  # 33 chars
+        inv_name, long_err = validate_student_name(long_name)
+        self.assertIsNone(inv_name)
+        self.assertIn("1–29 characters", long_err)
+
+        # 8. Empty student name rejected
+        empty_name, empty_err = validate_student_name("   ")
+        self.assertIsNone(empty_name)
+        self.assertIn("required", empty_err.lower())
+
+    def test_csv_validation_with_dd_mm_yyyy_format(self):
+        """Test that CSV with DD/MM/YYYY dates validates correctly."""
+        self.client.force_authenticate(user=self.admin)
+        from django.core.files.uploadedfile import SimpleUploadedFile
+
+        csv_content = (
+            "student_name,student_email,course_name,start_date,end_date,issue_date\n"
+            "Kartik Hande,kartik@example.com,Full Stack Python,24/07/2026,24/08/2026,13/10/2026\n"
+        )
+        csv_file = SimpleUploadedFile("dd_mm_yyyy.csv", csv_content.encode("utf-8"), content_type="text/csv")
+        res = self.client.post("/api/certificates/generate/validate-csv/", {
+            "file": csv_file,
+            "course_id": self.course.id,
+        }, format="multipart")
+
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(res.data["valid_rows_count"], 1)
+        self.assertEqual(res.data["invalid_rows_count"], 0)
+        row = res.data["rows"][0]
+        self.assertTrue(row["is_valid"])
+        self.assertEqual(row["start_date"], "24/07/2026")
+        self.assertEqual(row["end_date"], "24/08/2026")
+        self.assertEqual(row["issue_date"], "13/10/2026")
+
+    def test_manual_generation_rejects_names_with_30_plus_chars(self):
+        """Test that manual generation rejects student names of 30 or more characters."""
+        self.client.force_authenticate(user=self.admin)
+        res = self.client.post("/api/certificates/generate/single/", {
+            "course_id": self.course.id,
+            "template_id": self.template.id,
+            "user_id": self.student.id,
+            "student_name": "This is a name with thirty or more chars",
+            "start_date": "24/07/2026",
+            "end_date": "24/08/2026",
+            "issue_date": "13/10/2026",
+        }, format="json")
+
+        self.assertEqual(res.status_code, 400)
+        self.assertIn("1–29 characters", res.data.get("detail", ""))
+
+    def test_image_access_with_token_query_parameter(self):
+        """Test that certificate image can be accessed using ?token= query parameter."""
+        # Generate certificate for student
+        self.client.force_authenticate(user=self.admin)
+        res = self.client.post("/api/certificates/generate/single/", {
+            "course_id": self.course.id,
+            "template_id": self.template.id,
+            "user_id": self.student.id,
+            "student_name": "Kartik Hande",
+            "start_date": "24/07/2026",
+            "end_date": "24/08/2026",
+            "issue_date": "13/10/2026",
+        }, format="json")
+        self.assertEqual(res.status_code, 201)
+        cert_id = res.data["id"]
+        cert_num = res.data["certificate_number"]
+
+        # Generate JWT access token for student
+        from rest_framework_simplejwt.tokens import RefreshToken
+        token = str(RefreshToken.for_user(self.student).access_token)
+
+        # Unauthenticated client requesting with ?token= query parameter
+        unauth_client = APIClient()
+        img_res = unauth_client.get(f"/api/certificates/{cert_id}/image/?token={token}")
+        self.assertEqual(img_res.status_code, 200)
+        self.assertIn("image/png", img_res["Content-Type"])
+
+        # Download flag sets Content-Disposition
+        dl_res = unauth_client.get(f"/api/certificates/{cert_id}/image/?token={token}&download=true")
+        self.assertEqual(dl_res.status_code, 200)
+        self.assertIn("attachment", dl_res["Content-Disposition"])
+        self.assertIn(cert_num, dl_res["Content-Disposition"])
+
+
+
+
+
+class PublicCredentialUrlTests(TestCase):
+    def test_url_validation_rejects_localhost_and_private_ips(self):
+        from apps.certificates.helpers import is_valid_public_https_url
+        self.assertFalse(is_valid_public_https_url('http://localhost:5173'))
+        self.assertFalse(is_valid_public_https_url('https://localhost:5173'))
+        self.assertFalse(is_valid_public_https_url('http://127.0.0.1:8000'))
+        self.assertFalse(is_valid_public_https_url('https://127.0.0.1'))
+        self.assertFalse(is_valid_public_https_url('https://192.168.1.100'))
+        self.assertFalse(is_valid_public_https_url('https://10.0.0.1'))
+        self.assertFalse(is_valid_public_https_url('http://onesmarter.com'))
+        self.assertFalse(is_valid_public_https_url('https://YOUR-DEPLOYED-DOMAIN'))
+        self.assertFalse(is_valid_public_https_url('https://example.com'))
+
+    def test_url_validation_accepts_valid_public_https(self):
+        from apps.certificates.helpers import is_valid_public_https_url
+        self.assertTrue(is_valid_public_https_url('https://certiverify.onesmarter.com'))
+        self.assertTrue(is_valid_public_https_url('https://onesmarter.com/'))
+
+    def test_build_public_credential_url_with_configured_domain(self):
+        from apps.certificates.helpers import build_public_credential_url
+        with self.settings(PUBLIC_FRONTEND_URL='https://certiverify.onesmarter.com'):
+            url, is_public = build_public_credential_url('OSCV-2026-36966FF4')
+            self.assertTrue(is_public)
+            self.assertEqual(url, 'https://certiverify.onesmarter.com/verify-certificate/OSCV-2026-36966FF4')
+
+    def test_build_public_credential_url_without_configured_domain(self):
+        from apps.certificates.helpers import build_public_credential_url
+        with self.settings(PUBLIC_FRONTEND_URL='', FRONTEND_URL='http://localhost:5173'):
+            url, is_public = build_public_credential_url('OSCV-2026-36966FF4')
+            self.assertFalse(is_public)
+            self.assertIsNone(url)
+
+    def test_serializer_outputs_credential_url_fields(self):
+        from apps.certificates.serializers import CertificateSerializer
+        user = get_user_model().objects.create_user(
+            username='cred_student',
+            email='cred_student@example.com',
+            password='StrongPassword@123',
+            )
+        cert = Certificate.objects.create(
+            owner=user,
+            title='Full Stack React Development',
+            issuer='OneSmarter, Inc.',
+            certificate_number='OSCV-2026-TESTURL1',
+            recipient_name='Test Student',
+            issue_date='2026-10-14',
+        )
+        with self.settings(PUBLIC_FRONTEND_URL='https://certiverify.onesmarter.com'):
+            serializer = CertificateSerializer(cert)
+            self.assertTrue(serializer.data['is_credential_url_public'])
+            self.assertEqual(
+                serializer.data['credential_url'],
+                'https://certiverify.onesmarter.com/verify-certificate/OSCV-2026-TESTURL1',
+            )
+

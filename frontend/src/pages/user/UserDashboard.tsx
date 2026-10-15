@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { Award, ShieldCheck, History, ArrowRight, Search, Eye, Download } from 'lucide-react';
+import { Award, ShieldCheck, History, ArrowRight, Search, Eye, Download, AlertTriangle } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import { certificateService, verificationHistoryService, errMsg } from '../../services';
 import type { Cert, VerificationAttemptItem } from '../../types';
@@ -9,14 +9,21 @@ import { StatCardSkeleton } from '../../components/LoadingSkeleton';
 import StatusBadge from '../../components/StatusBadge';
 import CertificateDetails from '../../components/CertificateDetails';
 import ErrorMessage from '../../components/ErrorMessage';
+import { toast } from '../../lib/ui';
 
 export default function UserDashboard() {
-  const { user } = useAuth();
+  const { user, verifyEmail, resendVerification } = useAuth();
   const [certs, setCerts] = useState<Cert[]>([]);
   const [verifications, setVerifications] = useState<VerificationAttemptItem[]>([]);
   const [selectedCert, setSelectedCert] = useState<Cert | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+
+  // Email verification state
+  const [otp, setOtp] = useState('');
+  const [verifyingEmail, setVerifyingEmail] = useState(false);
+  const [resendingCode, setResendingCode] = useState(false);
+  const [verifyError, setVerifyError] = useState<string | null>(null);
 
   const loadData = async () => {
     setLoading(true);
@@ -69,8 +76,97 @@ export default function UserDashboard() {
   const recentCerts = certs.slice(0, 5);
   const recentLookups = verifications.slice(0, 5);
 
+  const handleVerifyEmail = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!otp.trim()) {
+      setVerifyError('Please enter the 6-digit verification code.');
+      return;
+    }
+    setVerifyingEmail(true);
+    setVerifyError(null);
+    try {
+      const res = await verifyEmail({ email: user?.email, otp: otp.trim() });
+      toast(
+        res.claimedCount > 0
+          ? `Email verified! ${res.claimedCount} certificate(s) linked to your account.`
+          : 'Email verified successfully!'
+      );
+      setOtp('');
+      await loadData();
+    } catch (err) {
+      setVerifyError(errMsg(err));
+    } finally {
+      setVerifyingEmail(false);
+    }
+  };
+
+  const handleResend = async () => {
+    if (!user?.email) return;
+    setResendingCode(true);
+    setVerifyError(null);
+    try {
+      const msg = await resendVerification(user.email);
+      toast(msg);
+    } catch (err) {
+      setVerifyError(errMsg(err));
+    } finally {
+      setResendingCode(false);
+    }
+  };
+
   return (
     <div className="space-y-8">
+      {/* Email Verification Required Banner */}
+      {user && user.emailVerified === false && (
+        <div className="p-5 sm:p-6 rounded-2xl bg-amber-500/10 border border-amber-500/30 text-amber-900 dark:text-amber-200 shadow-sm">
+          <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
+            <div className="flex items-start gap-3.5">
+              <AlertTriangle className="w-5 h-5 text-amber-600 dark:text-amber-400 flex-shrink-0 mt-0.5" />
+              <div>
+                <h4 className="text-sm font-bold text-amber-950 dark:text-amber-200">
+                  Email Verification Required to Claim Issued Certificates
+                </h4>
+                <p className="text-xs text-amber-800/90 dark:text-amber-300/80 mt-1 max-w-xl">
+                  Your registered email <span className="font-semibold">{user.email}</span> is not verified yet.
+                  Enter the 6-digit code sent to your inbox to link any previously issued certificates.
+                </p>
+                {verifyError && (
+                  <p className="text-xs font-semibold text-rose-600 dark:text-rose-400 mt-2">
+                    {verifyError}
+                  </p>
+                )}
+              </div>
+            </div>
+
+            <form onSubmit={handleVerifyEmail} className="flex flex-wrap items-center gap-2.5">
+              <input
+                type="text"
+                placeholder="6-digit code"
+                maxLength={6}
+                value={otp}
+                onChange={e => setOtp(e.target.value)}
+                className="w-32 px-3 py-2 text-center text-sm font-mono tracking-widest bg-white dark:bg-slate-900 border border-amber-300 dark:border-amber-700/60 rounded-xl focus:outline-none focus:ring-2 focus:ring-amber-500 text-slate-900 dark:text-white"
+              />
+              <button
+                type="submit"
+                disabled={verifyingEmail || !otp.trim()}
+                className="px-4 py-2 bg-amber-600 hover:bg-amber-500 text-white rounded-xl text-xs font-semibold shadow-sm transition disabled:opacity-50"
+              >
+                {verifyingEmail ? 'Verifying…' : 'Verify & Link'}
+              </button>
+              <button
+                type="button"
+                onClick={handleResend}
+                disabled={resendingCode}
+                className="px-3 py-2 text-xs font-medium text-amber-800 dark:text-amber-300 hover:underline disabled:opacity-50"
+              >
+                {resendingCode ? 'Sending…' : 'Resend code'}
+              </button>
+            </form>
+          </div>
+        </div>
+      )}
+
       {/* Welcome Banner */}
       <div className="bg-gradient-to-r from-slate-900 via-teal-950 to-slate-900 rounded-2xl p-6 sm:p-8 text-white shadow-md border border-slate-800 flex flex-col md:flex-row md:items-center justify-between gap-6">
         <div>

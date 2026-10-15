@@ -2,7 +2,10 @@
 export const EP = {
   // accounts
   login: '/accounts/login/',
+  googleLogin: '/accounts/google-login/',
   register: '/accounts/register/',
+  verifyEmail: '/accounts/verify-email/',
+  resendVerification: '/accounts/resend-verification/',
   refresh: '/accounts/token/refresh/',
   me: '/accounts/me/',
   mfaSetup: '/accounts/mfa/setup/',

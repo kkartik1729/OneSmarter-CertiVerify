@@ -968,3 +968,353 @@ class PublicCredentialUrlTests(TestCase):
                 'https://certiverify.onesmarter.com/verify-certificate/OSCV-2026-TESTURL1',
             )
 
+
+class CertificateAccountLinkingTestSuite(TestCase):
+    """
+    Comprehensive automated tests covering:
+    Test 1 — Anshuman's case (full unregistered issuance -> register -> verify -> claim -> My Certificates -> Dashboard)
+    Test 2 — Different email does not claim
+    Test 3 — Multiple certificates linked to verified email
+    Test 4 — Duplicate processing is idempotent
+    Test 5 — Existing owner conflict protection
+    Test 6 — Certificate files preserved and accessible after claiming
+    Test 7 — Dashboard consistency and verified metrics calculation
+    """
+
+    def setUp(self):
+        self.client = APIClient()
+        self.admin = User.objects.create_user(
+            username="admin_user",
+            email="admin@onesmarter.com",
+            password="AdminPassword@123",
+            is_staff=True,
+            is_superuser=True,
+        )
+
+    def test_1_anshumans_case_end_to_end_linking(self):
+        """
+        Test 1 — Anshuman's case:
+        1. Create an unregistered certificate recipient with a valid email.
+        2. Generate and save a certificate.
+        3. Register a user using the same email.
+        4. Verify that email using the existing application flow.
+        5. Confirm the existing certificate's owner is updated to that user.
+        6. Log in as the user.
+        7. Confirm My Certificates returns the certificate.
+        8. Confirm the dashboard count and Recent Certificates reflect it.
+        """
+        import hashlib
+        from apps.accounts.models import EmailVerificationToken
+
+        email = "anshumanagrawal87@gmail.com"
+        student_name = "Anshuman Agrawal"
+
+        # 1 & 2. Create unregistered certificate record
+        cert = Certificate.objects.create(
+            owner=None,
+            recipient_email=email,
+            recipient_name=student_name,
+            title="C Programming Masterclass",
+            course_name="C Programming",
+            issuer="OneSmarter, Inc.",
+            certificate_number="OSCV-2026-ANSHUMAN01",
+            issue_date="2026-10-14",
+            start_date="2026-07-01",
+            end_date="2026-10-01",
+            status=Certificate.Status.VERIFIED,
+        )
+        self.assertIsNone(cert.owner)
+        self.assertFalse(cert.is_claimed)
+
+        # 3. Register user with the exact same email
+        reg_res = self.client.post("/api/accounts/register/", {
+            "username": email,
+            "email": email,
+            "first_name": "Anshuman",
+            "last_name": "Agrawal",
+            "password": "Password@12345",
+            "password_confirm": "Password@12345",
+        }, format="json")
+        self.assertEqual(reg_res.status_code, 201)
+
+        user = User.objects.get(email=email)
+        self.assertFalse(user.profile.email_verified)
+
+        # 4. Verify email using the existing application flow (using verification token / OTP)
+        token_record = EmailVerificationToken.objects.filter(user=user, is_used=False).first()
+        self.assertIsNotNone(token_record)
+
+        # Generate a known OTP and set on token_record to test OTP verification endpoint
+        test_otp = "849201"
+        token_record.otp_hash = hashlib.sha256(test_otp.encode("utf-8")).hexdigest()
+        token_record.save(update_fields=["otp_hash"])
+
+        verify_res = self.client.post("/api/accounts/verify-email/", {
+            "email": email,
+            "otp": test_otp,
+        }, format="json")
+        self.assertEqual(verify_res.status_code, 200)
+        self.assertTrue(verify_res.data["email_verified"])
+        self.assertEqual(verify_res.data["claimed_count"], 1)
+        self.assertIn(cert.certificate_number, verify_res.data["claimed_certificate_numbers"])
+
+        # 5. Confirm certificate's owner is updated to Anshuman
+        cert.refresh_from_db()
+        self.assertEqual(cert.owner, user)
+        self.assertTrue(cert.is_claimed)
+        self.assertEqual(cert.status, Certificate.Status.VERIFIED)
+
+        # 6. Log in as Anshuman
+        self.client.force_authenticate(user=user)
+
+        # 7. Confirm My Certificates returns the certificate
+        certs_res = self.client.get("/api/certificates/")
+        self.assertEqual(certs_res.status_code, 200)
+        cert_numbers = [c["certificate_number"] for c in certs_res.data]
+        self.assertIn("OSCV-2026-ANSHUMAN01", cert_numbers)
+
+        # 8. Confirm the dashboard count and Recent Certificates reflect it
+        dash_res = self.client.get("/api/dashboard/")
+        self.assertEqual(dash_res.status_code, 200)
+        self.assertEqual(dash_res.data["my_certificates"], 1)
+        recent_numbers = [c["certificate_number"] for c in dash_res.data["recent_certificates"]]
+        self.assertIn("OSCV-2026-ANSHUMAN01", recent_numbers)
+
+    def test_2_different_email_does_not_claim(self):
+        """Test 2 — Issue to one email and register with a different email. Cert must not be claimed."""
+        cert = Certificate.objects.create(
+            owner=None,
+            recipient_email="studentA@example.com",
+            recipient_name="Student A",
+            title="Python Course",
+            issuer="OneSmarter, Inc.",
+            certificate_number="OSCV-2026-DIFF001",
+            issue_date="2026-10-14",
+            start_date="2026-07-01",
+            end_date="2026-10-01",
+        )
+
+        userB = User.objects.create_user(
+            username="studentB",
+            email="studentB@example.com",
+            password="Password@123",
+        )
+        userB.profile.email_verified = True
+        userB.profile.save()
+
+        from apps.certificates.services import claim_unclaimed_certificates_for_user
+        claimed = claim_unclaimed_certificates_for_user(userB)
+        self.assertEqual(len(claimed), 0)
+
+        cert.refresh_from_db()
+        self.assertIsNone(cert.owner)
+        self.assertFalse(cert.is_claimed)
+
+    def test_3_multiple_certificates_linked_to_verified_email(self):
+        """Test 3 — If multiple eligible certificates exist for the same verified email, link all of them."""
+        email = "multicert.student@example.com"
+        c1 = Certificate.objects.create(
+            owner=None,
+            recipient_email=email,
+            recipient_name="Multi Student",
+            title="Course 1",
+            issuer="OneSmarter, Inc.",
+            certificate_number="OSCV-2026-MULTI01",
+            issue_date="2026-10-14",
+            start_date="2026-07-01",
+            end_date="2026-08-01",
+        )
+        c2 = Certificate.objects.create(
+            owner=None,
+            recipient_email=email,
+            recipient_name="Multi Student",
+            title="Course 2",
+            issuer="OneSmarter, Inc.",
+            certificate_number="OSCV-2026-MULTI02",
+            issue_date="2026-10-14",
+            start_date="2026-08-01",
+            end_date="2026-09-01",
+        )
+
+        user = User.objects.create_user(
+            username="multistudent",
+            email=email,
+            password="Password@123",
+        )
+        user.profile.email_verified = True
+        user.profile.save()
+
+        from apps.certificates.services import claim_unclaimed_certificates_for_user
+        claimed = claim_unclaimed_certificates_for_user(user)
+        self.assertEqual(len(claimed), 2)
+
+        c1.refresh_from_db()
+        c2.refresh_from_db()
+        self.assertEqual(c1.owner, user)
+        self.assertEqual(c2.owner, user)
+
+        # Check My Certificates endpoint returns both
+        self.client.force_authenticate(user=user)
+        res = self.client.get("/api/certificates/")
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(len(res.data), 2)
+
+    def test_4_duplicate_processing_is_idempotent(self):
+        """Test 4 — Running the claiming service repeatedly must not duplicate certs or change numbers."""
+        email = "idempotent.student@example.com"
+        cert = Certificate.objects.create(
+            owner=None,
+            recipient_email=email,
+            recipient_name="Idempotent Student",
+            title="Course Python",
+            issuer="OneSmarter, Inc.",
+            certificate_number="OSCV-2026-IDEMP01",
+            issue_date="2026-10-14",
+            start_date="2026-07-01",
+            end_date="2026-09-01",
+        )
+        user = User.objects.create_user(
+            username="idempstudent",
+            email=email,
+            password="Password@123",
+        )
+        user.profile.email_verified = True
+        user.profile.save()
+
+        from apps.certificates.services import claim_unclaimed_certificates_for_user
+
+        # Run 1
+        run1 = claim_unclaimed_certificates_for_user(user)
+        self.assertEqual(len(run1), 1)
+        cert.refresh_from_db()
+        self.assertEqual(cert.owner, user)
+        self.assertEqual(cert.certificate_number, "OSCV-2026-IDEMP01")
+
+        # Run 2
+        run2 = claim_unclaimed_certificates_for_user(user)
+        self.assertEqual(len(run2), 0)
+        cert.refresh_from_db()
+        self.assertEqual(cert.owner, user)
+        self.assertEqual(cert.certificate_number, "OSCV-2026-IDEMP01")
+
+        # Total count in database has not changed
+        total_certs = Certificate.objects.filter(certificate_number="OSCV-2026-IDEMP01").count()
+        self.assertEqual(total_certs, 1)
+
+    def test_5_existing_owner_conflict_not_overwritten(self):
+        """Test 5 — Do not automatically transfer a certificate already linked to another account."""
+        owner1 = User.objects.create_user(
+            username="owner1",
+            email="shared@example.com",
+            password="Password@123",
+        )
+        cert = Certificate.objects.create(
+            owner=owner1,
+            recipient_email="shared@example.com",
+            recipient_name="Original Recipient",
+            title="Protected Course",
+            issuer="OneSmarter, Inc.",
+            certificate_number="OSCV-2026-PROTECT01",
+            issue_date="2026-10-14",
+            start_date="2026-07-01",
+            end_date="2026-09-01",
+        )
+
+        owner2 = User.objects.create_user(
+            username="owner2",
+            email="shared@example.com",
+            password="Password@123",
+        )
+        owner2.profile.email_verified = True
+        owner2.profile.save()
+
+        from apps.certificates.services import claim_unclaimed_certificates_for_user
+        claimed = claim_unclaimed_certificates_for_user(owner2)
+        self.assertEqual(len(claimed), 0)
+
+        cert.refresh_from_db()
+        self.assertEqual(cert.owner, owner1)
+
+    def test_6_certificate_files_accessible_after_claiming(self):
+        """Test 6 — After claiming, certificate image, PDF, and details open correctly."""
+        from django.core.files.uploadedfile import SimpleUploadedFile
+        from apps.certificates.models import CertificatePDF
+
+        email = "filetest@example.com"
+        dummy_png = SimpleUploadedFile("cert.png", b"fake-png-bytes", content_type="image/png")
+        cert = Certificate.objects.create(
+            owner=None,
+            recipient_email=email,
+            recipient_name="File Student",
+            title="File Preserved Course",
+            issuer="OneSmarter, Inc.",
+            certificate_number="OSCV-2026-FILE001",
+            issue_date="2026-10-14",
+            start_date="2026-07-01",
+            end_date="2026-09-01",
+            file=dummy_png,
+            file_sha256="fakehash123",
+        )
+        CertificatePDF.store(
+            certificate=cert,
+            raw_bytes=b"%PDF-1.4 test valid pdf bytes",
+            filename="cert.pdf",
+        )
+
+        user = User.objects.create_user(
+            username="filestudent",
+            email=email,
+            password="Password@123",
+        )
+        user.profile.email_verified = True
+        user.profile.save()
+
+        from apps.certificates.services import claim_unclaimed_certificates_for_user
+        claim_unclaimed_certificates_for_user(user)
+
+        cert.refresh_from_db()
+        self.assertEqual(cert.owner, user)
+        self.assertTrue(bool(cert.file))
+        self.assertEqual(cert.file_sha256, "fakehash123")
+        self.assertTrue(cert.has_pdf)
+
+        # Authenticate as user and verify My Certificates returns valid data
+        self.client.force_authenticate(user=user)
+        res = self.client.get("/api/certificates/")
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(len(res.data), 1)
+        self.assertEqual(res.data[0]["certificate_number"], "OSCV-2026-FILE001")
+
+    def test_7_dashboard_consistency(self):
+        """Test 7 — Verify My Certificates count, Recent Certificates, and metrics are calculated from real DB data."""
+        email = "dashboard.student@example.com"
+        user = User.objects.create_user(
+            username="dashstudent",
+            email=email,
+            password="Password@123",
+        )
+        user.profile.email_verified = True
+        user.profile.save()
+
+        for i in range(3):
+            Certificate.objects.create(
+                owner=user,
+                recipient_email=email,
+                recipient_name="Dash Student",
+                title=f"Course {i+1}",
+                issuer="OneSmarter, Inc.",
+                certificate_number=f"OSCV-2026-DASH00{i+1}",
+                issue_date="2026-10-14",
+                start_date="2026-07-01",
+                end_date="2026-09-01",
+                status=Certificate.Status.VERIFIED,
+            )
+
+        self.client.force_authenticate(user=user)
+        dash_res = self.client.get("/api/dashboard/")
+        self.assertEqual(dash_res.status_code, 200)
+        self.assertEqual(dash_res.data["my_certificates"], 3)
+        self.assertEqual(len(dash_res.data["recent_certificates"]), 3)
+        self.assertEqual(dash_res.data["statistics"]["verified"], 3)
+
+

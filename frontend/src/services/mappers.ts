@@ -29,6 +29,8 @@ export function mapUser(x: unknown): User {
     role,
     organization: s(r.organization),
     phone: s(r.phone),
+    emailVerified: r.email_verified === true,
+    mfaEnabled: r.mfa_enabled === true,
   };
 }
 
@@ -44,10 +46,15 @@ export function mapCert(x: unknown): Cert {
   const file = s(r.file);
   return {
     key: s(r.id),
+    id: s(r.id),
     number: s(r.certificate_number),
     title: s(r.title),
     issuer: s(r.issuer),
     recipient: s(r.recipient_name),
+    recipientEmail: s(r.recipient_email) || undefined,
+    recipient_email: s(r.recipient_email) || undefined,
+    isClaimed: r.is_claimed === true,
+    is_claimed: r.is_claimed === true,
     issued: s(r.issue_date).slice(0, 10),
     owner: s(r.owner_username),
     status: statusOf(r.status),

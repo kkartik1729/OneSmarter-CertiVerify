@@ -9,6 +9,9 @@ import {
   UserCheck,
   FileStack,
   ArrowRight,
+  Upload,
+  Layers,
+  Image as ImageIcon,
 } from 'lucide-react';
 import {
   courseService,
@@ -29,15 +32,27 @@ export default function SingleCertificate() {
   // Form inputs
   const [selectedCourseId, setSelectedCourseId] = useState<number | ''>('');
   const [selectedTemplateId, setSelectedTemplateId] = useState<number | ''>('');
+  
+  // Template selection / upload mode
+  const [templateMode, setTemplateMode] = useState<'existing' | 'upload'>('existing');
+  const [uploadFile, setUploadFile] = useState<File | null>(null);
+  const [uploadTemplateName, setUploadTemplateName] = useState('');
+  const [uploadPreviewUrl, setUploadPreviewUrl] = useState<string | null>(null);
+  const [uploadingTemplate, setUploadingTemplate] = useState(false);
+  const [descriptionOverride, setDescriptionOverride] = useState('');
+
   const [studentSearch, setStudentSearch] = useState('');
   const [searchResults, setSearchResults] = useState<AdminUser[]>([]);
   const [searchingStudents, setSearchingStudents] = useState(false);
   const [selectedStudent, setSelectedStudent] = useState<AdminUser | null>(null);
+  const [recipientEmail, setRecipientEmail] = useState('');
+  const [recipientEmailError, setRecipientEmailError] = useState<string | null>(null);
 
   const [studentDisplayName, setStudentDisplayName] = useState('');
   const [studentNameError, setStudentNameError] = useState<string | null>(null);
   const [startDate, setStartDate] = useState('');
   const [endDate, setEndDate] = useState('');
+  const [dateError, setDateError] = useState<string | null>(null);
   const [issueDate, setIssueDate] = useState(new Date().toISOString().slice(0, 10));
 
   // Preview & Submission
@@ -65,6 +80,11 @@ export default function SingleCertificate() {
           setSelectedCourseId(cList[0].id);
           setStartDate(cList[0].start_date);
           setEndDate(cList[0].end_date);
+          if (cList[0].end_date && cList[0].start_date && cList[0].end_date < cList[0].start_date) {
+            setDateError('End date cannot be earlier than start date.');
+          } else {
+            setDateError(null);
+          }
         }
         if (tList.length > 0) {
           setSelectedTemplateId(tList[0].id);
@@ -85,6 +105,29 @@ export default function SingleCertificate() {
     if (found) {
       setStartDate(found.start_date);
       setEndDate(found.end_date);
+      if (found.end_date && found.start_date && found.end_date < found.start_date) {
+        setDateError('End date cannot be earlier than start date.');
+      } else {
+        setDateError(null);
+      }
+    }
+  };
+
+  const handleStartDateChange = (val: string) => {
+    setStartDate(val);
+    if (endDate && val > endDate) {
+      setDateError('End date cannot be earlier than start date.');
+    } else {
+      setDateError(null);
+    }
+  };
+
+  const handleEndDateChange = (val: string) => {
+    setEndDate(val);
+    if (startDate && val < startDate) {
+      setDateError('End date cannot be earlier than start date.');
+    } else {
+      setDateError(null);
     }
   };
 
@@ -108,30 +151,60 @@ export default function SingleCertificate() {
 
   const handleSelectStudent = (u: AdminUser) => {
     setSelectedStudent(u);
+    setRecipientEmail(u.email);
+    setRecipientEmailError(null);
     const fullName = `${u.first_name} ${u.last_name}`.trim() || u.username;
     setStudentDisplayName(fullName);
     setSearchResults([]);
     setStudentSearch(`${fullName} (${u.email})`);
   };
 
+  const handleClearSelectedStudent = () => {
+    setSelectedStudent(null);
+    setStudentSearch('');
+    setSearchResults([]);
+  };
+
+  // Helper to get active template ID, automatically uploading new template file if in upload mode
+  const ensureTemplateId = async (): Promise<number> => {
+    if (templateMode === 'upload') {
+      if (!uploadFile) {
+        throw new Error('Please choose a template image (.png, .jpg, .jpeg) to upload.');
+      }
+      const tplName = (uploadTemplateName || uploadFile.name.replace(/\.[^/.]+$/, '')).trim() || 'Custom Template';
+      setUploadingTemplate(true);
+      try {
+        const created = await templateService.upload(tplName, uploadFile, descriptionOverride.trim() || undefined);
+        setTemplates((prev) => [created, ...prev]);
+        setSelectedTemplateId(created.id);
+        setTemplateMode('existing');
+        return created.id;
+      } finally {
+        setUploadingTemplate(false);
+      }
+    }
+    if (!selectedTemplateId) {
+      throw new Error('Please select a certificate template.');
+    }
+    return Number(selectedTemplateId);
+  };
+
   // Live preview
   const handlePreview = async () => {
-    if (!selectedTemplateId) {
-      setError('Please select a certificate template to preview.');
-      return;
-    }
-    const c = courses.find((course) => course.id === Number(selectedCourseId));
     setLoadingPreview(true);
     setError(null);
     try {
+      const tplId = await ensureTemplateId();
+      const c = courses.find((course) => course.id === Number(selectedCourseId));
       const res = await generationService.preview({
-        template_id: Number(selectedTemplateId),
+        template_id: tplId,
         student_name: studentDisplayName.trim() || 'Student Name',
         course_name: c?.name || 'Course Name',
         start_date: startDate || '2026-07-01',
         end_date: endDate || '2026-10-01',
         issue_date: issueDate || new Date().toISOString().slice(0, 10),
         issuer_name: c?.issuer || 'OneSmarter, Inc.',
+        completion_description: descriptionOverride.trim() || undefined,
       });
       setPreviewUrl(res.preview_url);
     } catch (err) {
@@ -148,14 +221,21 @@ export default function SingleCertificate() {
       setError('Please select a course.');
       return;
     }
-    if (!selectedTemplateId) {
-      setError('Please select a certificate template.');
+
+    const emailToUse = (selectedStudent ? selectedStudent.email : recipientEmail).trim().toLowerCase();
+    if (!emailToUse) {
+      setRecipientEmailError('Recipient email address is required.');
+      setError('Please enter a recipient email address or select a registered student.');
       return;
     }
-    if (!selectedStudent) {
-      setError('Please search and select a registered student account.');
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRegex.test(emailToUse)) {
+      setRecipientEmailError('Please enter a valid email address.');
+      setError('Please enter a valid email address.');
       return;
     }
+    setRecipientEmailError(null);
+
     const trimmedName = studentDisplayName.trim();
     if (!trimmedName) {
       setStudentNameError('Student name is required.');
@@ -175,22 +255,26 @@ export default function SingleCertificate() {
       return;
     }
     if (endDate < startDate) {
-      setError('Course end date cannot be earlier than start date.');
+      setDateError('End date cannot be earlier than start date.');
+      setError('End date cannot be earlier than start date.');
       return;
     }
+    setDateError(null);
 
     setSubmitting(true);
     setError(null);
     try {
+      const tplId = await ensureTemplateId();
       const cert = await generationService.singleGenerate({
         course_id: Number(selectedCourseId),
-        template_id: Number(selectedTemplateId),
-        user_id: selectedStudent.id,
-        student_email: selectedStudent.email,
+        template_id: tplId,
+        user_id: selectedStudent ? selectedStudent.id : undefined,
+        student_email: emailToUse,
         student_name: trimmedName,
         start_date: startDate,
         end_date: endDate,
         issue_date: issueDate,
+        completion_description: descriptionOverride.trim() || undefined,
       });
       setCreatedCert(cert);
     } catch (err) {
@@ -321,57 +405,145 @@ export default function SingleCertificate() {
               )}
             </div>
 
-            {/* 2. Certificate Template */}
-            <div className="space-y-2">
-              <label className="block font-semibold text-slate-700 dark:text-slate-300">
-                2. Select Certificate Template *
-              </label>
-              <select
-                required
-                value={selectedTemplateId}
-                onChange={(e) => setSelectedTemplateId(Number(e.target.value))}
-                className="w-full px-3.5 py-2.5 bg-slate-50 dark:bg-slate-800 border border-slate-300 dark:border-slate-700 rounded-xl text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-teal-500"
-              >
-                {templates.map((t) => (
-                  <option key={t.id} value={t.id}>
-                    {t.name}
-                  </option>
-                ))}
-              </select>
-              {selectedTemplate && selectedTemplate.image_url && (
-                <div className="flex items-center gap-3 pt-1">
-                  <img
-                    src={selectedTemplate.image_url}
-                    alt={selectedTemplate.name}
-                    className="w-16 h-10 object-cover rounded border border-slate-200"
-                  />
-                  <span className="text-[11px] text-slate-500">Template background active</span>
+            {/* 2. Certificate Template: Select Existing OR Upload New */}
+            <div className="space-y-3">
+              <div className="flex items-center justify-between">
+                <label className="block font-semibold text-slate-700 dark:text-slate-300">
+                  2. Certificate Template *
+                </label>
+                <div className="flex items-center bg-slate-100 dark:bg-slate-800 p-0.5 rounded-lg text-[11px] font-medium border border-slate-200 dark:border-slate-700">
+                  <button
+                    type="button"
+                    onClick={() => setTemplateMode('existing')}
+                    className={`px-2.5 py-1 rounded-md transition ${
+                      templateMode === 'existing'
+                        ? 'bg-white dark:bg-slate-700 text-teal-600 dark:text-teal-400 font-semibold shadow-xs'
+                        : 'text-slate-500 hover:text-slate-800 dark:hover:text-slate-200'
+                    }`}
+                  >
+                    Select Saved
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setTemplateMode('upload')}
+                    className={`px-2.5 py-1 rounded-md transition flex items-center gap-1 ${
+                      templateMode === 'upload'
+                        ? 'bg-white dark:bg-slate-700 text-teal-600 dark:text-teal-400 font-semibold shadow-xs'
+                        : 'text-slate-500 hover:text-slate-800 dark:hover:text-slate-200'
+                    }`}
+                  >
+                    <Upload className="w-3 h-3" />
+                    <span>Upload New</span>
+                  </button>
+                </div>
+              </div>
+
+              {templateMode === 'existing' ? (
+                <div className="space-y-2">
+                  <select
+                    value={selectedTemplateId}
+                    onChange={(e) => setSelectedTemplateId(Number(e.target.value))}
+                    className="w-full px-3.5 py-2.5 bg-slate-50 dark:bg-slate-800 border border-slate-300 dark:border-slate-700 rounded-xl text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-teal-500"
+                  >
+                    {templates.map((t) => (
+                      <option key={t.id} value={t.id}>
+                        {t.name} {t.file_format ? `(${t.file_format})` : ''}
+                      </option>
+                    ))}
+                  </select>
+                  {selectedTemplate && selectedTemplate.image_url && (
+                    <div className="flex items-center gap-3 p-2 bg-slate-50 dark:bg-slate-800/60 rounded-xl border border-slate-200 dark:border-slate-700">
+                      <img
+                        src={selectedTemplate.image_url}
+                        alt={selectedTemplate.name}
+                        className="w-16 h-11 object-cover rounded border border-slate-200 dark:border-slate-700 shadow-xs"
+                      />
+                      <div className="text-[11px] text-slate-500 space-y-0.5">
+                        <p className="font-semibold text-slate-700 dark:text-slate-300">
+                          {selectedTemplate.name}
+                        </p>
+                        <p>Format: {selectedTemplate.file_format || 'PNG'}</p>
+                        {selectedTemplate.description && (
+                          <p className="text-teal-600 dark:text-teal-400 line-clamp-1 italic">
+                            &quot;{selectedTemplate.description}&quot;
+                          </p>
+                        )}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              ) : (
+                <div className="space-y-3 p-3 bg-slate-50 dark:bg-slate-800/60 rounded-xl border border-dashed border-teal-500/50">
+                  <div className="space-y-1">
+                    <label className="block text-[11px] font-semibold text-slate-700 dark:text-slate-300">
+                      Template Image File (Figma PNG, JPG, JPEG) *
+                    </label>
+                    <input
+                      type="file"
+                      accept=".png,.jpg,.jpeg,image/png,image/jpeg"
+                      onChange={(e) => {
+                        const file = e.target.files?.[0] || null;
+                        setUploadFile(file);
+                        if (file) {
+                          setUploadTemplateName(file.name.replace(/\.[^/.]+$/, ''));
+                          setUploadPreviewUrl(URL.createObjectURL(file));
+                        } else {
+                          setUploadPreviewUrl(null);
+                        }
+                      }}
+                      className="w-full text-xs text-slate-500 file:mr-3 file:py-1.5 file:px-3 file:rounded-lg file:border-0 file:text-xs file:font-semibold file:bg-teal-600 file:text-white hover:file:bg-teal-500 cursor-pointer"
+                    />
+                  </div>
+
+                  {uploadPreviewUrl && (
+                    <div className="flex items-center gap-3 pt-1">
+                      <img
+                        src={uploadPreviewUrl}
+                        alt="Uploaded template preview"
+                        className="w-16 h-11 object-cover rounded border border-slate-200 dark:border-slate-700 shadow-xs"
+                      />
+                      <div className="flex-1 space-y-1">
+                        <input
+                          type="text"
+                          placeholder="Template name"
+                          value={uploadTemplateName}
+                          onChange={(e) => setUploadTemplateName(e.target.value)}
+                          className="w-full px-2.5 py-1 text-xs bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 rounded-lg text-slate-900 dark:text-white"
+                        />
+                      </div>
+                    </div>
+                  )}
+                  <p className="text-[11px] text-slate-500">
+                    Supports high-res Figma PNGs, RGBA with transparency, and JPEG certificates.
+                  </p>
                 </div>
               )}
             </div>
 
-            {/* 3. Search and select registered student */}
-            <div className="space-y-2 relative md:col-span-2">
+            {/* 3. Search and select registered student OR enter direct email */}
+            <div className="space-y-3 relative md:col-span-2">
               <label className="block font-semibold text-slate-700 dark:text-slate-300">
-                3. Search and Select Registered Student (by name or email) *
+                3. Recipient Student (Search Registered User OR Enter Email Directly) *
               </label>
+
+              {/* Autocomplete search bar */}
               <div className="relative">
                 <input
                   type="text"
-                  placeholder="Type student name or email to search..."
+                  placeholder="Search registered user by name or email (optional)..."
                   value={studentSearch}
                   onChange={(e) => handleSearchStudents(e.target.value)}
-                  className="w-full pl-9 pr-4 py-2.5 bg-slate-50 dark:bg-slate-800 border border-slate-300 dark:border-slate-700 rounded-xl text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-teal-500"
+                  className="w-full pl-9 pr-4 py-2 bg-slate-50 dark:bg-slate-800 border border-slate-300 dark:border-slate-700 rounded-xl text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-teal-500 text-xs"
                 />
-                <Search className="w-4 h-4 text-slate-400 absolute left-3 top-3" />
+                <Search className="w-4 h-4 text-slate-400 absolute left-3 top-2.5" />
                 {searchingStudents && (
-                  <RefreshCw className="w-4 h-4 text-teal-600 animate-spin absolute right-3 top-3" />
+                  <RefreshCw className="w-4 h-4 text-teal-600 animate-spin absolute right-3 top-2.5" />
                 )}
               </div>
 
               {/* Autocomplete dropdown */}
               {searchResults.length > 0 && (
-                <div className="absolute z-20 top-full left-0 right-0 mt-1 bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl shadow-lg max-h-48 overflow-y-auto divide-y divide-slate-100 dark:divide-slate-700">
+                <div className="absolute z-20 top-16 left-0 right-0 bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl shadow-lg max-h-48 overflow-y-auto divide-y divide-slate-100 dark:divide-slate-700">
                   {searchResults.map((u) => (
                     <button
                       key={u.id}
@@ -385,7 +557,7 @@ export default function SingleCertificate() {
                         </p>
                         <p className="text-slate-500 font-mono text-[11px]">{u.email}</p>
                       </div>
-                      <span className="px-2 py-0.5 rounded text-[10px] font-semibold bg-slate-100 dark:bg-slate-600 text-slate-700 dark:text-slate-200">
+                      <span className="px-2 py-0.5 rounded text-[10px] font-semibold bg-teal-100 text-teal-800 dark:bg-teal-900/60 dark:text-teal-300">
                         Select
                       </span>
                     </button>
@@ -394,20 +566,55 @@ export default function SingleCertificate() {
               )}
 
               {selectedStudent ? (
-                <div className="p-3 bg-teal-50 dark:bg-teal-950/40 border border-teal-200 dark:border-teal-800 rounded-xl text-xs flex items-center gap-3">
-                  <UserCheck className="w-5 h-5 text-teal-600" />
-                  <div>
-                    <span className="font-semibold text-teal-900 dark:text-teal-200">
-                      Selected Student Account:
-                    </span>{' '}
-                    <span>{selectedStudent.first_name} {selectedStudent.last_name} ({selectedStudent.email})</span>
+                <div className="p-3 bg-teal-50 dark:bg-teal-950/40 border border-teal-200 dark:border-teal-800 rounded-xl text-xs flex items-center justify-between">
+                  <div className="flex items-center gap-3">
+                    <UserCheck className="w-5 h-5 text-teal-600 flex-shrink-0" />
+                    <div>
+                      <span className="font-semibold text-teal-900 dark:text-teal-200">
+                        Linked to Registered Account:
+                      </span>{' '}
+                      <span className="text-slate-700 dark:text-slate-300">{selectedStudent.first_name} {selectedStudent.last_name} ({selectedStudent.email})</span>
+                    </div>
                   </div>
+                  <button
+                    type="button"
+                    onClick={handleClearSelectedStudent}
+                    className="text-xs text-rose-600 hover:text-rose-700 dark:text-rose-400 font-medium underline ml-2"
+                  >
+                    Clear / Enter Unregistered
+                  </button>
                 </div>
-              ) : (
-                <p className="text-[11px] text-slate-500">
-                  * Note: Only registered accounts can be issued certificates. Unregistered users must register first.
+              ) : null}
+
+              {/* Recipient Email Input */}
+              <div className="space-y-1 pt-1">
+                <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300">
+                  Recipient Email Address *
+                </label>
+                <input
+                  type="email"
+                  required
+                  placeholder="e.g. kartik@example.com"
+                  value={recipientEmail}
+                  onChange={(e) => {
+                    setRecipientEmail(e.target.value);
+                    setRecipientEmailError(null);
+                  }}
+                  className={`w-full px-3.5 py-2.5 bg-slate-50 dark:bg-slate-800 border rounded-xl text-slate-900 dark:text-white focus:outline-none focus:ring-2 ${
+                    recipientEmailError
+                      ? 'border-rose-400 focus:ring-rose-500'
+                      : 'border-slate-300 dark:border-slate-700 focus:ring-teal-500'
+                  }`}
+                />
+                {recipientEmailError && (
+                  <p className="text-xs text-rose-600 dark:text-rose-400 font-medium mt-1">
+                    {recipientEmailError}
+                  </p>
+                )}
+                <p className="text-[11px] text-slate-500 dark:text-slate-400">
+                  Recipients without an account will receive their certificate PDF via email and can verify it publicly. When they register with this email later, the certificate will automatically link to their account.
                 </p>
-              )}
+              </div>
             </div>
 
             {/* 4. Student Name as it will appear */}
@@ -457,7 +664,7 @@ export default function SingleCertificate() {
                 type="date"
                 required
                 value={startDate}
-                onChange={(e) => setStartDate(e.target.value)}
+                onChange={(e) => handleStartDateChange(e.target.value)}
                 className="w-full px-3.5 py-2.5 bg-slate-50 dark:bg-slate-800 border border-slate-300 dark:border-slate-700 rounded-xl text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-teal-500"
               />
             </div>
@@ -469,10 +676,20 @@ export default function SingleCertificate() {
               <input
                 type="date"
                 required
+                min={startDate || undefined}
                 value={endDate}
-                onChange={(e) => setEndDate(e.target.value)}
-                className="w-full px-3.5 py-2.5 bg-slate-50 dark:bg-slate-800 border border-slate-300 dark:border-slate-700 rounded-xl text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-teal-500"
+                onChange={(e) => handleEndDateChange(e.target.value)}
+                className={`w-full px-3.5 py-2.5 bg-slate-50 dark:bg-slate-800 border rounded-xl text-slate-900 dark:text-white focus:outline-none focus:ring-2 ${
+                  dateError
+                    ? 'border-rose-400 focus:ring-rose-500'
+                    : 'border-slate-300 dark:border-slate-700 focus:ring-teal-500'
+                }`}
               />
+              {dateError && (
+                <p className="text-xs text-rose-600 dark:text-rose-400 font-medium mt-1">
+                  {dateError}
+                </p>
+              )}
             </div>
 
             <div className="space-y-2">
@@ -487,13 +704,34 @@ export default function SingleCertificate() {
                 className="w-full px-3.5 py-2.5 bg-slate-50 dark:bg-slate-800 border border-slate-300 dark:border-slate-700 rounded-xl text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-teal-500"
               />
             </div>
+
+            {/* 8. Optional Completion Description */}
+            <div className="space-y-2 md:col-span-2">
+              <label className="block font-semibold text-slate-700 dark:text-slate-300">
+                8. Completion Description (Optional)
+              </label>
+              <textarea
+                rows={2}
+                placeholder={
+                  selectedTemplate?.description
+                    ? `Default: "${selectedTemplate.description}" (Leave blank to keep template default)`
+                    : "Optional completion text (e.g. 'has successfully completed the coursework...'). Leave empty if your template already has text printed."
+                }
+                value={descriptionOverride}
+                onChange={(e) => setDescriptionOverride(e.target.value)}
+                className="w-full px-3.5 py-2 bg-slate-50 dark:bg-slate-800 border border-slate-300 dark:border-slate-700 rounded-xl text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-teal-500 text-xs"
+              />
+              <p className="text-[11px] text-slate-500">
+                Supports placeholders: <code className="font-mono text-teal-600 dark:text-teal-400">{'{{student_name}}'}</code>, <code className="font-mono text-teal-600 dark:text-teal-400">{'{{course_name}}'}</code>, <code className="font-mono text-teal-600 dark:text-teal-400">{'{{issue_date}}'}</code>. Leave empty if your template already has a pre-printed description.
+              </p>
+            </div>
           </div>
 
           {/* Buttons: Preview & Generate */}
           <div className="flex flex-col sm:flex-row items-center justify-between gap-4 pt-4 border-t border-slate-200 dark:border-slate-800">
             <button
               type="button"
-              disabled={loadingPreview || !selectedTemplateId}
+              disabled={loadingPreview || (templateMode === 'existing' && !selectedTemplateId) || (templateMode === 'upload' && !uploadFile)}
               onClick={handlePreview}
               className="w-full sm:w-auto px-4 py-2.5 bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-300 font-semibold rounded-xl text-xs inline-flex items-center justify-center gap-2"
             >
@@ -503,7 +741,7 @@ export default function SingleCertificate() {
 
             <button
               type="submit"
-              disabled={submitting}
+              disabled={submitting || !!dateError || (endDate < startDate) || !!studentNameError || (studentDisplayName.trim().length >= 30) || !recipientEmail.trim() || (templateMode === 'existing' && !selectedTemplateId) || (templateMode === 'upload' && !uploadFile)}
               className="w-full sm:w-auto px-6 py-2.5 bg-teal-600 hover:bg-teal-500 disabled:opacity-50 text-white font-semibold rounded-xl text-xs inline-flex items-center justify-center gap-2 shadow-sm transition"
             >
               {submitting ? (

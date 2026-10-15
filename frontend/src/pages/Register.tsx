@@ -3,7 +3,7 @@ import { Link, Navigate, useNavigate } from 'react-router-dom';
 import Field from '../components/Field';
 import { useAuth } from '../context/AuthContext';
 import { Brand, ThemeToggle, toast } from '../lib/ui';
-import { homeFor, PATHS } from '../lib/paths';
+import { homeFor } from '../lib/paths';
 import { ApiError, errMsg } from '../services';
 
 type F = 'name' | 'email' | 'pw' | 'pc';
@@ -48,8 +48,8 @@ export default function Register() {
     setBusy(true);
     try {
       await register({ username: email, email, first_name: first, last_name: rest.join(' '), password: v.pw, password_confirm: v.pc });
-      toast('Account created. Please sign in.');
-      go(PATHS.login, { state: { registered: true } });
+      toast('Account created. Please verify your email with the 6-digit code sent to you.');
+      go(`/verify-email?email=${encodeURIComponent(email)}`);
     } catch (x) {
       // Show each backend validation message next to the field it belongs to.
       const next: typeof e = {};

@@ -55,9 +55,36 @@ export const authService = {
     return finishLogin(d);
   },
 
+  /** POST /accounts/google-login/ {id_token} - Directly authenticates via trusted Google OAuth without extra MFA prompt */
+  async googleLogin(idToken: string): Promise<User> {
+    const d = await http<LoginResponse>('POST', EP.googleLogin, { id_token: idToken }, false);
+    return finishLogin(d);
+  },
+
   /** POST /accounts/register/. The backend returns NO tokens, so the user must sign in afterwards. */
   async register(p: { username: string; email: string; first_name: string; last_name: string; password: string; password_confirm: string }): Promise<void> {
     await http('POST', EP.register, p, false);
+  },
+
+  /** POST /accounts/verify-email/ {email, otp, token} */
+  async verifyEmail(data: { email?: string; otp?: string; token?: string }): Promise<{ detail: string; claimedCount: number; claimedCertificates: string[] }> {
+    const res = await http<{ detail?: string; claimed_count?: number; claimed_certificate_numbers?: string[] }>(
+      'POST',
+      EP.verifyEmail,
+      data,
+      false,
+    );
+    return {
+      detail: typeof res.detail === 'string' ? res.detail : 'Email verified successfully.',
+      claimedCount: Number(res.claimed_count || 0),
+      claimedCertificates: Array.isArray(res.claimed_certificate_numbers) ? res.claimed_certificate_numbers : [],
+    };
+  },
+
+  /** POST /accounts/resend-verification/ {email} */
+  async resendVerification(email: string): Promise<string> {
+    const res = await http<{ detail?: string }>('POST', EP.resendVerification, { email }, false);
+    return typeof res.detail === 'string' ? res.detail : 'Verification code sent to your email.';
   },
 
   /** GET /accounts/me/ (role is read from this response only). */

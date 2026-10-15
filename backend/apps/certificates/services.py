@@ -54,12 +54,17 @@ def claim_unclaimed_certificates_for_user(user) -> list:
     claimed_certs = []
     conflicts = []
 
+    from django.db.models.functions import Trim, Lower
+
     with transaction.atomic():
         # Lock all unclaimed certificates matching this normalized email.
         # select_for_update() prevents concurrent claim requests from racing.
-        unclaimed_qs = Certificate.objects.select_for_update().filter(
+        # Trim(Lower(...)) ensures matching succeeds even if email had leading/trailing spaces.
+        unclaimed_qs = Certificate.objects.select_for_update().annotate(
+            clean_recipient_email=Trim(Lower("recipient_email"))
+        ).filter(
             owner__isnull=True,
-            recipient_email__iexact=normalized_email,
+            clean_recipient_email=normalized_email,
         )
         unclaimed = list(unclaimed_qs)
 

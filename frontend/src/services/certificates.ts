@@ -66,17 +66,19 @@ export const templateService = {
   get: async (id: number | string): Promise<import('../types').CertificateTemplate> =>
     http<import('../types').CertificateTemplate>('GET', EP.template(id)),
 
-  upload: async (name: string, file: File): Promise<import('../types').CertificateTemplate> => {
+  upload: async (name: string, file: File, description?: string): Promise<import('../types').CertificateTemplate> => {
     const f = new FormData();
     f.append('name', name);
     f.append('image', file);
+    if (description) f.append('description', description);
     return http<import('../types').CertificateTemplate>('POST', EP.templates, f);
   },
 
-  replace: async (id: number | string, file: File, name?: string): Promise<import('../types').CertificateTemplate> => {
+  replace: async (id: number | string, file: File, name?: string, description?: string): Promise<import('../types').CertificateTemplate> => {
     const f = new FormData();
     f.append('image', file);
     if (name) f.append('name', name);
+    if (description !== undefined) f.append('description', description);
     return http<import('../types').CertificateTemplate>('PUT', EP.template(id), f);
   },
 
@@ -166,6 +168,7 @@ export const generationService = {
     end_date?: string;
     issue_date?: string;
     issuer_name?: string;
+    completion_description?: string;
   }): Promise<{ preview_url: string; file_size: number; sha256: string }> => {
     return http<{ preview_url: string; file_size: number; sha256: string }>('POST', EP.previewCertificate, payload);
   },

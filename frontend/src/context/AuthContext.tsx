@@ -11,9 +11,13 @@ interface AuthValue {
   /** Set when the session could not be restored because the server was unreachable. */
   bootError: string | null;
   login: (username: string, password: string) => Promise<LoginResult>;
+  googleLogin: (idToken: string) => Promise<User>;
   verifyMfa: (challenge: string, code: string) => Promise<User>;
   recoverMfa: (challenge: string, code: string) => Promise<{ detail: string; success: boolean }>;
   register: typeof authService.register;
+  verifyEmail: typeof authService.verifyEmail;
+  resendVerification: typeof authService.resendVerification;
+  reloadProfile: () => Promise<User | null>;
   logout: () => void;
   updateProfile: (p: { organization: string; phone: string }) => Promise<void>;
   retryRestore: () => void;
@@ -80,6 +84,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       if (r.kind === 'success') setUser(r.user);
       return r;
     },
+    googleLogin: async (idToken: string) => {
+      const u = await authService.googleLogin(idToken);
+      setUser(u);
+      return u;
+    },
     verifyMfa: async (challenge, code) => {
       const u = await authService.verifyMfa(challenge, code);
       setUser(u);
@@ -90,6 +99,26 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       return result;
     },
     register: authService.register,
+    verifyEmail: async data => {
+      const res = await authService.verifyEmail(data);
+      try {
+        const u = await authService.me();
+        setUser(u);
+      } catch {
+        // ignore if not logged in
+      }
+      return res;
+    },
+    resendVerification: authService.resendVerification,
+    reloadProfile: async () => {
+      try {
+        const u = await authService.me();
+        setUser(u);
+        return u;
+      } catch {
+        return null;
+      }
+    },
     logout: () => {
       authService.logout();
       setUser(null);

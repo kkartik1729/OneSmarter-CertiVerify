@@ -143,60 +143,44 @@ def _fmt_date(d) -> str:
 
 def _portrait_layout(w: int, h: int) -> dict:
     """
-    Return pixel-coordinate layout for a portrait template (e.g. 1414x2000).
-
-    These values are tuned for the OneSmarter Red & Gold template.
-    The template has:
-      - "For Honorable Achievement To" gold heading ending at y~758
-      - Placeholder dark-red cursive student name from y~855 to y~1030
-      - Dark-red separator/underline at y~1037-1047
-      - Decorative gold side elements from y~1125-1280
-      - Signature blocks starting at y~1456
+    Return proportional pixel-coordinate layout for a portrait template.
+    Uses normalized ratios so layout scales naturally with any image dimensions.
     """
     return {
-        # Usable horizontal bounds (inside ribbons / decorations)
-        "left_margin":  int(w * 0.106),   # x ~ 150
-        "right_margin": int(w * 0.894),   # x ~ 1264
-
-        # Student name: just below the gold achievement heading
-        "name_y":       int(h * 0.412),   # y ~ 824
-
-        # Paragraph: well below the masked placeholder area and separator
-        "para_top":     int(h * 0.540),   # y ~ 1080
-
-        # Metadata row minimum y (cert ID + issue date)
-        "meta_top":     int(h * 0.660),   # y ~ 1320
-
-        # Top of signature area — nothing dynamic goes here or below
-        "sig_top":      int(h * 0.728),   # y ~ 1456
-
-        # Rectangle to blank-out the template's placeholder text + line.
-        # Covers: dark-red cursive name placeholder, decorative strokes,
-        # and the horizontal separator line at y~1040.
-        # x: 150..1050  y: 855..1055
-        "mask_rect":    (
-            int(w * 0.106),   # x0 ~ 150
-            int(h * 0.427),   # y0 ~ 854
-            int(w * 0.743),   # x1 ~ 1050
-            int(h * 0.528),   # y1 ~ 1056
-        ),
-
-        # Background fill colour (sampled from template body ≈ 250,250,250)
-        "bg_color": (250, 250, 250),
+        # Usable horizontal bounds (inside margins / borders)
+        "left_margin":    int(w * 0.10),
+        "right_margin":   int(w * 0.90),
+        "name_y":         int(h * 0.42),
+        "name_align":     "center",
+        "name_color":     (30, 30, 30),
+        "draw_underline": False,
+        "para_top":       int(h * 0.53),
+        "para_color":     (50, 50, 50),
+        "meta_top":       int(h * 0.68),
+        "meta_color":     (60, 60, 60),
+        "sig_top":        int(h * 0.78),
+        # mask_rect is None by default so uploaded background art/text is preserved
+        "mask_rect":      None,
+        "bg_color":       (250, 250, 250),
     }
 
 
 def _landscape_layout(w: int, h: int) -> dict:
-    """Generic layout for landscape or square templates."""
+    """Generic proportional layout for landscape or square templates."""
     return {
-        "left_margin":  int(w * 0.10),
-        "right_margin": int(w * 0.90),
-        "name_y":       int(h * 0.40),
-        "para_top":     int(h * 0.52),
-        "meta_top":     int(h * 0.72),
-        "sig_top":      int(h * 0.85),
-        "mask_rect":    None,
-        "bg_color":     (255, 255, 255),
+        "left_margin":    int(w * 0.08),
+        "right_margin":   int(w * 0.92),
+        "name_y":         int(h * 0.40),
+        "name_align":     "center",
+        "name_color":     (30, 30, 30),
+        "draw_underline": False,
+        "para_top":       int(h * 0.52),
+        "para_color":     (50, 50, 50),
+        "meta_top":       int(h * 0.72),
+        "meta_color":     (60, 60, 60),
+        "sig_top":        int(h * 0.85),
+        "mask_rect":      None,
+        "bg_color":       (255, 255, 255),
     }
 
 
@@ -230,12 +214,16 @@ def generate_certificate_image(
         certificate_number:     Unique certificate identifier (the saved DB value).
         issuer_name:            Organisation name.
         completion_description: Optional custom text supporting {{student_name}}, {{course_name}}, etc.
-        layout_overrides:       Optional dict with coordinate overrides.
+                                If empty, no description is rendered, preserving pre-printed template text.
+        layout_overrides:       Optional dict with coordinate overrides or layout_config.
         output_format:          Target format: "PNG", "JPEG" / "JPG", or "PDF".
 
     Returns:
         (file_bytes, sha256_hex) — the generated certificate in requested format and its hash.
     """
+    from PIL import ImageFile
+    ImageFile.LOAD_TRUNCATED_IMAGES = True
+
     # ------------------------------------------------------------------
     # 1. Load template (supports PNG, JPG/JPEG, and PDF)
     # ------------------------------------------------------------------
@@ -251,12 +239,18 @@ def generate_certificate_image(
             logger.warning("pypdfium2 failed to render PDF template %s: %s", template_path, exc)
             img = Image.open(template_path).convert("RGBA")
     else:
-        img = Image.open(template_path).convert("RGBA")
+        # Open and load fully to handle Figma PNGs and transparency
+        pil_raw = Image.open(template_path)
+        pil_raw.load()
+        if pil_raw.mode == "RGBA":
+            img = pil_raw.copy()
+        else:
+            img = pil_raw.convert("RGBA")
 
     w, h = img.size
 
-    # Choose layout: portrait when height >= 1.2 x width
-    if h >= w * 1.2:
+    # Choose layout: portrait when height >= 1.15 x width, landscape otherwise
+    if h >= w * 1.15:
         layout = _portrait_layout(w, h)
     else:
         layout = _landscape_layout(w, h)
@@ -264,11 +258,11 @@ def generate_certificate_image(
     if layout_overrides and isinstance(layout_overrides, dict):
         layout.update(layout_overrides)
 
-    left_x         = layout["left_margin"]
-    right_x        = layout["right_margin"]
-    sig_top        = layout["sig_top"]
-    bg_color       = layout["bg_color"]
-    max_text_width = right_x - left_x
+    left_x         = layout.get("left_margin", int(w * 0.10))
+    right_x        = layout.get("right_margin", int(w * 0.90))
+    sig_top        = layout.get("sig_top", int(h * 0.80))
+    bg_color       = layout.get("bg_color", (255, 255, 255))
+    max_text_width = max(100, right_x - left_x)
 
     # ------------------------------------------------------------------
     # 2. Format dates strictly as DD/MM/YYYY
@@ -278,7 +272,7 @@ def generate_certificate_image(
     issue_disp = _fmt_date(issue_date)
 
     # ------------------------------------------------------------------
-    # 3. Build paragraph & resolve all dynamic placeholders
+    # 3. Build paragraph & resolve all dynamic placeholders (if provided)
     # ------------------------------------------------------------------
     student_name = (student_name or "").strip()
     course_name = (course_name or "").strip()
@@ -295,119 +289,131 @@ def generate_certificate_image(
         "issuer_name": issuer_name,
     }
 
+    paragraph = ""
     if completion_description and completion_description.strip():
         paragraph = completion_description.strip()
         for k, v in context.items():
             paragraph = paragraph.replace(f"{{{{{k}}}}}", str(v))
             paragraph = paragraph.replace(f"{{{k}}}", str(v))
-    else:
-        paragraph = (
-            f""
-        )
 
     # ------------------------------------------------------------------
-    # 4. Mask template placeholder text and separator line
+    # 4. Optional template masking (ONLY if explicitly configured)
     # ------------------------------------------------------------------
     draw = ImageDraw.Draw(img)
 
-    if layout.get("mask_rect") is not None:
+    if layout.get("mask_rect"):
         mx0, my0, mx1, my1 = layout["mask_rect"]
         draw.rectangle([mx0, my0, mx1, my1], fill=bg_color + (255,))
 
     # ------------------------------------------------------------------
-    # 5. Choose font sizes
+    # 5. Choose font sizes & measurement
     # ------------------------------------------------------------------
     base = min(w, h)
 
     # Student name: start at comfortable size, shrink until fits max_text_width
-    name_font_size = max(int(base * 0.050), 30)
-    while name_font_size > 18:
+    name_font_size = layout.get("name_font_size") or max(int(base * 0.048), 28)
+    min_name_font_size = layout.get("min_name_font_size", 16)
+    while name_font_size > min_name_font_size:
         nf = _get_font(name_font_size, bold=True)
         if _text_width(draw, student_name, nf) <= max_text_width:
             break
         name_font_size -= 2
     name_font = _get_font(name_font_size, bold=True)
 
-    # Paragraph: readable but not oversized
-    para_size = max(int(base * 0.021), 18)
+    para_size = layout.get("para_font_size") or max(int(base * 0.021), 16)
     para_font = _get_font(para_size, bold=False)
 
-    # Metadata: slightly smaller than paragraph
-    detail_size = max(int(base * 0.018), 14)
+    detail_size = layout.get("detail_font_size") or max(int(base * 0.017), 13)
     detail_font = _get_font(detail_size, bold=False)
 
     # ------------------------------------------------------------------
-    # 6. Colours
+    # 6. Colours & alignment
     # ------------------------------------------------------------------
-    name_color   = (30,  30,  30)    # Near-black — professional
-    para_color   = (50,  50,  50)    # Dark grey for body text
-    detail_color = (60,  60,  60)    # Slightly lighter for metadata
+    name_color   = layout.get("name_color", (30, 30, 30))
+    para_color   = layout.get("para_color", (50, 50, 50))
+    detail_color = layout.get("detail_color", (60, 60, 60))
+    name_align   = layout.get("name_align", "center")
 
     # ------------------------------------------------------------------
-    # 7. Draw student name (centred, bold) and bold underline
+    # 7. Draw student name
     # ------------------------------------------------------------------
-    name_y  = layout["name_y"]
-    name_h  = _text_height(draw, student_name, name_font)
+    name_y  = layout.get("name_y", int(h * 0.42))
     name_tw = _text_width(draw, student_name, name_font)
     name_bb = draw.textbbox((0, 0), student_name, font=name_font)
     name_draw_y = name_y - name_bb[1]
-    _draw_centered(draw, student_name, name_draw_y, name_font, name_color, w)
 
-    # Draw bold, clearly visible underline centered directly beneath name
-    underline_tw = name_tw + max(16, int(name_font_size * 0.18))
-    underline_x0 = (w - underline_tw) // 2
-    underline_x1 = underline_x0 + underline_tw
-    underline_thickness = max(3, int(name_font_size * 0.06))
-    underline_y = name_draw_y + name_bb[3] + max(6, int(name_font_size * 0.12))
-    draw.rectangle(
-        [underline_x0, underline_y, underline_x1, underline_y + underline_thickness],
-        fill=name_color,
-    )
+    if name_align == "left":
+        name_x = left_x
+    elif name_align == "right":
+        name_x = max(left_x, right_x - name_tw)
+    else:
+        name_x = max(left_x, (w - name_tw) // 2)
 
-    # Track vertical cursor below the underline
-    current_y = underline_y + underline_thickness
+    draw.text((name_x, name_draw_y), student_name, font=name_font, fill=name_color)
+
+    # Optional underline (only if configured)
+    if layout.get("draw_underline", False):
+        underline_tw = name_tw + max(16, int(name_font_size * 0.18))
+        underline_x0 = max(left_x, (w - underline_tw) // 2)
+        underline_x1 = min(right_x, underline_x0 + underline_tw)
+        underline_thickness = max(2, int(name_font_size * 0.05))
+        underline_y = name_draw_y + name_bb[3] + max(4, int(name_font_size * 0.10))
+        draw.rectangle(
+            [underline_x0, underline_y, underline_x1, underline_y + underline_thickness],
+            fill=name_color,
+        )
+        current_y = underline_y + underline_thickness
+    else:
+        current_y = name_draw_y + name_bb[3]
 
     # ------------------------------------------------------------------
-    # 8. Draw completion paragraph (wrapped, centred)
+    # 8. Draw completion paragraph (ONLY if non-empty)
     # ------------------------------------------------------------------
-    para_gap          = int(h * 0.025)
-    para_line_spacing = max(4, int(para_size * 0.40))
+    para_gap = int(h * 0.022)
+    meta_gap = int(h * 0.025)
+    meta_h   = _text_height(draw, "Ag", detail_font)
 
-    # Never start paragraph before layout.para_top
-    para_start_y = max(current_y + para_gap, layout["para_top"])
+    if paragraph:
+        para_line_spacing = max(4, int(para_size * 0.38))
+        para_start_y = max(current_y + para_gap, layout.get("para_top", int(h * 0.52)))
+        wrapped_lines = _wrap_text(paragraph, para_font, max_text_width, draw)
+        line_h = _text_height(draw, "Ay", para_font)
+        total_para_h = len(wrapped_lines) * (line_h + para_line_spacing)
 
-    wrapped_lines = _wrap_text(paragraph, para_font, max_text_width, draw)
+        # If paragraph would overflow into signature area, compress line spacing
+        if para_start_y + total_para_h + meta_gap + meta_h > sig_top:
+            para_line_spacing = max(2, para_line_spacing - 3)
+            total_para_h = len(wrapped_lines) * (line_h + para_line_spacing)
 
-    line_h       = _text_height(draw, "Ay", para_font)
-    total_para_h = len(wrapped_lines) * (line_h + para_line_spacing)
-    meta_h       = _text_height(draw, "Ag", detail_font)
-    meta_gap     = int(h * 0.028)
-
-    # If paragraph + metadata would overflow into signature area, compress
-    needed = para_start_y + total_para_h + meta_gap + meta_h
-    if needed > sig_top - int(h * 0.01):
-        para_line_spacing = max(2, para_line_spacing - 4)
-        meta_gap          = max(int(h * 0.012), meta_gap - int(h * 0.010))
-        total_para_h      = len(wrapped_lines) * (line_h + para_line_spacing)
-
-    py = para_start_y
-    for line in wrapped_lines:
-        _draw_centered(draw, line, py, para_font, para_color, w)
-        py += line_h + para_line_spacing
-    para_end_y = py
+        py = para_start_y
+        for line in wrapped_lines:
+            _draw_centered(draw, line, py, para_font, para_color, w)
+            py += line_h + para_line_spacing
+        para_end_y = py
+    else:
+        # No description provided: preserve template's existing background text
+        para_end_y = current_y
 
     # ------------------------------------------------------------------
     # 9. Draw Certificate ID and Issue Date (metadata row above signatures)
     # ------------------------------------------------------------------
-    meta_y = max(para_end_y + meta_gap, layout["meta_top"])
+    configured_meta_top = layout.get("meta_top", int(h * 0.70))
+    if paragraph:
+        meta_y = max(para_end_y + meta_gap, configured_meta_top)
+    else:
+        meta_y = configured_meta_top
+
+    # Ensure metadata does not collide with signatures
     meta_y = min(meta_y, sig_top - meta_h - int(h * 0.015))
 
     cert_text = f"Certificate ID: {certificate_number}"
     date_text = f"Issue Date: {issue_disp}"
 
-    draw.text((left_x, meta_y), cert_text, font=detail_font, fill=detail_color)
-    date_tw = _text_width(draw, date_text, detail_font)
-    draw.text((right_x - date_tw, meta_y), date_text, font=detail_font, fill=detail_color)
+    if layout.get("show_cert_id", True):
+        draw.text((left_x, meta_y), cert_text, font=detail_font, fill=detail_color)
+    if layout.get("show_issue_date", True):
+        date_tw = _text_width(draw, date_text, detail_font)
+        draw.text((right_x - date_tw, meta_y), date_text, font=detail_font, fill=detail_color)
 
     # ------------------------------------------------------------------
     # 10. Serialise in requested format (PNG, JPEG, or PDF)

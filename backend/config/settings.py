@@ -282,5 +282,10 @@ FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:5173").rstrip("/")
 # Public website URL used for LinkedIn Credential URLs and public verification
 PUBLIC_FRONTEND_URL = os.getenv("PUBLIC_FRONTEND_URL", "").strip().rstrip("/")
 
-
-
+# --------------------------------------------------
+# GOOGLE OAUTH 2.0 / GOOGLE IDENTITY SERVICES
+# --------------------------------------------------
+GOOGLE_OAUTH_CLIENT_ID = os.getenv(
+    "GOOGLE_CLIENT_ID",
+    os.getenv("GOOGLE_OAUTH_CLIENT_ID", "668146604297-onesmarter-certiverify.apps.googleusercontent.com")
+).strip()

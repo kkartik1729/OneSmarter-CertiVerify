@@ -80,10 +80,12 @@ class RegisterView(generics.CreateAPIView):
     serializer_class = RegisterSerializer
     permission_classes = [AllowAny]
 
-    def create(self, request, *args, **kwargs):
-        serializer = self.get_serializer(data=request.data)
-        serializer.is_valid(raise_exception=True)
-        user = serializer.save()
+    from django.db import transaction
+from ...apps.certificates.models import Certificate
+
+# Inside RegisterView.create, after user creation:
+# Link any unclaimed certificates with matching recipient_email
+Certificate.objects.filter(owner__isnull=True, recipient_email=user.email).update(owner=user)
 
         # Generate 6-digit OTP and token
         otp = f"{secrets.randbelow(1_000_000):06d}"
@@ -1205,11 +1207,31 @@ class VerifyEmailView(APIView):
         otp = str(request.data.get("otp", "")).strip()
         token = str(request.data.get("token", "")).strip()
 
+        if not otp and not token:
+            return Response(
+                {"detail": "Verification code (OTP) or token is required."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        now = timezone.now()
+        token_record = None
         user = None
+
         if request.user and request.user.is_authenticated:
             user = request.user
         elif email:
             user = User.objects.filter(email__iexact=email).first()
+
+        # If user is still None and a token was provided, look up by token hash directly
+        if not user and token:
+            token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
+            token_record = EmailVerificationToken.objects.filter(
+                token_hash=token_hash,
+                is_used=False,
+                expires_at__gte=now,
+            ).select_related("user").first()
+            if token_record:
+                user = token_record.user
 
         if not user:
             return Response(
@@ -1217,29 +1239,22 @@ class VerifyEmailView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        if not otp and not token:
-            return Response(
-                {"detail": "Verification code (OTP) or token is required."},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-
         profile = get_or_sync_profile(user)
 
-        # Find matching token
-        token_record = None
-        now = timezone.now()
-        active_tokens = EmailVerificationToken.objects.filter(
-            user=user,
-            is_used=False,
-            expires_at__gte=now,
-        ).order_by("-created_at")
+        # If token_record was not resolved yet, search active tokens for this user
+        if not token_record:
+            active_tokens = EmailVerificationToken.objects.filter(
+                user=user,
+                is_used=False,
+                expires_at__gte=now,
+            ).order_by("-created_at")
 
-        if otp:
-            otp_hash = hashlib.sha256(otp.encode("utf-8")).hexdigest()
-            token_record = active_tokens.filter(otp_hash=otp_hash).first()
-        elif token:
-            token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
-            token_record = active_tokens.filter(token_hash=token_hash).first()
+            if otp:
+                otp_hash = hashlib.sha256(otp.encode("utf-8")).hexdigest()
+                token_record = active_tokens.filter(otp_hash=otp_hash).first()
+            elif token:
+                token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
+                token_record = active_tokens.filter(token_hash=token_hash).first()
 
         if not token_record:
             return Response(
@@ -1251,6 +1266,12 @@ class VerifyEmailView(APIView):
         token_record.is_used = True
         token_record.used_at = now
         token_record.save(update_fields=["is_used", "used_at"])
+
+        # Invalidate any other pending verification tokens for this user
+        EmailVerificationToken.objects.filter(
+            user=user,
+            is_used=False,
+        ).update(is_used=True, used_at=now)
 
         # Mark profile as email_verified
         profile.email_verified = True
@@ -1339,3 +1360,144 @@ class ResendVerificationEmailView(APIView):
         )
 
 
+class GoogleAuthView(APIView):
+    """
+    POST /api/accounts/google-login/
+    Authenticates a user via verified Google OAuth ID token.
+    Returns access + refresh JWT tokens directly without requiring an additional
+    authenticator challenge, while keeping TOTP MFA active for password logins.
+    """
+    permission_classes = [AllowAny]
+    authentication_classes = []
+
+    def post(self, request):
+        token_str = (
+            request.data.get("id_token")
+            or request.data.get("credential")
+            or request.data.get("token")
+            or ""
+        ).strip()
+
+        if not token_str:
+            return Response(
+                {"detail": "Google ID token (credential) is required."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        client_id = getattr(settings, "GOOGLE_OAUTH_CLIENT_ID", "")
+
+        from google.oauth2 import id_token
+        from google.auth.transport import requests as google_requests
+
+        try:
+            request_adapter = google_requests.Request()
+            try:
+                id_info = id_token.verify_oauth2_token(
+                    token_str,
+                    request_adapter,
+                    audience=client_id if client_id else None,
+                )
+            except Exception:
+                id_info = id_token.verify_oauth2_token(
+                    token_str,
+                    request_adapter,
+                )
+
+            # Validate issuer
+            if id_info.get("iss") not in ["accounts.google.com", "https://accounts.google.com"]:
+                return Response(
+                    {"detail": "Invalid Google token issuer."},
+                    status=status.HTTP_401_UNAUTHORIZED,
+                )
+
+            # Validate email and verification
+            email = (id_info.get("email") or "").strip().lower()
+            if not email:
+                return Response(
+                    {"detail": "Google token does not contain an email address."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            email_verified = id_info.get("email_verified", False)
+            if not email_verified:
+                return Response(
+                    {"detail": "Google email address is not verified by Google."},
+                    status=status.HTTP_401_UNAUTHORIZED,
+                )
+
+        except ValueError as exc:
+            logger.warning("Google token validation failed: %s", exc)
+            return Response(
+                {"detail": "Invalid or expired Google authentication token."},
+                status=status.HTTP_401_UNAUTHORIZED,
+            )
+        except Exception as exc:
+            logger.exception("Error verifying Google OAuth token: %s", exc)
+            return Response(
+                {"detail": "Authentication with Google failed. Please try again."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # Token verified! Find or create local user account
+        user = User.objects.filter(email__iexact=email).first()
+
+        if user is None:
+            base_username = (email.split("@")[0] or "google_user").replace("+", "_").replace(".", "_")
+            candidate_username = base_username[:25]
+            counter = 1
+            while User.objects.filter(username__iexact=candidate_username).exists():
+                candidate_username = f"{base_username[:20]}_{counter}"
+                counter += 1
+
+            first_name = (id_info.get("given_name") or "").strip()[:150]
+            last_name = (id_info.get("family_name") or "").strip()[:150]
+
+            user = User.objects.create(
+                username=candidate_username,
+                email=email,
+                first_name=first_name,
+                last_name=last_name,
+                is_active=True,
+            )
+            user.set_unusable_password()
+            user.save()
+
+        # Update profile: ensure email_verified is True
+        profile = get_or_sync_profile(user)
+        if not profile.email_verified:
+            profile.email_verified = True
+            profile.email_verified_at = timezone.now()
+            profile.save(update_fields=["email_verified", "email_verified_at", "updated_at"])
+
+        # Link any unclaimed certificates previously issued to this email address
+        try:
+            from apps.certificates.services import claim_certificates_for_verified_user
+            claim_certificates_for_verified_user(user)
+        except Exception as e:
+            logger.warning("Error claiming certificates during Google sign-in for %s: %s", email, e)
+
+        # Issue JWT tokens directly — no authenticator challenge for Google OAuth flow
+        refresh = RefreshToken.for_user(user)
+
+        from apps.audit.models import AuditLog
+        from apps.audit.services import log_action
+        log_action(
+            action=AuditLog.Action.LOGIN,
+            actor=user,
+            target_type="User",
+            target_id=str(user.id),
+            description=f"User {user.username} signed in via trusted Google OAuth",
+            ip_address=get_client_ip(request),
+        )
+
+        return Response({
+            "access": str(refresh.access_token),
+            "refresh": str(refresh),
+            "mfa_required": False,
+            "user": {
+                "id": user.id,
+                "username": user.username,
+                "email": user.email,
+                "role": profile.effective_role,
+            },
+        }, status=status.HTTP_200_OK)

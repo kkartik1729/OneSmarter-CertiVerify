@@ -22,6 +22,13 @@ class DashboardView(APIView):
     def get(self, request):
         is_admin = is_certiverify_admin(request.user)
 
+        user = request.user
+        if not is_admin and user and user.is_authenticated:
+            profile = getattr(user, "profile", None)
+            if profile and getattr(profile, "email_verified", False):
+                from apps.certificates.services import claim_unclaimed_certificates_for_user
+                claim_unclaimed_certificates_for_user(user)
+
         certificates = Certificate.objects.all()
 
         if not is_admin:

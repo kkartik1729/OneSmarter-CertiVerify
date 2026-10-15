@@ -368,6 +368,8 @@ class CertificateTemplateSerializer(serializers.ModelSerializer):
             "name",
             "image",
             "image_url",
+            "description",
+            "layout_config",
             "version",
             "file_format",
             "uploaded_by",
@@ -385,8 +387,12 @@ class CertificateTemplateSerializer(serializers.ModelSerializer):
 
     def validate_image(self, value):
         import io
+        import logging
         from django.core.files.base import ContentFile
-        from PIL import Image
+        from PIL import Image, ImageFile
+
+        logger = logging.getLogger(__name__)
+        ImageFile.LOAD_TRUNCATED_IMAGES = True
 
         if value.size > 15 * 1024 * 1024:
             raise serializers.ValidationError("Template file size must not exceed 15 MB.")
@@ -425,25 +431,33 @@ class CertificateTemplateSerializer(serializers.ModelSerializer):
             except serializers.ValidationError:
                 raise
             except Exception as exc:
+                logger.warning("Could not process PDF template: %s", exc)
                 raise serializers.ValidationError(f"Could not process PDF template: {exc}")
 
         # Validate PNG or JPEG image content with Pillow
+        # Safely decode Figma PNGs (including transparency, alpha channels, and metadata chunks)
         try:
             pil_img = Image.open(io.BytesIO(content))
-            pil_img.verify()
-            # Reopen to check dimensions (verify() closes the file)
-            pil_img = Image.open(io.BytesIO(content))
+            pil_img.load()  # Fully decode raster to verify image integrity without crashing on ancillary chunks
             w, h = pil_img.size
             if w < 400 or h < 400:
                 raise serializers.ValidationError(
                     f"Template image resolution is too low ({w}x{h}). Minimum required is 400x400."
                 )
+
+            supported_modes = {"RGB", "RGBA", "P", "L", "LA", "CMYK", "1"}
+            if pil_img.mode not in supported_modes:
+                raise serializers.ValidationError(
+                    f"Unsupported color mode '{pil_img.mode}'. Supported modes are RGB, RGBA, Grayscale, and Palette."
+                )
+
             value._template_format = "PNG" if is_png else "JPEG"
             return value
         except serializers.ValidationError:
             raise
         except Exception as exc:
-            raise serializers.ValidationError(f"Invalid or corrupted template image: {exc}")
+            logger.warning("Failed to decode uploaded image (size=%d bytes, format=%s): %s", len(content), "PNG" if is_png else "JPEG", exc)
+            raise serializers.ValidationError(f"Invalid or unreadable template image: {exc}")
 
 
 # ---------------------------------------------------------------------------

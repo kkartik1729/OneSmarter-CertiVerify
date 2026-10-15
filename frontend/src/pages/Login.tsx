@@ -2,6 +2,7 @@ import { useState, type FormEvent } from 'react';
 import { Link, Navigate, useLocation } from 'react-router-dom';
 import Field from '../components/Field';
 import MfaChallengeForm from '../components/MfaChallengeForm';
+import GoogleSignInButton from '../components/GoogleSignInButton';
 import { useAuth } from '../context/AuthContext';
 import { Brand, ThemeToggle } from '../lib/ui';
 import { homeFor } from '../lib/paths';
@@ -15,7 +16,7 @@ import { ApiError, errMsg } from '../services';
  *  Step 2: challenge + 6-digit code → POST /accounts/login/
  */
 export default function Login() {
-  const { user, login, verifyMfa } = useAuth();
+  const { user, login, verifyMfa, googleLogin } = useAuth();
   const registered = (useLocation().state as { registered?: boolean } | null)?.registered === true;
 
   const [username, setUsername] = useState('');
@@ -100,6 +101,30 @@ export default function Login() {
           </div>
           {errs.form && <p className="fe" role="alert">{errs.form}</p>}
           <button className="btn" style={{ width: '100%', marginTop: 14 }} disabled={busy}>{busy ? 'Please wait…' : 'Sign in'}</button>
+
+          <div style={{ display: 'flex', alignItems: 'center', margin: '16px 0 10px 0' }}>
+            <div style={{ flex: 1, borderTop: '1px solid var(--border, #e2e8f0)' }} />
+            <span style={{ padding: '0 10px', fontSize: '11px', color: 'var(--muted, #94a3b8)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+              or continue with
+            </span>
+            <div style={{ flex: 1, borderTop: '1px solid var(--border, #e2e8f0)' }} />
+          </div>
+
+          <GoogleSignInButton
+            disabled={busy}
+            text="signin_with"
+            onSuccess={async (cred) => {
+              setBusy(true);
+              try {
+                await googleLogin(cred);
+              } catch (x) {
+                setErrs({ form: errMsg(x) });
+              } finally {
+                setBusy(false);
+              }
+            }}
+            onError={(msg) => setErrs({ form: msg })}
+          />
 
           <p className="mu" style={{ textAlign: 'center', marginTop: 16 }}>
             New here? <Link to="/register">Create account</Link> · <Link to="/">Home</Link>

@@ -8,11 +8,11 @@ import UserLayout from './components/UserLayout';
 import Home from './pages/Home';
 import Login from './pages/Login';
 import Register from './pages/Register';
+import VerifyEmail from './pages/VerifyEmail';
 import NotFound from './pages/NotFound';
 
 // Admin Pages
 import AdminDashboard from './pages/admin/AdminDashboard';
-import AddCertificate from './pages/admin/AddCertificate';
 import ReviewCertificates from './pages/admin/ReviewCertificates';
 import ManageUsers from './pages/admin/ManageUsers';
 import Analytics from './pages/admin/Analytics';
@@ -52,6 +52,7 @@ export default function App() {
             <Route path="/" element={<Home />} />
             <Route path="/login" element={<Login />} />
             <Route path="/register" element={<Register />} />
+            <Route path="/verify-email" element={<VerifyEmail />} />
             <Route path="/verify" element={<VerifyCertificate />} />
             {/* Public LinkedIn credential URL routes — no auth required */}
             <Route path="/verify-certificate" element={<PublicVerify />} />
@@ -76,7 +77,7 @@ export default function App() {
                 <Route path="generate" element={<GenerateCertificates />} />
                 <Route path="generate-single" element={<SingleCertificate />} />
                 <Route path="generation-history" element={<GenerationHistory />} />
-                <Route path="add" element={<AddCertificate />} />
+                <Route path="add" element={<Navigate to="/admin/dashboard/generate-single" replace />} />
                 <Route path="certificates" element={<ReviewCertificates />} />
                 <Route path="users" element={<ManageUsers />} />
                 <Route path="analytics" element={<Analytics />} />

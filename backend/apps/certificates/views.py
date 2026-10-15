@@ -1019,7 +1019,13 @@ class BulkGenerateView(APIView):
         batch_title = (request.data.get("certificate_title") or "").strip() or course.title or "Certificate of Completion"
         batch_issuer = (request.data.get("issuer") or "").strip() or course.issuer or "OneSmarter, Inc."
         batch_description = (request.data.get("completion_description") or "").strip()
-        layout_settings = request.data.get("layout_settings")
+        if not batch_description and template and template.description:
+            batch_description = template.description.strip()
+
+        raw_layout_settings = request.data.get("layout_settings")
+        layout_settings = dict(template.layout_config or {})
+        if raw_layout_settings and isinstance(raw_layout_settings, dict):
+            layout_settings.update(raw_layout_settings)
 
         for r in rows:
             student_email = (r.get("student_email") or "").strip().lower()
@@ -1219,10 +1225,12 @@ class SingleGenerateView(APIView):
     Generates a single personalized certificate manually without CSV.
     """
     permission_classes = [IsAuthenticated, IsCertiVerifyAdmin]
+    parser_classes = [MultiPartParser, FormParser, JSONParser]
 
     def post(self, request):
         course_id = request.data.get("course_id")
         template_id = request.data.get("template_id")
+        template_file = request.FILES.get("template_file") or request.FILES.get("image")
         user_id = request.data.get("user_id") or request.data.get("owner_id")
         student_email = (request.data.get("student_email") or "").strip().lower()
         raw_student_name = (request.data.get("student_name") or "").strip()
@@ -1232,8 +1240,28 @@ class SingleGenerateView(APIView):
 
         if not course_id:
             return Response({"detail": "Course is required."}, status=status.HTTP_400_BAD_REQUEST)
-        if not template_id:
-            return Response({"detail": "Certificate template is required."}, status=status.HTTP_400_BAD_REQUEST)
+
+        # Support selecting existing template OR uploading a new template directly
+        template = None
+        if not template_id and template_file:
+            tpl_name = (request.data.get("template_name") or template_file.name or "Uploaded Template").strip()
+            tpl_desc = (request.data.get("template_description") or request.data.get("completion_description") or "").strip()
+            tpl_serializer = CertificateTemplateSerializer(
+                data={"name": tpl_name, "image": template_file, "description": tpl_desc},
+                context={"request": request},
+            )
+            tpl_serializer.is_valid(raise_exception=True)
+            fmt = getattr(tpl_serializer.validated_data.get("image"), "_template_format", "PNG")
+            template = tpl_serializer.save(uploaded_by=request.user, file_format=fmt, version=1)
+            template_id = template.id
+        elif not template_id:
+            return Response({"detail": "Certificate template or template file is required."}, status=status.HTTP_400_BAD_REQUEST)
+        else:
+            try:
+                template = CertificateTemplate.objects.get(pk=template_id)
+            except (CertificateTemplate.DoesNotExist, ValueError):
+                return Response({"detail": "Selected template not found."}, status=status.HTTP_404_NOT_FOUND)
+
         if not (user_id or student_email):
             return Response({"detail": "Student recipient email is required."}, status=status.HTTP_400_BAD_REQUEST)
 
@@ -1253,11 +1281,6 @@ class SingleGenerateView(APIView):
         except (Course.DoesNotExist, ValueError):
             return Response({"detail": "Selected course not found."}, status=status.HTTP_404_NOT_FOUND)
 
-        try:
-            template = CertificateTemplate.objects.get(pk=template_id)
-        except (CertificateTemplate.DoesNotExist, ValueError):
-            return Response({"detail": "Selected template not found."}, status=status.HTTP_404_NOT_FOUND)
-
         if not template.image or not template.image.storage.exists(template.image.name):
             return Response({"detail": "Template image file is missing from storage."}, status=status.HTTP_400_BAD_REQUEST)
 
@@ -1273,8 +1296,17 @@ class SingleGenerateView(APIView):
         course_name = (request.data.get("course_name") or "").strip() or course.name
         certificate_title = (request.data.get("certificate_title") or "").strip() or course.title or "Certificate of Completion"
         issuer_name = (request.data.get("issuer") or "").strip() or course.issuer or "OneSmarter, Inc."
+        
+        # Use provided description override, or fallback to saved template description
         completion_description = (request.data.get("completion_description") or "").strip()
-        layout_settings = request.data.get("layout_settings")
+        if not completion_description and template.description:
+            completion_description = template.description.strip()
+
+        # Merge template layout_config with any request layout_settings
+        layout_settings = dict(template.layout_config or {})
+        raw_layout_settings = request.data.get("layout_settings")
+        if raw_layout_settings and isinstance(raw_layout_settings, dict):
+            layout_settings.update(raw_layout_settings)
 
         # Check duplicate & reissue rules
         dup_qs = Certificate.objects.filter(course_name__iexact=course_name)
@@ -1411,20 +1443,49 @@ class PreviewCertificateView(APIView):
     Returns base64 data URL with DD/MM/YYYY date formatting.
     """
     permission_classes = [IsAuthenticated, IsCertiVerifyAdmin]
+    parser_classes = [MultiPartParser, FormParser, JSONParser]
 
     def post(self, request):
         template_id = request.data.get("template_id")
+        template_file = request.FILES.get("template_file") or request.FILES.get("image")
         student_name = (request.data.get("student_name") or "John Doe").strip()
         course_name = (request.data.get("course_name") or "Course of Completion").strip()
         start_date_str = (request.data.get("start_date") or "").strip()
         end_date_str = (request.data.get("end_date") or "").strip()
         issue_date_str = (request.data.get("issue_date") or "").strip()
         issuer_name = (request.data.get("issuer_name") or request.data.get("issuer") or "OneSmarter, Inc.").strip()
-        completion_description = (request.data.get("completion_description") or "").strip()
-        layout_settings = request.data.get("layout_settings")
 
-        if not template_id:
-            return Response({"detail": "template_id is required."}, status=status.HTTP_400_BAD_REQUEST)
+        template = None
+        if not template_id and template_file:
+            tpl_name = (request.data.get("template_name") or template_file.name or "Preview Template").strip()
+            tpl_desc = (request.data.get("template_description") or request.data.get("completion_description") or "").strip()
+            tpl_serializer = CertificateTemplateSerializer(
+                data={"name": tpl_name, "image": template_file, "description": tpl_desc},
+                context={"request": request},
+            )
+            tpl_serializer.is_valid(raise_exception=True)
+            fmt = getattr(tpl_serializer.validated_data.get("image"), "_template_format", "PNG")
+            template = tpl_serializer.save(uploaded_by=request.user, file_format=fmt, version=1)
+            template_id = template.id
+        elif not template_id:
+            return Response({"detail": "template_id or template_file is required."}, status=status.HTTP_400_BAD_REQUEST)
+        else:
+            try:
+                template = CertificateTemplate.objects.get(pk=template_id)
+            except (CertificateTemplate.DoesNotExist, ValueError):
+                return Response({"detail": "Template not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        if not template.image or not template.image.storage.exists(template.image.name):
+            return Response({"detail": "Template image file missing from storage."}, status=status.HTTP_400_BAD_REQUEST)
+
+        completion_description = (request.data.get("completion_description") or "").strip()
+        if not completion_description and template.description:
+            completion_description = template.description.strip()
+
+        layout_settings = dict(template.layout_config or {})
+        raw_layout_settings = request.data.get("layout_settings")
+        if raw_layout_settings and isinstance(raw_layout_settings, dict):
+            layout_settings.update(raw_layout_settings)
 
         # Parse dates with flexible DD/MM/YYYY handling
         start_date, _ = parse_date_flexible(start_date_str, "Start date") if start_date_str else (timezone.now().date(), None)
@@ -1434,14 +1495,6 @@ class PreviewCertificateView(APIView):
         start_disp = start_date.strftime("%d/%m/%Y") if start_date else "01/07/2026"
         end_disp = end_date.strftime("%d/%m/%Y") if end_date else "01/10/2026"
         issue_disp = issue_date.strftime("%d/%m/%Y") if issue_date else "13/10/2026"
-
-        try:
-            template = CertificateTemplate.objects.get(pk=template_id)
-        except (CertificateTemplate.DoesNotExist, ValueError):
-            return Response({"detail": "Template not found."}, status=status.HTTP_404_NOT_FOUND)
-
-        if not template.image or not template.image.storage.exists(template.image.name):
-            return Response({"detail": "Template image file missing from storage."}, status=status.HTTP_400_BAD_REQUEST)
 
         try:
             png_bytes, sha256_hex = generate_certificate_image(

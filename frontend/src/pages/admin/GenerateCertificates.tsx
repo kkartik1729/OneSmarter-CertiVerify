@@ -76,6 +76,21 @@ export default function GenerateCertificates() {
       setEditNameError('Student name must be 1–29 characters.');
       return;
     }
+    const parseDateStr = (dStr: string) => {
+      const parts = dStr.split('/');
+      if (parts.length === 3) {
+        return new Date(`${parts[2]}-${parts[1]}-${parts[0]}`);
+      }
+      return new Date(dStr);
+    };
+    if (editFormData.start_date && editFormData.end_date) {
+      const dStart = parseDateStr(editFormData.start_date);
+      const dEnd = parseDateStr(editFormData.end_date);
+      if (!isNaN(dStart.getTime()) && !isNaN(dEnd.getTime()) && dEnd < dStart) {
+        setEditNameError('End date cannot be earlier than start date.');
+        return;
+      }
+    }
     const updated: CSVValidationRow = {
       ...editFormData,
       student_name: trimmedName,
@@ -185,6 +200,10 @@ export default function GenerateCertificates() {
       return;
     }
 
+    if (newCourseStart && newCourseEnd && newCourseEnd < newCourseStart) {
+      setError('End date cannot be earlier than start date.');
+      return;
+    }
     setSavingCourse(true);
     setError(null);
     try {
@@ -557,6 +576,7 @@ export default function GenerateCertificates() {
                     <input
                       type="date"
                       required
+                      min={newCourseStart || undefined}
                       value={newCourseEnd}
                       onChange={(e) => setNewCourseEnd(e.target.value)}
                       className="w-full px-3 py-2 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 rounded-lg text-slate-900 dark:text-white"
@@ -864,9 +884,14 @@ export default function GenerateCertificates() {
                 </label>
                 <input
                   type="date"
+                  min={batchStartDate || undefined}
                   value={batchEndDate}
                   onChange={(e) => setBatchEndDate(e.target.value)}
-                  className="w-full px-3 py-2 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 rounded-lg text-slate-900 dark:text-white"
+                  className={`w-full px-3 py-2 bg-white dark:bg-slate-900 border rounded-lg text-slate-900 dark:text-white ${
+                    batchStartDate && batchEndDate && batchEndDate < batchStartDate
+                      ? 'border-rose-400 focus:ring-rose-500'
+                      : 'border-slate-300 dark:border-slate-700'
+                  }`}
                 />
               </div>
 
@@ -897,7 +922,7 @@ export default function GenerateCertificates() {
             </div>
             {batchStartDate && batchEndDate && batchEndDate < batchStartDate && (
               <p className="text-xs text-rose-500 font-medium">
-                Warning: End date cannot be earlier than start date.
+                End date cannot be earlier than start date.
               </p>
             )}
           </div>
@@ -1097,7 +1122,11 @@ export default function GenerateCertificates() {
                           </ul>
                         ) : (
                           <span className="text-teal-600 dark:text-teal-400 text-[11px]">
-                            Account verified (User ID: {r.user_id})
+                            {r.has_account ? (
+                              `Registered account (User ID: ${r.user_id})`
+                            ) : (
+                              `Unregistered recipient — will be issued with owner=null and PDF emailed`
+                            )}
                           </span>
                         )}
                       </td>

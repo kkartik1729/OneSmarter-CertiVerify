@@ -14,6 +14,7 @@ export interface User {
   isSuperuser?: boolean;
   dateJoined?: string;
   mfaEnabled?: boolean;
+  emailVerified?: boolean;
 }
 
 export interface AdminUser {
@@ -25,6 +26,7 @@ export interface AdminUser {
   role: 'ADMIN' | 'USER';
   date_joined: string;
   mfa_enabled?: boolean;
+  email_verified?: boolean;
   phone?: string;
   organization?: string;
 }
@@ -36,6 +38,10 @@ export interface Cert {
   title: string;
   issuer: string;
   recipient: string;
+  recipientEmail?: string;
+  recipient_email?: string;
+  isClaimed?: boolean;
+  is_claimed?: boolean;
   issued: string;
   owner: string;
   status: CertStatus;
@@ -79,6 +85,8 @@ export interface CertificateTemplate {
   name: string;
   image: string;
   image_url?: string;
+  description?: string;
+  layout_config?: Record<string, any>;
   file_format?: string;
   version?: number;
   uploaded_by?: number;
@@ -121,6 +129,7 @@ export interface CSVValidationRow {
   end_date: string;
   issue_date: string;
   user_id: number | null;
+  has_account?: boolean;
   is_valid: boolean;
   errors: string[];
 }

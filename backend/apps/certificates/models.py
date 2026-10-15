@@ -312,6 +312,16 @@ class CertificateTemplate(models.Model):
         blank=True,
         related_name="uploaded_templates",
     )
+    description = models.TextField(
+        blank=True,
+        default="",
+        help_text="Optional completion description text. If empty, the template is assumed to contain pre-printed text.",
+    )
+    layout_config = models.JSONField(
+        blank=True,
+        default=dict,
+        help_text="Optional per-template coordinates and rendering configuration.",
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

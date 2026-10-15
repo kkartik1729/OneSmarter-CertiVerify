@@ -10,8 +10,6 @@ import {
   FileStack,
   ArrowRight,
   Upload,
-  Layers,
-  Image as ImageIcon,
 } from 'lucide-react';
 import {
   courseService,
@@ -38,7 +36,7 @@ export default function SingleCertificate() {
   const [uploadFile, setUploadFile] = useState<File | null>(null);
   const [uploadTemplateName, setUploadTemplateName] = useState('');
   const [uploadPreviewUrl, setUploadPreviewUrl] = useState<string | null>(null);
-  const [uploadingTemplate, setUploadingTemplate] = useState(false);
+  const [isUploadingTemplate, setIsUploadingTemplate] = useState(false);
   const [descriptionOverride, setDescriptionOverride] = useState('');
 
   const [studentSearch, setStudentSearch] = useState('');
@@ -172,21 +170,39 @@ export default function SingleCertificate() {
         throw new Error('Please choose a template image (.png, .jpg, .jpeg) to upload.');
       }
       const tplName = (uploadTemplateName || uploadFile.name.replace(/\.[^/.]+$/, '')).trim() || 'Custom Template';
-      setUploadingTemplate(true);
-      try {
-        const created = await templateService.upload(tplName, uploadFile, descriptionOverride.trim() || undefined);
-        setTemplates((prev) => [created, ...prev]);
-        setSelectedTemplateId(created.id);
-        setTemplateMode('existing');
-        return created.id;
-      } finally {
-        setUploadingTemplate(false);
-      }
+      const created = await templateService.upload(tplName, uploadFile, descriptionOverride.trim() || undefined);
+      setTemplates((prev) => [created, ...prev]);
+      setSelectedTemplateId(created.id);
+      setTemplateMode('existing');
+      return created.id;
     }
     if (!selectedTemplateId) {
       throw new Error('Please select a certificate template.');
     }
     return Number(selectedTemplateId);
+  };
+
+  // Instant upload template button handler
+  const handleInstantUploadTemplate = async () => {
+    if (!uploadFile) {
+      setError('Please choose a template image (.png, .jpg, .jpeg) to upload.');
+      return;
+    }
+    setIsUploadingTemplate(true);
+    setError(null);
+    try {
+      const tplName = (uploadTemplateName || uploadFile.name.replace(/\.[^/.]+$/, '')).trim() || 'Custom Template';
+      const created = await templateService.upload(tplName, uploadFile, descriptionOverride.trim() || undefined);
+      setTemplates((prev) => [created, ...prev]);
+      setSelectedTemplateId(created.id);
+      setTemplateMode('existing');
+      setUploadFile(null);
+      setUploadPreviewUrl(null);
+    } catch (err) {
+      setError(errMsg(err));
+    } finally {
+      setIsUploadingTemplate(false);
+    }
   };
 
   // Live preview
@@ -513,6 +529,28 @@ export default function SingleCertificate() {
                       </div>
                     </div>
                   )}
+
+                  {uploadFile && (
+                    <button
+                      type="button"
+                      disabled={isUploadingTemplate}
+                      onClick={handleInstantUploadTemplate}
+                      className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-teal-600 hover:bg-teal-500 disabled:opacity-50 text-white text-xs font-semibold rounded-lg transition shadow-xs cursor-pointer"
+                    >
+                      {isUploadingTemplate ? (
+                        <>
+                          <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                          <span>Uploading Template...</span>
+                        </>
+                      ) : (
+                        <>
+                          <Upload className="w-3.5 h-3.5" />
+                          <span>Upload &amp; Use Template</span>
+                        </>
+                      )}
+                    </button>
+                  )}
+
                   <p className="text-[11px] text-slate-500">
                     Supports high-res Figma PNGs, RGBA with transparency, and JPEG certificates.
                   </p>

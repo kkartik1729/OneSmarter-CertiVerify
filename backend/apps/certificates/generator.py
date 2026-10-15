@@ -138,47 +138,78 @@ def _fmt_date(d) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Layout configuration
+# Layout configuration & coordinate resolution
 # ---------------------------------------------------------------------------
+
+def _resolve_coord(val, total: int, fallback_ratio: float) -> int:
+    """
+    Resolve a layout coordinate to absolute pixels.
+    Supports:
+    - None -> total * fallback_ratio
+    - float between 0.0 and 1.0 -> total * val
+    - percentage string (e.g. '45%') -> total * 0.45
+    - int or float > 1.0 -> absolute pixels, bounded within [0, total]
+    """
+    if val is None:
+        return int(total * fallback_ratio)
+    if isinstance(val, str):
+        s = val.strip().rstrip("%")
+        try:
+            f = float(s)
+            if "%" in val:
+                return int(total * (f / 100.0))
+            if 0.0 < f < 1.0:
+                return int(total * f)
+            return min(max(0, int(f)), total)
+        except ValueError:
+            return int(total * fallback_ratio)
+    if isinstance(val, (int, float)):
+        if 0.0 < val < 1.0:
+            return int(total * val)
+        return min(max(0, int(val)), total)
+    return int(total * fallback_ratio)
+
 
 def _portrait_layout(w: int, h: int) -> dict:
     """
-    Return proportional pixel-coordinate layout for a portrait template.
-    Uses normalized ratios so layout scales naturally with any image dimensions.
+    Proportional layout for portrait templates (height > width).
+    Calculated relative to actual template dimensions for universal scaling.
     """
     return {
-        # Usable horizontal bounds (inside margins / borders)
-        "left_margin":    int(w * 0.10),
-        "right_margin":   int(w * 0.90),
-        "name_y":         int(h * 0.42),
+        "left_margin":    int(w * 0.09),
+        "right_margin":   int(w * 0.91),
+        "name_y":         int(h * 0.43),
         "name_align":     "center",
         "name_color":     (30, 30, 30),
         "draw_underline": False,
         "para_top":       int(h * 0.53),
         "para_color":     (50, 50, 50),
-        "meta_top":       int(h * 0.68),
+        "meta_top":       int(h * 0.69),
         "meta_color":     (60, 60, 60),
-        "sig_top":        int(h * 0.78),
-        # mask_rect is None by default so uploaded background art/text is preserved
+        "sig_top":        int(h * 0.80),
         "mask_rect":      None,
         "bg_color":       (250, 250, 250),
     }
 
 
 def _landscape_layout(w: int, h: int) -> dict:
-    """Generic proportional layout for landscape or square templates."""
+    """
+    Proportional layout for landscape and square templates.
+    Places the recipient's name in the designated focal band (45% of height)
+    so it does not overwrite the certificate header or decorative banners.
+    """
     return {
         "left_margin":    int(w * 0.08),
         "right_margin":   int(w * 0.92),
-        "name_y":         int(h * 0.40),
+        "name_y":         int(h * 0.45),
         "name_align":     "center",
         "name_color":     (30, 30, 30),
         "draw_underline": False,
-        "para_top":       int(h * 0.52),
+        "para_top":       int(h * 0.54),
         "para_color":     (50, 50, 50),
         "meta_top":       int(h * 0.72),
         "meta_color":     (60, 60, 60),
-        "sig_top":        int(h * 0.85),
+        "sig_top":        int(h * 0.84),
         "mask_rect":      None,
         "bg_color":       (255, 255, 255),
     }
@@ -309,15 +340,18 @@ def generate_certificate_image(
     # 5. Choose font sizes & measurement
     # ------------------------------------------------------------------
     base = min(w, h)
+    max_name_width = min(max_text_width, int(w * 0.82))
 
-    # Student name: start at comfortable size, shrink until fits max_text_width
-    name_font_size = layout.get("name_font_size") or max(int(base * 0.048), 28)
-    min_name_font_size = layout.get("min_name_font_size", 16)
+    # Student name: start at comfortable size, shrink until fits max_name_width
+    configured_name_size = layout.get("name_font_size")
+    name_font_size = int(configured_name_size) if configured_name_size else max(int(base * 0.052), 26)
+    min_name_font_size = layout.get("min_name_font_size") or max(int(base * 0.020), 14)
+
     while name_font_size > min_name_font_size:
         nf = _get_font(name_font_size, bold=True)
-        if _text_width(draw, student_name, nf) <= max_text_width:
+        if _text_width(draw, student_name, nf) <= max_name_width:
             break
-        name_font_size -= 2
+        name_font_size -= 1
     name_font = _get_font(name_font_size, bold=True)
 
     para_size = layout.get("para_font_size") or max(int(base * 0.021), 16)
@@ -335,12 +369,17 @@ def generate_certificate_image(
     name_align   = layout.get("name_align", "center")
 
     # ------------------------------------------------------------------
-    # 7. Draw student name
+    # 7. Draw student name (vertically & horizontally centered in focal band)
     # ------------------------------------------------------------------
-    name_y  = layout.get("name_y", int(h * 0.42))
-    name_tw = _text_width(draw, student_name, name_font)
+    fallback_name_ratio = 0.43 if h >= w * 1.05 else 0.45
+    target_name_y = _resolve_coord(layout.get("name_y"), h, fallback_name_ratio)
+
     name_bb = draw.textbbox((0, 0), student_name, font=name_font)
-    name_draw_y = name_y - name_bb[1]
+    name_tw = name_bb[2] - name_bb[0]
+    name_th = name_bb[3] - name_bb[1]
+
+    # Center text vertically on target_name_y
+    name_draw_y = target_name_y - (name_th // 2) - name_bb[1]
 
     if name_align == "left":
         name_x = left_x
@@ -372,10 +411,14 @@ def generate_certificate_image(
     para_gap = int(h * 0.022)
     meta_gap = int(h * 0.025)
     meta_h   = _text_height(draw, "Ag", detail_font)
+    fallback_sig_ratio = 0.80 if h >= w * 1.05 else 0.84
+    sig_top = _resolve_coord(layout.get("sig_top"), h, fallback_sig_ratio)
 
     if paragraph:
         para_line_spacing = max(4, int(para_size * 0.38))
-        para_start_y = max(current_y + para_gap, layout.get("para_top", int(h * 0.52)))
+        fallback_para_ratio = 0.53 if h >= w * 1.05 else 0.54
+        configured_para_top = _resolve_coord(layout.get("para_top"), h, fallback_para_ratio)
+        para_start_y = max(current_y + para_gap, configured_para_top)
         wrapped_lines = _wrap_text(paragraph, para_font, max_text_width, draw)
         line_h = _text_height(draw, "Ay", para_font)
         total_para_h = len(wrapped_lines) * (line_h + para_line_spacing)
@@ -397,7 +440,8 @@ def generate_certificate_image(
     # ------------------------------------------------------------------
     # 9. Draw Certificate ID and Issue Date (metadata row above signatures)
     # ------------------------------------------------------------------
-    configured_meta_top = layout.get("meta_top", int(h * 0.70))
+    fallback_meta_ratio = 0.69 if h >= w * 1.05 else 0.72
+    configured_meta_top = _resolve_coord(layout.get("meta_top"), h, fallback_meta_ratio)
     if paragraph:
         meta_y = max(para_end_y + meta_gap, configured_meta_top)
     else:
@@ -416,22 +460,29 @@ def generate_certificate_image(
         draw.text((right_x - date_tw, meta_y), date_text, font=detail_font, fill=detail_color)
 
     # ------------------------------------------------------------------
-    # 10. Serialise in requested format (PNG, JPEG, or PDF)
+    # 10. Serialise in requested format (preserving PNG transparency when requested)
     # ------------------------------------------------------------------
-    output_img = Image.new("RGB", img.size, (255, 255, 255))
-    if img.mode == "RGBA":
-        output_img.paste(img, mask=img.split()[3])
-    else:
-        output_img.paste(img)
-
     buffer = io.BytesIO()
     fmt = output_format.upper()
-    if fmt in ("JPEG", "JPG"):
+    if fmt == "PNG":
+        # Preserve full alpha transparency and resolution
+        img.save(buffer, format="PNG", optimize=True)
+    elif fmt in ("JPEG", "JPG"):
+        output_img = Image.new("RGB", img.size, (255, 255, 255))
+        if img.mode == "RGBA":
+            output_img.paste(img, mask=img.split()[3])
+        else:
+            output_img.paste(img)
         output_img.save(buffer, format="JPEG", quality=95)
     elif fmt == "PDF":
+        output_img = Image.new("RGB", img.size, (255, 255, 255))
+        if img.mode == "RGBA":
+            output_img.paste(img, mask=img.split()[3])
+        else:
+            output_img.paste(img)
         output_img.save(buffer, format="PDF", resolution=150)
     else:
-        output_img.save(buffer, format="PNG", optimize=True)
+        img.save(buffer, format="PNG", optimize=True)
 
     result_bytes = buffer.getvalue()
     sha256 = hashlib.sha256(result_bytes).hexdigest()

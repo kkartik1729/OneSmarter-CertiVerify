@@ -5,6 +5,7 @@ import { ShieldCheck, QrCode } from 'lucide-react';
 interface Props {
   detail: string;
   qrCode?: string;
+  secret?: string;
   isSetup?: boolean;
   busy: boolean;
   error: string;
@@ -13,7 +14,7 @@ interface Props {
 }
 
 /** Login step 2: Google / Microsoft Authenticator QR setup or 6-digit TOTP verification. */
-export default function MfaChallengeForm({ detail, qrCode, isSetup, busy, error, onSubmit, onBack }: Props) {
+export default function MfaChallengeForm({ detail, qrCode, secret, isSetup, busy, error, onSubmit, onBack }: Props) {
   const [code, setCode] = useState('');
   const [local, setLocal] = useState('');
 
@@ -60,6 +61,12 @@ export default function MfaChallengeForm({ detail, qrCode, isSetup, busy, error,
             <QrCode className="w-3.5 h-3.5 text-slate-400" />
             <span>Scan with Google Authenticator or Microsoft Authenticator</span>
           </p>
+          {secret && (
+            <div style={{ marginTop: 10, padding: '6px 10px', background: '#F8FAFC', borderRadius: 8, border: '1px solid #E2E8F0' }}>
+              <span style={{ fontSize: 11, color: '#64748B', display: 'block' }}>Or enter manually in authenticator app:</span>
+              <code style={{ fontSize: 13, letterSpacing: '0.08em', fontWeight: 600, color: '#0F172A', userSelect: 'all' }}>{secret}</code>
+            </div>
+          )}
         </div>
       )}
 
@@ -95,7 +102,8 @@ export default function MfaChallengeForm({ detail, qrCode, isSetup, busy, error,
       <button
         type="submit"
         disabled={busy || code.trim().length !== 6}
-        className="w-full mt-4 py-2.5 px-4 bg-teal-600 hover:bg-teal-700 disabled:opacity-50 text-white rounded-xl text-sm font-semibold shadow-sm transition flex items-center justify-center gap-2"
+        className="btn"
+        style={{ width: '100%', marginTop: 16 }}
       >
         <span>{busy ? 'Verifying Code…' : 'Verify & Enter Dashboard'}</span>
       </button>

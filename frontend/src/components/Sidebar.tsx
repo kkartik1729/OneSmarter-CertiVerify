@@ -142,14 +142,14 @@ export default function Sidebar({
           {!collapsed && user && (
             <div className="px-3 py-2 rounded-xl bg-slate-900/60 border border-slate-800 flex items-center gap-3">
               <div className="w-8 h-8 rounded-full bg-teal-600/30 text-teal-300 border border-teal-500/30 flex items-center justify-center font-bold text-xs uppercase flex-shrink-0">
-                {user.name.charAt(0) || user.username?.charAt(0) || 'U'}
+                {user?.name?.charAt(0) || user?.username?.charAt(0) || 'U'}
               </div>
               <div className="min-w-0 flex-1">
                 <p className="text-xs font-semibold text-white truncate">
-                  {user.name || user.username}
+                  {user?.name || user?.username}
                 </p>
                 <p className="text-[10px] text-slate-400 truncate">
-                  {user.email}
+                  {user?.email}
                 </p>
               </div>
             </div>

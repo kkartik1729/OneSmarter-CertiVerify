@@ -1,4 +1,5 @@
 export { ApiError, API_BASE } from './http';
+export { tokens } from './tokens';
 export { authService, profileService, mfaService, passwordResetService } from './auth';
 export type { LoginResult } from './auth';
 export { certificateService, verificationService, courseService, templateService, generationService } from './certificates';

@@ -7,7 +7,7 @@ import { tokens } from './tokens';
 /** Step 1 of login either finishes (tokens + profile) or asks for the Google Authenticator code. */
 export type LoginResult =
   | { kind: 'success'; user: User }
-  | { kind: 'mfa'; challenge: string; detail: string; qrCode?: string; isSetup?: boolean };
+  | { kind: 'mfa'; challenge: string; detail: string; qrCode?: string; secret?: string; isSetup?: boolean };
 
 interface LoginResponse {
   access?: unknown;
@@ -16,7 +16,9 @@ interface LoginResponse {
   mfa_setup_required?: unknown;
   challenge?: unknown;
   qr_code?: unknown;
+  secret?: unknown;
   detail?: unknown;
+  user?: unknown;
 }
 
 /** Saves the tokens, then loads the profile. If the profile fails (or has no valid role) the tokens are discarded. */
@@ -24,12 +26,21 @@ async function finishLogin(d: LoginResponse): Promise<User> {
   if (typeof d.access !== 'string' || typeof d.refresh !== 'string') throw new Error('Unexpected response from the server. Please try again.');
   tokens.set(d.access, d.refresh);
   try {
+    if (d.user) {
+      try {
+        return mapUser(d.user);
+      } catch {
+        // Fall back to fetching me() if payload was partial
+      }
+    }
     return await authService.me();
   } catch (e) {
     tokens.clear();
     throw e;
   }
 }
+
+let restoreInFlight: Promise<User | null> | null = null;
 
 export const authService = {
   /** POST /accounts/login/ {username, password} */
@@ -43,6 +54,7 @@ export const authService = {
         challenge: d.challenge,
         detail: typeof d.detail === 'string' ? d.detail : 'Enter your Google Authenticator code.',
         qrCode: typeof d.qr_code === 'string' ? d.qr_code : undefined,
+        secret: typeof d.secret === 'string' ? d.secret : undefined,
         isSetup: d.mfa_setup_required === true,
       };
     }
@@ -92,10 +104,14 @@ export const authService = {
     return mapUser(await http<unknown>('GET', EP.me));
   },
 
-  /** Restores the session after a page reload. Returns null when there are no stored tokens. */
+  /** Restores the session after a page reload. Returns null when there are no stored tokens. Shares in-flight request. */
   async restore(): Promise<User | null> {
     if (!tokens.has()) return null;
-    return authService.me(); // http() refreshes the access token automatically if it expired
+    if (restoreInFlight) return restoreInFlight;
+    restoreInFlight = authService.me().finally(() => {
+      restoreInFlight = null;
+    });
+    return restoreInFlight;
   },
 
   logout(): void {

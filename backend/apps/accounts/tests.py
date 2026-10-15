@@ -119,8 +119,36 @@ class AccountsAuthAndMFATestCase(TestCase):
     # 2. LOGIN AND REGISTRATION TESTS
     # -------------------------------------------------------------------------
 
-    def test_login_valid_credentials_requires_mfa(self):
-        """Valid login credentials should trigger MFA challenge without issuing tokens."""
+    def test_login_valid_credentials_without_mfa_issues_tokens(self):
+        """Standard login credentials without MFA should directly issue JWT tokens."""
+        res = self.client.post("/api/accounts/login/", {
+            "username": "normaluser",
+            "password": "Password@123",
+        })
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        self.assertFalse(res.data.get("mfa_required", True))
+        self.assertIn("access", res.data)
+        self.assertIn("refresh", res.data)
+
+    def test_login_with_email_address_succeeds(self):
+        """Login with email address instead of username must succeed and issue tokens directly."""
+        res = self.client.post("/api/accounts/login/", {
+            "username": "superadmin@example.com",
+            "password": "AdminPassword@123",
+        })
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        self.assertFalse(res.data.get("mfa_required", True))
+        self.assertIn("access", res.data)
+        self.assertIn("refresh", res.data)
+
+    def test_login_with_mfa_enabled_requires_otp_challenge(self):
+        """When user has MFA enabled, login prompts for 6-digit challenge without issuing tokens."""
+        secret = pyotp.random_base32()
+        profile = self.user.profile
+        profile.totp_secret = secret
+        profile.mfa_enabled = True
+        profile.save()
+
         res = self.client.post("/api/accounts/login/", {
             "username": "normaluser",
             "password": "Password@123",
@@ -130,16 +158,6 @@ class AccountsAuthAndMFATestCase(TestCase):
         self.assertIn("challenge", res.data)
         self.assertNotIn("access", res.data)
         self.assertNotIn("refresh", res.data)
-
-    def test_login_with_email_address_succeeds(self):
-        """Login with email address instead of username must succeed."""
-        res = self.client.post("/api/accounts/login/", {
-            "username": "superadmin@example.com",
-            "password": "AdminPassword@123",
-        })
-        self.assertEqual(res.status_code, status.HTTP_200_OK)
-        self.assertTrue(res.data["mfa_required"])
-        self.assertIn("challenge", res.data)
 
     def test_login_invalid_credentials_rejected(self):
         """Invalid password returns 401."""
@@ -182,35 +200,31 @@ class AccountsAuthAndMFATestCase(TestCase):
     # 3. MFA SETUP, VERIFICATION, AND REPLAY TESTS
     # -------------------------------------------------------------------------
 
-    def test_first_time_mfa_setup_and_login_flow(self):
-        """Full first-time login: password -> setup QR challenge -> verify OTP -> JWT tokens."""
-        # Step 1: Login
-        login_res = self.client.post("/api/accounts/login/", {
-            "username": "normaluser",
-            "password": "Password@123",
-        })
-        self.assertEqual(login_res.status_code, status.HTTP_200_OK)
-        self.assertTrue(login_res.data["mfa_setup_required"])
-        challenge = login_res.data["challenge"]
-        secret = login_res.data["secret"]
+    def test_mfa_setup_and_confirm_flow(self):
+        """Authenticated user sets up MFA: generates secret/QR -> confirms valid code -> enabled."""
+        self.client.force_authenticate(user=self.user)
+        setup_res = self.client.post("/api/accounts/mfa/setup/")
+        self.assertEqual(setup_res.status_code, status.HTTP_200_OK)
+        self.assertIn("qr_code", setup_res.data)
+        secret = setup_res.data["secret"]
 
-        # Step 2: Submit valid OTP
-        valid_otp = pyotp.TOTP(secret).now()
-        verify_res = self.client.post("/api/accounts/login/", {
-            "challenge": challenge,
-            "code": valid_otp,
-        })
-        self.assertEqual(verify_res.status_code, status.HTTP_200_OK)
-        self.assertIn("access", verify_res.data)
-        self.assertIn("refresh", verify_res.data)
+        # Confirm with valid TOTP code
+        code = pyotp.TOTP(secret).now()
+        confirm_res = self.client.post("/api/accounts/mfa/confirm/", {"code": code})
+        self.assertEqual(confirm_res.status_code, status.HTTP_200_OK)
 
-        # Profile is now MFA enabled
         profile = UserProfile.objects.get(user=self.user)
         self.assertTrue(profile.mfa_enabled)
         self.assertEqual(profile.totp_secret, secret)
 
     def test_mfa_invalid_otp_rejected(self):
         """Submitting an invalid OTP must be rejected with 401."""
+        secret = pyotp.random_base32()
+        profile = self.user.profile
+        profile.totp_secret = secret
+        profile.mfa_enabled = True
+        profile.save()
+
         login_res = self.client.post("/api/accounts/login/", {
             "username": "normaluser",
             "password": "Password@123",

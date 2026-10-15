@@ -360,6 +360,15 @@ class CertificateTemplateSerializer(serializers.ModelSerializer):
         read_only=True,
     )
     image_url = serializers.SerializerMethodField()
+    # Use FileField rather than DRF's ImageField so that DRF's internal image.verify()
+    # does not fail on Figma PNGs with complex metadata chunks (iCCP, pHYs, etc.)
+    image = serializers.FileField(required=True)
+    description = serializers.CharField(
+        required=False,
+        allow_blank=True,
+        allow_null=True,
+        default="",
+    )
 
     class Meta:
         model = CertificateTemplate
@@ -393,12 +402,17 @@ class CertificateTemplateSerializer(serializers.ModelSerializer):
 
         logger = logging.getLogger(__name__)
         ImageFile.LOAD_TRUNCATED_IMAGES = True
+        Image.MAX_IMAGE_PIXELS = 200_000_000
 
-        if value.size > 15 * 1024 * 1024:
-            raise serializers.ValidationError("Template file size must not exceed 15 MB.")
+        # Support templates up to 25 MB
+        if value.size > 25 * 1024 * 1024:
+            raise serializers.ValidationError("Template file size must not exceed 25 MB.")
 
         content = value.read()
         value.seek(0)
+
+        if not content:
+            raise serializers.ValidationError("Uploaded template file is empty.")
 
         # Inspect magic bytes — never trust extension alone
         is_png = content.startswith(b"\x89PNG\r\n\x1a\n")
@@ -409,6 +423,9 @@ class CertificateTemplateSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError(
                 "Unsupported file format. Please upload a valid PNG, JPG/JPEG image or single-page PDF template."
             )
+
+        safe_base = (value.name or "template").rsplit(".", 1)[0].rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
+        safe_base = "".join(c for c in safe_base if c.isalnum() or c in ("-", "_"))[:60] or "template"
 
         if is_pdf:
             try:
@@ -424,7 +441,6 @@ class CertificateTemplateSerializer(serializers.ModelSerializer):
                 rendered_img.save(buf, format="PNG")
                 png_bytes = buf.getvalue()
 
-                safe_base = (value.name or "template").rsplit(".", 1)[0].rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
                 converted_file = ContentFile(png_bytes, name=f"{safe_base}.png")
                 converted_file._template_format = "PDF"
                 return converted_file
@@ -440,23 +456,54 @@ class CertificateTemplateSerializer(serializers.ModelSerializer):
             pil_img = Image.open(io.BytesIO(content))
             pil_img.load()  # Fully decode raster to verify image integrity without crashing on ancillary chunks
             w, h = pil_img.size
-            if w < 400 or h < 400:
+            if w < 300 or h < 300:
                 raise serializers.ValidationError(
-                    f"Template image resolution is too low ({w}x{h}). Minimum required is 400x400."
+                    f"Template image resolution is too low ({w}x{h}). Minimum required is 300x300."
                 )
 
-            supported_modes = {"RGB", "RGBA", "P", "L", "LA", "CMYK", "1"}
+            supported_modes = {"RGB", "RGBA", "P", "PA", "L", "LA", "CMYK", "1"}
             if pil_img.mode not in supported_modes:
                 raise serializers.ValidationError(
                     f"Unsupported color mode '{pil_img.mode}'. Supported modes are RGB, RGBA, Grayscale, and Palette."
                 )
 
-            value._template_format = "PNG" if is_png else "JPEG"
-            return value
+            # Re-encode PNG cleanly to strip problematic non-standard metadata chunks (e.g. invalid iCCP)
+            # while strictly preserving 100% resolution, aspect ratio, and alpha transparency
+            if is_png:
+                out_buf = io.BytesIO()
+                # If Palette mode with transparency, convert to RGBA so transparency is pristine
+                if pil_img.mode in ("P", "PA"):
+                    pil_clean = pil_img.convert("RGBA")
+                elif pil_img.mode in ("L", "LA", "1"):
+                    pil_clean = pil_img.convert("RGBA" if "A" in pil_img.mode else "RGB")
+                elif pil_img.mode == "CMYK":
+                    pil_clean = pil_img.convert("RGB")
+                else:
+                    pil_clean = pil_img
+
+                pil_clean.save(out_buf, format="PNG", optimize=False)
+                clean_bytes = out_buf.getvalue()
+                saved_file = ContentFile(clean_bytes, name=f"{safe_base}.png")
+                saved_file._template_format = "PNG"
+                return saved_file
+            else:
+                out_buf = io.BytesIO()
+                pil_clean = pil_img.convert("RGB") if pil_img.mode != "RGB" else pil_img
+                pil_clean.save(out_buf, format="JPEG", quality=95)
+                clean_bytes = out_buf.getvalue()
+                saved_file = ContentFile(clean_bytes, name=f"{safe_base}.jpg")
+                saved_file._template_format = "JPEG"
+                return saved_file
+
         except serializers.ValidationError:
             raise
         except Exception as exc:
-            logger.warning("Failed to decode uploaded image (size=%d bytes, format=%s): %s", len(content), "PNG" if is_png else "JPEG", exc)
+            logger.warning(
+                "Failed to decode uploaded image (size=%d bytes, format=%s): %s",
+                len(content),
+                "PNG" if is_png else "JPEG",
+                exc,
+            )
             raise serializers.ValidationError(f"Invalid or unreadable template image: {exc}")
 
 

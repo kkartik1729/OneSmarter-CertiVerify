@@ -37,6 +37,15 @@ class UserProfile(models.Model):
     email_verified = models.BooleanField(default=False, db_index=True)
     email_verified_at = models.DateTimeField(null=True, blank=True)
 
+    # Stable Google OAuth subject identifier
+    google_sub = models.CharField(
+        max_length=255,
+        blank=True,
+        default="",
+        db_index=True,
+        help_text="Stable Google OAuth subject identifier (sub).",
+    )
+
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

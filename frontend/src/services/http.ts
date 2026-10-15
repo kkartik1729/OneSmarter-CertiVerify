@@ -1,9 +1,9 @@
 import { EP } from './endpoints';
 import { tokens } from './tokens';
 
-const RAW = ((import.meta.env.VITE_API_BASE_URL as string | undefined) ?? '').trim().replace(/\/+$/, '');
+const RAW = ((import.meta.env.VITE_API_BASE_URL as string | undefined) ?? (import.meta.env.VITE_API_URL as string | undefined) ?? '').trim().replace(/\/+$/, '');
 /** Base URL of the API. "/api" is added if you forgot it. */
-export const API_BASE = RAW ? (/\/api$/.test(RAW) ? RAW : `${RAW}/api`) : 'http://127.0.0.1:8005/api';
+export const API_BASE = RAW ? (/\/api$/.test(RAW) ? RAW : `${RAW}/api`) : 'http://127.0.0.1:8000/api';
 const TIMEOUT_MS = Number(import.meta.env.VITE_API_TIMEOUT_MS) || 15000;
 
 type Method = 'GET' | 'POST' | 'PATCH' | 'PUT' | 'DELETE';

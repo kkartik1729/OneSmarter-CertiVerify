@@ -126,7 +126,7 @@ export default function VerifyEmail() {
             <div className="pt-2">
               <button
                 type="button"
-                onClick={() => go(user ? PATHS.userHome : PATHS.login)}
+                onClick={() => go(user ? PATHS.userHome : PATHS.login, { state: { verified: true } })}
                 className="btn inline-flex items-center justify-center gap-2"
                 style={{ width: '100%' }}
               >

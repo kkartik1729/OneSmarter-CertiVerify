@@ -107,20 +107,30 @@ TEMPLATES = [
 WSGI_APPLICATION = "config.wsgi.application"
 
 # --------------------------------------------------
-# POSTGRESQL DATABASE
+# DATABASE (PostgreSQL by default, SQLite supported via DB_ENGINE)
 # --------------------------------------------------
 
-DATABASES = {
-    "default": {
-        "ENGINE": "django.db.backends.postgresql",
-        "NAME": os.getenv("DB_NAME", "certiverify_db"),
-        "USER": os.getenv("DB_USER", "postgres"),
-        "PASSWORD": os.getenv("DB_PASSWORD", ""),
-        "HOST": os.getenv("DB_HOST", "127.0.0.1"),
-        "PORT": os.getenv("DB_PORT", "8000"),
-        "CONN_MAX_AGE": 60,
+_db_engine = os.getenv("DB_ENGINE", "django.db.backends.postgresql").strip().lower()
+
+if _db_engine in ("sqlite", "sqlite3", "django.db.backends.sqlite3"):
+    DATABASES = {
+        "default": {
+            "ENGINE": "django.db.backends.sqlite3",
+            "NAME": BASE_DIR / "db.sqlite3",
+        }
     }
-}
+else:
+    DATABASES = {
+        "default": {
+            "ENGINE": "django.db.backends.postgresql",
+            "NAME": os.getenv("DB_NAME", "certiverify_db"),
+            "USER": os.getenv("DB_USER", "postgres"),
+            "PASSWORD": os.getenv("DB_PASSWORD", ""),
+            "HOST": os.getenv("DB_HOST", "127.0.0.1"),
+            "PORT": os.getenv("DB_PORT", "8000"),
+            "CONN_MAX_AGE": 60,
+        }
+    }
 
 # --------------------------------------------------
 # PASSWORD VALIDATION
@@ -287,5 +297,5 @@ PUBLIC_FRONTEND_URL = os.getenv("PUBLIC_FRONTEND_URL", "").strip().rstrip("/")
 # --------------------------------------------------
 GOOGLE_OAUTH_CLIENT_ID = os.getenv(
     "GOOGLE_CLIENT_ID",
-    os.getenv("GOOGLE_OAUTH_CLIENT_ID", "668146604297-onesmarter-certiverify.apps.googleusercontent.com")
+    os.getenv("GOOGLE_OAUTH_CLIENT_ID", "")
 ).strip()

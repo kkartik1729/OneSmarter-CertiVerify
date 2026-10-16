@@ -64,7 +64,7 @@ export default function Sidebar({
 
   const visibleNavItems = navItems.filter(item => {
     if (item.path.includes('set-password')) {
-      return !user?.hasUsablePassword;
+      return user?.isGoogleUser === true && !user?.hasUsablePassword;
     }
     return true;
   });

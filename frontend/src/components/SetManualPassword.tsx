@@ -124,6 +124,32 @@ export default function SetManualPassword() {
         </div>
       )}
 
+      {!user?.isGoogleUser && (
+        <div className="mb-6 p-4 rounded-xl bg-slate-50 dark:bg-slate-800/60 border border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-300 flex items-start gap-3 text-xs">
+          <AlertCircle className="w-5 h-5 text-slate-500 dark:text-slate-400 flex-shrink-0 mt-0.5" />
+          <div className="space-y-2">
+            <p className="font-bold text-sm text-slate-900 dark:text-white">
+              Manual Password Setup Not Applicable
+            </p>
+            <p className="leading-relaxed">
+              This setup option is reserved for Google-authenticated accounts that need to create a local password.
+              Your account already uses standard password authentication. If you need to change your password,
+              please use the Forgot Password workflow from the sign-in page.
+            </p>
+            <div className="pt-1">
+              <button
+                type="button"
+                onClick={() => navigate(profilePath)}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-teal-600 hover:bg-teal-700 text-white font-medium text-xs transition"
+              >
+                <span>Return to Profile Settings</span>
+                <ArrowRight className="w-3.5 h-3.5" />
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {error && (
         <div className="mb-6 p-3.5 rounded-xl bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-800 text-rose-800 dark:text-rose-300 flex items-center gap-2.5 text-xs font-medium">
           <AlertCircle className="w-4 h-4 text-rose-600 flex-shrink-0" />
@@ -131,7 +157,7 @@ export default function SetManualPassword() {
         </div>
       )}
 
-      {!hasPassword && (
+      {user?.isGoogleUser && !hasPassword && (
         <form onSubmit={handleSubmit} className="space-y-4">
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             {/* Read-only account username */}

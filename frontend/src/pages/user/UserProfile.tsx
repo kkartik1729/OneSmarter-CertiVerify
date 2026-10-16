@@ -8,7 +8,7 @@ export default function UserProfile() {
   return (
     <div className="max-w-4xl mx-auto space-y-8">
       <ProfileSettings />
-      {!user?.hasUsablePassword && <SetManualPassword />}
+      {user?.isGoogleUser && !user?.hasUsablePassword && <SetManualPassword />}
     </div>
   );
 }

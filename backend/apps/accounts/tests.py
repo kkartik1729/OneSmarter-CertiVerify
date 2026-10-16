@@ -1049,9 +1049,55 @@ class AccountsAuthAndMFATestCase(TestCase):
         self.assertEqual(verify_res.status_code, status.HTTP_200_OK)
         self.assertIn("access", verify_res.data)
         self.assertIn("refresh", verify_res.data)
-
         google_user.profile.refresh_from_db()
         self.assertTrue(google_user.profile.mfa_enabled)
 
+    def test_set_manual_password_rejected_for_non_google_users(self):
+        """Non-Google users cannot call set-password endpoint."""
+        normal_user = User.objects.create_user(
+            username="regularuser",
+            email="regularuser@example.com",
+            password="InitialPassword123!",
+        )
+        self.client.force_authenticate(user=normal_user)
+        res = self.client.post("/api/accounts/set-password/", {
+            "password": "NewManualPassword123!",
+            "password_confirm": "NewManualPassword123!",
+        })
+        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("only available for google-authenticated accounts", res.data["detail"].lower())
 
+    def test_has_unclaimed_certificates_flag(self):
+        """UserProfileSerializer reports has_unclaimed_certificates accurately."""
+        from apps.certificates.models import Certificate
+        from apps.accounts.serializers import UserProfileSerializer
 
+        user = User.objects.create_user(
+            username="unclaimedcheck",
+            email="unclaimedcheck@example.com",
+            password="Password123!",
+        )
+        profile = user.profile
+        # Initially false: no certificates exist
+        data = UserProfileSerializer(profile).data
+        self.assertFalse(data["has_unclaimed_certificates"])
+
+        # Create an unclaimed certificate with matching recipient_email
+        Certificate.objects.create(
+            certificate_number="CERT-UNCLAIM-001",
+            title="Python Cert",
+            issuer="OneSmarter",
+            recipient_name="Check User",
+            recipient_email="unclaimedcheck@example.com",
+            issue_date=timezone.now().date(),
+            owner=None,
+        )
+
+        data_with_unclaimed = UserProfileSerializer(profile).data
+        self.assertTrue(data_with_unclaimed["has_unclaimed_certificates"])
+
+        # Once verified, it should be false (no longer blocked by email verification)
+        profile.email_verified = True
+        profile.save()
+        data_verified = UserProfileSerializer(profile).data
+        self.assertFalse(data_verified["has_unclaimed_certificates"])

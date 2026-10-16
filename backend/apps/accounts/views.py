@@ -2913,6 +2913,15 @@ class SetManualPasswordView(APIView):
         user = request.user
         profile = get_or_sync_profile(user)
 
+        # Only Google-authenticated accounts can set up a manual password
+        if not profile.google_sub:
+            return Response(
+                {
+                    "detail": "Manual password setup is only available for Google-authenticated accounts."
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
         # Disallow silently overwriting an existing usable local password
         if user.has_usable_password():
             return Response(

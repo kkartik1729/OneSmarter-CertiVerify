@@ -17,6 +17,7 @@ export interface User {
   emailVerified?: boolean;
   hasUsablePassword?: boolean;
   isGoogleUser?: boolean;
+  hasUnclaimedCertificates?: boolean;
 }
 
 export interface AdminUser {

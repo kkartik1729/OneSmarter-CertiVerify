@@ -116,8 +116,8 @@ export default function UserDashboard() {
 
   return (
     <div className="space-y-8">
-      {/* Email Verification Required Banner */}
-      {user && user.emailVerified === false && (
+      {/* Email Verification Required Banner — only display when unclaimed certificates genuinely exist */}
+      {user && user.emailVerified === false && user.hasUnclaimedCertificates === true && (
         <div className="p-5 sm:p-6 rounded-2xl bg-amber-500/10 border border-amber-500/30 text-amber-900 dark:text-amber-200 shadow-sm">
           <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
             <div className="flex items-start gap-3.5">

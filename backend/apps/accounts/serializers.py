@@ -77,6 +77,7 @@ class UserProfileSerializer(serializers.ModelSerializer):
     email_verified = serializers.BooleanField(read_only=True)
     has_usable_password = serializers.SerializerMethodField()
     is_google_user = serializers.SerializerMethodField()
+    has_unclaimed_certificates = serializers.SerializerMethodField()
 
     class Meta:
         model = UserProfile
@@ -93,6 +94,7 @@ class UserProfileSerializer(serializers.ModelSerializer):
             "email_verified",
             "has_usable_password",
             "is_google_user",
+            "has_unclaimed_certificates",
             "created_at",
         ]
         read_only_fields = [
@@ -104,6 +106,7 @@ class UserProfileSerializer(serializers.ModelSerializer):
             "email_verified",
             "has_usable_password",
             "is_google_user",
+            "has_unclaimed_certificates",
             "created_at",
         ]
 
@@ -112,6 +115,19 @@ class UserProfileSerializer(serializers.ModelSerializer):
 
     def get_is_google_user(self, obj):
         return bool(obj.google_sub)
+
+    def get_has_unclaimed_certificates(self, obj):
+        user = getattr(obj, "user", None)
+        if not user or not user.email or getattr(obj, "email_verified", False):
+            return False
+        try:
+            from apps.certificates.models import Certificate
+            return Certificate.objects.filter(
+                recipient_email__iexact=user.email.strip().lower(),
+                owner__isnull=True,
+            ).exists()
+        except Exception:
+            return False
 
     def get_role(self, obj):
         if getattr(obj.user, "is_superuser", False) or getattr(obj.user, "is_staff", False):

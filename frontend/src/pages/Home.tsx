@@ -19,10 +19,12 @@ function SocialIcon({ id }: { id: SocialLink['id'] }) {
       </svg>
     );
   }
-  if (id === 'x') {
+  if (id === 'linkedin') {
     return (
-      <svg className="i" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
-        <path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z" />
+      <svg className="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+        <path d="M16 8a6 6 0 0 1 6 6v7h-4v-7a2 2 0 0 0-2-2 2 2 0 0 0-2 2v7h-4v-7a6 6 0 0 1 6-6z" />
+        <rect width="4" height="12" x="2" y="9" />
+        <circle cx="4" cy="4" r="2" />
       </svg>
     );
   }
@@ -95,9 +97,6 @@ export default function Home() {
               >
                 <SocialIcon id={s.id} />
                 <span>{s.name}</span>
-                {s.isPlaceholder && (
-                  <span style={{ fontSize: '10px', color: 'var(--t2)', opacity: 0.7 }}>(placeholder)</span>
-                )}
               </a>
             ))}
           </div>

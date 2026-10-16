@@ -33,6 +33,7 @@ export function mapUser(x: unknown): User {
     mfaEnabled: r.mfa_enabled === true,
     hasUsablePassword: r.has_usable_password === true,
     isGoogleUser: r.is_google_user === true,
+    hasUnclaimedCertificates: r.has_unclaimed_certificates === true,
   };
 }
 

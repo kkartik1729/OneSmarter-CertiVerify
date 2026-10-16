@@ -1,11 +1,14 @@
 import ProfileSettings from '../../components/ProfileSettings';
-import MFASettings from '../../components/MFASettings';
+import SetManualPassword from '../../components/SetManualPassword';
+import { useAuth } from '../../context/AuthContext';
 
 export default function AdminProfile() {
+  const { user } = useAuth();
+
   return (
     <div className="max-w-4xl mx-auto space-y-8">
       <ProfileSettings />
-      <MFASettings />
+      {!user?.hasUsablePassword && <SetManualPassword />}
     </div>
   );
 }

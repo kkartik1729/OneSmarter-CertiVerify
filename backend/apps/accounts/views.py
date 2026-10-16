@@ -792,26 +792,42 @@ class MFALoginView(APIView):
 
 
 
-        # If user does NOT have MFA enabled, issue JWT tokens directly without authenticator challenge
-        refresh = RefreshToken.for_user(user)
+        # If user does NOT have MFA enabled, require MFA setup enrollment before dashboard access
+        secret = profile.pending_totp_secret
+        if not secret:
+            secret = pyotp.random_base32()
+            profile.pending_totp_secret = secret
+            profile.save(
+                update_fields=["pending_totp_secret", "updated_at"]
+            )
 
-        from apps.audit.models import AuditLog
-        from apps.audit.services import log_action
-
-        log_action(
-            action=AuditLog.Action.USER_LOGIN,
-            actor=user,
-            target_type="User",
-            target_id=str(user.id),
-            description=f"User {user.username} signed in successfully with password",
-            ip_address=get_client_ip(request),
+        provisioning_uri = pyotp.TOTP(secret).provisioning_uri(
+            name=user.email or user.username,
+            issuer_name="OneSmarter-CertiVerify",
         )
 
+        qr_image = qrcode.make(provisioning_uri)
+        buffer = io.BytesIO()
+        qr_image.save(buffer, format="PNG")
+        encoded_qr = base64.b64encode(buffer.getvalue()).decode("ascii")
+
+        challenge_token = MFAChallengeToken()
+        challenge_token[api_settings.USER_ID_CLAIM] = getattr(
+            user,
+            api_settings.USER_ID_FIELD,
+        )
+        challenge_token["purpose"] = "mfa_setup_challenge"
+
         return Response({
-            "access": str(refresh.access_token),
-            "refresh": str(refresh),
-            "mfa_required": False,
-            "user": UserProfileSerializer(profile).data,
+            "mfa_required": True,
+            "mfa_setup_required": True,
+            "challenge": str(challenge_token),
+            "qr_code": f"data:image/png;base64,{encoded_qr}",
+            "secret": secret,
+            "detail": (
+                "Scan the QR code with Google Authenticator or "
+                "Microsoft Authenticator, then enter the six-digit code to complete setup and sign in."
+            ),
         })
 
 
@@ -2794,9 +2810,30 @@ class GoogleAuthView(APIView):
             if matched_profile:
                 user = matched_profile.user
 
-        # Step 2: If not found by sub, match by verified Google email address
+        # Step 2: If not found by sub, check for existing user by verified Google email address
         if user is None:
-            user = User.objects.filter(email__iexact=email).first()
+            existing_user = User.objects.filter(email__iexact=email).first()
+            if existing_user:
+                existing_profile = get_or_sync_profile(existing_user)
+                # If existing user was registered with a local password:
+                # Only link if the local account email was verified, to prevent unverified account hijacking.
+                if existing_user.has_usable_password() and not existing_profile.email_verified:
+                    return Response(
+                        {
+                            "detail": (
+                                "An account with this email address already exists but its email is not yet verified. "
+                                "Please log in with your password to complete email verification before linking Google Sign-In."
+                            )
+                        },
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+                # Safe linking: associate google_sub with this verified user
+                user = existing_user
+                if google_sub and existing_profile.google_sub != google_sub:
+                    existing_profile.google_sub = google_sub
+                    existing_profile.email_verified = True
+                    existing_profile.email_verified_at = existing_profile.email_verified_at or timezone.now()
+                    existing_profile.save(update_fields=["google_sub", "email_verified", "email_verified_at", "updated_at"])
 
         # Step 3: Create new user if not found
         if user is None:
@@ -2833,68 +2870,108 @@ class GoogleAuthView(APIView):
         if profile_dirty:
             profile.save()
 
-
-
         # Link any unclaimed certificates previously issued to this email address
-
         try:
-
             from apps.certificates.services import claim_unclaimed_certificates_for_user
-
             claim_unclaimed_certificates_for_user(user)
-
         except Exception as e:
-
             logger.warning("Error claiming certificates during Google sign-in for %s: %s", email, e)
 
-
-
         # Issue JWT tokens directly — no authenticator challenge for Google OAuth flow
-
         refresh = RefreshToken.for_user(user)
 
-
-
         from apps.audit.models import AuditLog
-
         from apps.audit.services import log_action
 
         log_action(
-
             action=AuditLog.Action.USER_LOGIN,
-
             actor=user,
-
             target_type="User",
-
             target_id=str(user.id),
-
             description=f"User {user.username} signed in via trusted Google OAuth",
-
             ip_address=get_client_ip(request),
-
         )
 
+        return Response({
+            "access": str(refresh.access_token),
+            "refresh": str(refresh),
+            "mfa_required": False,
+            "user": UserProfileSerializer(profile).data,
+        }, status=status.HTTP_200_OK)
 
+
+class SetManualPasswordView(APIView):
+    """
+    POST /api/accounts/set-password/
+    Allows an authenticated user (e.g. Google OAuth account) to establish a secure
+    manual password for subsequent username/email + password login.
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        user = request.user
+        profile = get_or_sync_profile(user)
+
+        # Disallow silently overwriting an existing usable local password
+        if user.has_usable_password():
+            return Response(
+                {
+                    "detail": (
+                        "A manual password is already configured for this account. "
+                        "Please use the password reset flow to change your password."
+                    )
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        password = str(request.data.get("password", ""))
+        password_confirm = str(request.data.get("password_confirm", ""))
+
+        if not password:
+            return Response(
+                {"detail": "New password is required."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if password != password_confirm:
+            return Response(
+                {"detail": "Passwords do not match."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            validate_password(password, user=user)
+        except DjangoValidationError as exc:
+            msgs = exc.messages if hasattr(exc, "messages") else [str(exc)]
+            return Response(
+                {"detail": " ".join(msgs)},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        user.set_password(password)
+        user.save(update_fields=["password"])
+        profile.refresh_from_db()
+        profile.user = user
+
+        from apps.audit.models import AuditLog
+        from apps.audit.services import log_action
+
+        log_action(
+            action=AuditLog.Action.OTHER,
+            actor=user,
+            target_type="User",
+            target_id=str(user.id),
+            description=f"User {user.username} established a manual password",
+            ip_address=get_client_ip(request),
+        )
+
+        try:
+            send_password_changed_notification_email(user)
+        except Exception:
+            logger.exception("Failed to send password-established notification email to %s", user.email)
 
         return Response({
-
-            "access": str(refresh.access_token),
-
-            "refresh": str(refresh),
-
-            "mfa_required": False,
-
-            "user": {
-
-                "id": user.id,
-
-                "username": user.username,
-
-                "email": user.email,
-
-                "role": profile.effective_role,
-
-            },
-
+            "detail": "Manual password set successfully. You can now sign in using your username or email and password.",
+            "user": UserProfileSerializer(profile).data,
         }, status=status.HTTP_200_OK)

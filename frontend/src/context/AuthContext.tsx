@@ -17,6 +17,7 @@ interface AuthValue {
   register: typeof authService.register;
   verifyEmail: typeof authService.verifyEmail;
   resendVerification: typeof authService.resendVerification;
+  setPassword: (password: string, passwordConfirm: string) => Promise<User>;
   reloadProfile: () => Promise<User | null>;
   logout: () => void;
   updateProfile: (p: { organization: string; phone: string }) => Promise<void>;
@@ -110,6 +111,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       return res;
     },
     resendVerification: authService.resendVerification,
+    setPassword: async (pw, pc) => {
+      const u = await authService.setPassword(pw, pc);
+      setUser(u);
+      return u;
+    },
     reloadProfile: async () => {
       try {
         const u = await authService.me();

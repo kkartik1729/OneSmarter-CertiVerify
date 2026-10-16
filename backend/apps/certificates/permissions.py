@@ -51,3 +51,27 @@ class IsOwnerOrCertiVerifyAdmin(BasePermission):
             )
 
         return is_certiverify_admin(request.user)
+
+
+class HasCompletedMFAIfPasswordUser(BasePermission):
+    """
+    Enforces that users with a manual password must have completed TOTP MFA enrollment
+    before accessing protected application endpoints.
+    Users authenticated through trusted Google Sign-In who have not set up a local password
+    are permitted without TOTP MFA.
+    """
+
+    message = "Two-factor authentication enrollment is required before accessing protected resources."
+
+    def has_permission(self, request, view):
+        user = getattr(request, "user", None)
+        if not user or not user.is_authenticated:
+            return True
+
+        # Only password-bearing accounts require TOTP MFA
+        if user.has_usable_password():
+            try:
+                return bool(user.profile.mfa_enabled)
+            except Exception:
+                return False
+        return True

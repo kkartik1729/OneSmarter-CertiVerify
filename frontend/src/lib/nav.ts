@@ -14,7 +14,8 @@ export const ADMIN_NAV: NavItem[] = [
   { path: '/admin/dashboard/users', label: 'Users Management', icon: 'Users' },
   { path: '/admin/dashboard/analytics', label: 'Analytics', icon: 'BarChart3' },
   { path: '/admin/dashboard/verifications', label: 'Verification Records', icon: 'ClipboardCheck' },
-  { path: '/admin/dashboard/profile', label: 'Profile & Security', icon: 'ShieldCheck' },
+  { path: '/admin/dashboard/profile', label: 'Profile Settings', icon: 'User' },
+  { path: '/admin/dashboard/set-password', label: 'Set Up Manual Password', icon: 'Key' },
 ];
 
 export const USER_NAV: NavItem[] = [
@@ -22,5 +23,6 @@ export const USER_NAV: NavItem[] = [
   { path: '/user/dashboard/verify', label: 'Verify Certificate', icon: 'ShieldCheck' },
   { path: '/user/dashboard/certificates', label: 'My Certificates', icon: 'Award' },
   { path: '/user/dashboard/history', label: 'Verification History', icon: 'History' },
-  { path: '/user/dashboard/profile', label: 'Profile & Security', icon: 'User' },
+  { path: '/user/dashboard/profile', label: 'Profile Settings', icon: 'User' },
+  { path: '/user/dashboard/set-password', label: 'Set Up Manual Password', icon: 'Key' },
 ];

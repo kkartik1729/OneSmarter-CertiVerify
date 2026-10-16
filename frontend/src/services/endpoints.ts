@@ -2,6 +2,7 @@
 export const EP = {
   // accounts
   login: '/accounts/login/',
+  setPassword: '/accounts/set-password/',
   googleLogin: '/accounts/google-login/',
   register: '/accounts/register/',
   verifyEmail: '/accounts/verify-email/',

@@ -31,6 +31,8 @@ export function mapUser(x: unknown): User {
     phone: s(r.phone),
     emailVerified: r.email_verified === true,
     mfaEnabled: r.mfa_enabled === true,
+    hasUsablePassword: r.has_usable_password === true,
+    isGoogleUser: r.is_google_user === true,
   };
 }
 

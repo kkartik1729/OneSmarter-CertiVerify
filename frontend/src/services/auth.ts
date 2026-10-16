@@ -73,6 +73,15 @@ export const authService = {
     return finishLogin(d);
   },
 
+  /** POST /accounts/set-password/ {password, password_confirm} */
+  async setPassword(password: string, passwordConfirm: string): Promise<User> {
+    const d = await http<{ detail?: string; user?: unknown }>('POST', EP.setPassword, {
+      password,
+      password_confirm: passwordConfirm,
+    });
+    return d.user ? mapUser(d.user) : await authService.me();
+  },
+
   /** POST /accounts/register/. The backend returns NO tokens, so the user must sign in afterwards. */
   async register(p: { username: string; email: string; first_name: string; last_name: string; password: string; password_confirm: string }): Promise<void> {
     await http('POST', EP.register, p, false);

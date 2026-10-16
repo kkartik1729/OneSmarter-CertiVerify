@@ -119,8 +119,11 @@ export default function Login() {
       ) : (
         <form className="card" onSubmit={submit} noValidate>
           <h1>Welcome back</h1>
-          <p className="mu">Sign in to verify and manage certificates.</p>
-          {registered && <div className="bn" role="status">Account created. Please sign in.</div>}
+          {registered && (
+            <div className="bn" role="status">
+              {infoMsg || 'Account created successfully! Please sign in to complete two-factor authentication setup.'}
+            </div>
+          )}
           {verified && (
             <div
               className="bn"

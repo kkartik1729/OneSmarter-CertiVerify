@@ -75,6 +75,8 @@ class UserProfileSerializer(serializers.ModelSerializer):
     role = serializers.SerializerMethodField()
     mfa_enabled = serializers.BooleanField(read_only=True)
     email_verified = serializers.BooleanField(read_only=True)
+    has_usable_password = serializers.SerializerMethodField()
+    is_google_user = serializers.SerializerMethodField()
 
     class Meta:
         model = UserProfile
@@ -89,6 +91,8 @@ class UserProfileSerializer(serializers.ModelSerializer):
             "organization",
             "mfa_enabled",
             "email_verified",
+            "has_usable_password",
+            "is_google_user",
             "created_at",
         ]
         read_only_fields = [
@@ -98,8 +102,16 @@ class UserProfileSerializer(serializers.ModelSerializer):
             "role",
             "mfa_enabled",
             "email_verified",
+            "has_usable_password",
+            "is_google_user",
             "created_at",
         ]
+
+    def get_has_usable_password(self, obj):
+        return bool(obj.user and obj.user.has_usable_password())
+
+    def get_is_google_user(self, obj):
+        return bool(obj.google_sub)
 
     def get_role(self, obj):
         if getattr(obj.user, "is_superuser", False) or getattr(obj.user, "is_staff", False):

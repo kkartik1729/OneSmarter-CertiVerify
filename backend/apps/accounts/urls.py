@@ -18,6 +18,7 @@ from .views import (
     VerifyEmailView,
     ResendVerificationEmailView,
     GoogleAuthView,
+    SetManualPasswordView,
 )
 from .admin_views import AdminUserListView, AdminUserDetailView
 
@@ -26,6 +27,7 @@ urlpatterns = [
     path("verify-email/", VerifyEmailView.as_view(), name="verify_email"),
     path("resend-verification/", ResendVerificationEmailView.as_view(), name="resend_verification"),
     path("login/", MFALoginView.as_view(), name="login"),
+    path("set-password/", SetManualPasswordView.as_view(), name="set_password"),
     path("google-login/", GoogleAuthView.as_view(), name="google_login"),
     path("google/", GoogleAuthView.as_view(), name="google_auth"),
     path("token/refresh/", TokenRefreshView.as_view(), name="token_refresh"),

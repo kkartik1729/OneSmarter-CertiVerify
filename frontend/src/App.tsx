@@ -33,6 +33,7 @@ import MfaRecovery from './pages/MfaRecovery';
 import ForgotPassword from './pages/ForgotPassword';
 import PublicVerify from './pages/PublicVerify';
 import { useAuth } from './context/AuthContext';
+import SetManualPassword from './components/SetManualPassword';
 
 import ErrorBoundary from './components/ErrorBoundary';
 
@@ -86,6 +87,7 @@ export default function App() {
                   <Route path="analytics" element={<Analytics />} />
                   <Route path="verifications" element={<VerificationLogs />} />
                   <Route path="profile" element={<AdminProfile />} />
+                  <Route path="set-password" element={<div className="max-w-4xl mx-auto"><SetManualPassword /></div>} />
                 </Route>
               </Route>
 
@@ -98,6 +100,7 @@ export default function App() {
                   <Route path="certificates" element={<MyCertificates />} />
                   <Route path="history" element={<VerificationHistory />} />
                   <Route path="profile" element={<UserProfile />} />
+                  <Route path="set-password" element={<div className="max-w-4xl mx-auto"><SetManualPassword /></div>} />
                 </Route>
               </Route>
 

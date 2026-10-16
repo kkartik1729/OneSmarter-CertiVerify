@@ -1,6 +1,7 @@
 import hashlib
 import json
 from datetime import timedelta
+from unittest.mock import patch
 
 import pyotp
 from django.contrib.auth import get_user_model
@@ -119,27 +120,31 @@ class AccountsAuthAndMFATestCase(TestCase):
     # 2. LOGIN AND REGISTRATION TESTS
     # -------------------------------------------------------------------------
 
-    def test_login_valid_credentials_without_mfa_issues_tokens(self):
-        """Standard login credentials without MFA should directly issue JWT tokens."""
+    def test_login_valid_credentials_without_mfa_requires_enrollment(self):
+        """Standard password login credentials without MFA must prompt for MFA setup enrollment without issuing tokens."""
         res = self.client.post("/api/accounts/login/", {
             "username": "normaluser",
             "password": "Password@123",
         })
         self.assertEqual(res.status_code, status.HTTP_200_OK)
-        self.assertFalse(res.data.get("mfa_required", True))
-        self.assertIn("access", res.data)
-        self.assertIn("refresh", res.data)
+        self.assertTrue(res.data.get("mfa_required"))
+        self.assertTrue(res.data.get("mfa_setup_required"))
+        self.assertIn("challenge", res.data)
+        self.assertIn("qr_code", res.data)
+        self.assertIn("secret", res.data)
+        self.assertNotIn("access", res.data)
+        self.assertNotIn("refresh", res.data)
 
-    def test_login_with_email_address_succeeds(self):
-        """Login with email address instead of username must succeed and issue tokens directly."""
+    def test_login_with_email_address_succeeds_and_prompts_mfa(self):
+        """Login with email address instead of username succeeds and prompts for MFA."""
         res = self.client.post("/api/accounts/login/", {
             "username": "superadmin@example.com",
             "password": "AdminPassword@123",
         })
         self.assertEqual(res.status_code, status.HTTP_200_OK)
-        self.assertFalse(res.data.get("mfa_required", True))
-        self.assertIn("access", res.data)
-        self.assertIn("refresh", res.data)
+        self.assertTrue(res.data.get("mfa_required"))
+        self.assertIn("challenge", res.data)
+        self.assertNotIn("access", res.data)
 
     def test_login_with_mfa_enabled_requires_otp_challenge(self):
         """When user has MFA enabled, login prompts for 6-digit challenge without issuing tokens."""
@@ -909,5 +914,144 @@ class AccountsAuthAndMFATestCase(TestCase):
             "token": raw_token,
         })
         self.assertEqual(replay_confirm.status_code, status.HTTP_400_BAD_REQUEST)
+
+    # -------------------------------------------------------------------------
+    # 6. GOOGLE AUTHENTICATION AND SET MANUAL PASSWORD TESTS
+    # -------------------------------------------------------------------------
+
+    @patch("google.oauth2.id_token.verify_oauth2_token")
+    def test_google_login_new_user_success_without_mfa(self, mock_verify):
+        """New Google user authenticates and receives JWT tokens directly without TOTP challenge."""
+        mock_verify.return_value = {
+            "iss": "https://accounts.google.com",
+            "sub": "google-sub-12345",
+            "email": "googleuser@example.com",
+            "email_verified": True,
+            "given_name": "Google",
+            "family_name": "User",
+        }
+        res = self.client.post("/api/accounts/google-login/", {
+            "id_token": "valid-simulated-token",
+        })
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        self.assertFalse(res.data.get("mfa_required"))
+        self.assertIn("access", res.data)
+        self.assertIn("refresh", res.data)
+        self.assertTrue(res.data["user"]["email_verified"])
+        self.assertFalse(res.data["user"]["has_usable_password"])
+        self.assertTrue(res.data["user"]["is_google_user"])
+
+        # Check DB state
+        user = User.objects.get(email="googleuser@example.com")
+        self.assertFalse(user.has_usable_password())
+        self.assertTrue(user.profile.email_verified)
+        self.assertEqual(user.profile.google_sub, "google-sub-12345")
+
+    @patch("google.oauth2.id_token.verify_oauth2_token")
+    def test_google_login_existing_user_linked(self, mock_verify):
+        """Existing user already linked by google_sub logs in directly."""
+        google_user = User.objects.create_user(
+            username="existing_google",
+            email="existing_google@example.com",
+        )
+        google_user.set_unusable_password()
+        google_user.save()
+        google_user.profile.google_sub = "google-sub-existing"
+        google_user.profile.email_verified = True
+        google_user.profile.save()
+
+        mock_verify.return_value = {
+            "iss": "https://accounts.google.com",
+            "sub": "google-sub-existing",
+            "email": "existing_google@example.com",
+            "email_verified": True,
+        }
+        res = self.client.post("/api/accounts/google-login/", {
+            "id_token": "valid-simulated-token",
+        })
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        self.assertEqual(res.data["user"]["username"], "existing_google")
+
+    @patch("google.oauth2.id_token.verify_oauth2_token")
+    def test_google_login_invalid_issuer_rejected(self, mock_verify):
+        """Invalid token issuer is rejected."""
+        mock_verify.return_value = {
+            "iss": "https://fakeissuer.com",
+            "sub": "bad-sub",
+            "email": "bad@example.com",
+            "email_verified": True,
+        }
+        res = self.client.post("/api/accounts/google-login/", {
+            "id_token": "bad-token",
+        })
+        self.assertEqual(res.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_set_manual_password_flow(self):
+        """Authenticated Google user can set a manual password and later sign in with password."""
+        google_user = User.objects.create_user(
+            username="googlepassuser",
+            email="googlepassuser@example.com",
+        )
+        google_user.set_unusable_password()
+        google_user.save()
+        google_user.profile.google_sub = "google-sub-pass"
+        google_user.profile.save()
+
+        self.client.force_authenticate(user=google_user)
+
+        # Mismatched passwords rejected
+        res_mismatch = self.client.post("/api/accounts/set-password/", {
+            "password": "Password@123",
+            "password_confirm": "Different@123",
+        })
+        self.assertEqual(res_mismatch.status_code, status.HTTP_400_BAD_REQUEST)
+
+        # Valid password set successfully
+        res = self.client.post("/api/accounts/set-password/", {
+            "password": "NewSecurePassword@123",
+            "password_confirm": "NewSecurePassword@123",
+        })
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        self.assertTrue(res.data["user"]["has_usable_password"])
+
+        google_user.refresh_from_db()
+        self.assertTrue(google_user.has_usable_password())
+        self.assertTrue(google_user.check_password("NewSecurePassword@123"))
+
+        # Cannot overwrite existing password silently
+        res_repeat = self.client.post("/api/accounts/set-password/", {
+            "password": "AnotherPassword@123",
+            "password_confirm": "AnotherPassword@123",
+        })
+        self.assertEqual(res_repeat.status_code, status.HTTP_400_BAD_REQUEST)
+
+        # Now, manual login with new password requires MFA enrollment
+        self.client.logout()
+        login_res = self.client.post("/api/accounts/login/", {
+            "username": "googlepassuser@example.com",
+            "password": "NewSecurePassword@123",
+        })
+        self.assertEqual(login_res.status_code, status.HTTP_200_OK)
+        self.assertTrue(login_res.data["mfa_required"])
+        self.assertTrue(login_res.data["mfa_setup_required"])
+        self.assertIn("challenge", login_res.data)
+        self.assertIn("qr_code", login_res.data)
+
+        # Complete MFA enrollment
+        challenge = login_res.data["challenge"]
+        secret = login_res.data["secret"]
+        code = pyotp.TOTP(secret).now()
+
+        verify_res = self.client.post("/api/accounts/login/", {
+            "challenge": challenge,
+            "code": code,
+        })
+        self.assertEqual(verify_res.status_code, status.HTTP_200_OK)
+        self.assertIn("access", verify_res.data)
+        self.assertIn("refresh", verify_res.data)
+
+        google_user.profile.refresh_from_db()
+        self.assertTrue(google_user.profile.mfa_enabled)
+
 
 

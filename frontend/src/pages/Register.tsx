@@ -48,8 +48,8 @@ export default function Register() {
     setBusy(true);
     try {
       await register({ username: email, email, first_name: first, last_name: rest.join(' '), password: v.pw, password_confirm: v.pc });
-      toast('Account created. Please verify your email with the 6-digit code sent to you.');
-      go(`/verify-email?email=${encodeURIComponent(email)}`);
+      toast('Account created successfully! Please sign in to complete two-factor authentication setup.');
+      go('/login', { state: { registered: true, message: 'Account created successfully! Please sign in to set up two-factor authentication.' } });
     } catch (x) {
       // Show each backend validation message next to the field it belongs to.
       const next: typeof e = {};

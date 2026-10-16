@@ -15,6 +15,8 @@ export interface User {
   dateJoined?: string;
   mfaEnabled?: boolean;
   emailVerified?: boolean;
+  hasUsablePassword?: boolean;
+  isGoogleUser?: boolean;
 }
 
 export interface AdminUser {

@@ -17,6 +17,7 @@ import {
   X,
   FileStack,
   Sparkles,
+  KeyRound,
 } from 'lucide-react';
 import type { NavItem } from '../lib/nav';
 import { useAuth } from '../context/AuthContext';
@@ -42,6 +43,7 @@ const iconMap: Record<string, ComponentType<{ className?: string }>> = {
   User,
   FileStack,
   Sparkles,
+  Key: KeyRound,
 };
 
 export default function Sidebar({
@@ -59,6 +61,13 @@ export default function Sidebar({
     logout();
     navigate('/login');
   };
+
+  const visibleNavItems = navItems.filter(item => {
+    if (item.path.includes('set-password')) {
+      return !user?.hasUsablePassword;
+    }
+    return true;
+  });
 
   return (
     <>
@@ -113,7 +122,7 @@ export default function Sidebar({
               Menu
             </p>
           )}
-          {navItems.map(item => {
+          {visibleNavItems.map(item => {
             const Icon = iconMap[item.icon] || Award;
             return (
               <NavLink

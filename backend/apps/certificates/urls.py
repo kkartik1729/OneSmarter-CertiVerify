@@ -21,6 +21,7 @@ from .views import (
     BatchDetailView,
     RetryEmailView,
     CertificateImageView,
+    PublicCertificatePreviewView,
 )
 
 urlpatterns = [
@@ -34,6 +35,11 @@ urlpatterns = [
         "verify/<str:certificate_number>/",
         CertificateVerifyView.as_view(),
         name="certificate-verify",
+    ),
+    path(
+        "verify/<str:certificate_number>/preview/",
+        PublicCertificatePreviewView.as_view(),
+        name="certificate-public-preview",
     ),
     path(
         "<int:pk>/",

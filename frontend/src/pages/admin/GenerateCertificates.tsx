@@ -18,6 +18,7 @@ import {
   X,
 } from 'lucide-react';
 import {
+  ApiError,
   courseService,
   templateService,
   generationService,
@@ -32,6 +33,7 @@ import type {
 } from '../../types';
 import ErrorMessage from '../../components/ErrorMessage';
 import LoadingSkeleton from '../../components/LoadingSkeleton';
+import TemplateLayoutEditor from '../../components/TemplateLayoutEditor';
 
 export default function GenerateCertificates() {
   // Stepper state: 1 = Course & Template, 2 = CSV & Validation, 3 = Preview & Confirm, 4 = Results
@@ -124,6 +126,7 @@ export default function GenerateCertificates() {
   const [templateName, setTemplateName] = useState('OneSmarter Official Certificate');
   const [templateFile, setTemplateFile] = useState<File | null>(null);
   const [uploadingTemplate, setUploadingTemplate] = useState(false);
+  const [editingTemplate, setEditingTemplate] = useState<CertificateTemplate | null>(null);
 
   // CSV file & validation
   const [csvFile, setCsvFile] = useState<File | null>(null);
@@ -136,6 +139,7 @@ export default function GenerateCertificates() {
 
   // Bulk Generation Execution
   const [generating, setGenerating] = useState(false);
+  const [generationOutcomeUnknown, setGenerationOutcomeUnknown] = useState(false);
   const [batchResult, setBatchResult] = useState<GenerationBatch | null>(null);
 
   // Errors / alerts
@@ -315,12 +319,14 @@ export default function GenerateCertificates() {
     try {
       const res = await generationService.preview({
         template_id: Number(selectedTemplateId),
+        course_id: selectedCourse ? Number(selectedCourse.id) : undefined,
         student_name: row?.student_name || 'Kartik Hande',
-        course_name: row?.course_name || selectedCourse?.name || 'Full Stack Web Development',
-        start_date: row?.start_date || selectedCourse?.start_date || '2026-07-01',
-        end_date: row?.end_date || selectedCourse?.end_date || '2026-10-01',
+        course_name: row?.course_name || selectedCourse?.name || '',
+        start_date: row?.start_date || selectedCourse?.start_date || '',
+        end_date: row?.end_date || selectedCourse?.end_date || '',
         issue_date: row?.issue_date || new Date().toISOString().slice(0, 10),
         issuer_name: selectedCourse?.issuer || 'OneSmarter, Inc.',
+        completion_description: batchCompletionDescription.trim() || undefined,
       });
       setPreviewUrl(res.preview_url);
     } catch (err) {
@@ -344,6 +350,7 @@ export default function GenerateCertificates() {
     }
 
     setGenerating(true);
+    setGenerationOutcomeUnknown(false);
     setError(null);
     try {
       const result = await generationService.bulkGenerate(
@@ -361,7 +368,12 @@ export default function GenerateCertificates() {
       setBatchResult(result);
       setStep(4); // Move to results step
     } catch (err) {
-      setError(errMsg(err));
+      if (err instanceof ApiError && err.status === 0) {
+        setGenerationOutcomeUnknown(true);
+        setError('The connection ended before the batch result was received. Check Generation History before starting another batch.');
+      } else {
+        setError(errMsg(err));
+      }
     } finally {
       setGenerating(false);
     }
@@ -419,6 +431,12 @@ export default function GenerateCertificates() {
       </div>
 
       {error && <ErrorMessage message={error} onRetry={() => setError(null)} />}
+      {generationOutcomeUnknown && (
+        <div role="status" className="rounded-xl border border-amber-300 bg-amber-50 p-4 text-xs text-amber-900 dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-200">
+          A disconnected browser does not cancel server-side certificate generation. Review the batch status before retrying.
+          <Link to="/admin/dashboard/generation-history" className="ml-2 font-semibold underline">Open Generation History</Link>
+        </div>
+      )}
       {successMsg && (
         <div className="p-4 rounded-xl bg-teal-50 dark:bg-teal-950/50 border border-teal-200 dark:border-teal-800 text-teal-800 dark:text-teal-200 text-xs font-medium flex items-center justify-between">
           <span>{successMsg}</span>
@@ -752,6 +770,9 @@ export default function GenerateCertificates() {
                           <Eye className="w-3.5 h-3.5" />
                           <span>Test Preview</span>
                         </button>
+                        <button type="button" onClick={() => setEditingTemplate(selectedTemplate)} className="mt-1 ml-3 text-blue-600 hover:underline inline-flex items-center gap-1">
+                          <Pencil className="w-3.5 h-3.5" /><span>Edit template layout</span>
+                        </button>
                       </div>
                     </div>
                     <button
@@ -814,7 +835,7 @@ export default function GenerateCertificates() {
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 text-xs">
               <div>
                 <label className="block text-slate-600 dark:text-slate-300 mb-1 font-medium">
-                  Course Name *
+                  Course Name Override (optional)
                 </label>
                 <input
                   type="text"
@@ -868,7 +889,7 @@ export default function GenerateCertificates() {
 
               <div>
                 <label className="block text-slate-600 dark:text-slate-300 mb-1 font-medium">
-                  Start Date *
+                  Start Date Override (optional)
                 </label>
                 <input
                   type="date"
@@ -880,7 +901,7 @@ export default function GenerateCertificates() {
 
               <div>
                 <label className="block text-slate-600 dark:text-slate-300 mb-1 font-medium">
-                  End Date *
+                  End Date Override (optional)
                 </label>
                 <input
                   type="date"
@@ -897,7 +918,7 @@ export default function GenerateCertificates() {
 
               <div>
                 <label className="block text-slate-600 dark:text-slate-300 mb-1 font-medium">
-                  Issue Date *
+                  Issue Date Override (optional; defaults to today)
                 </label>
                 <input
                   type="date"
@@ -1169,7 +1190,7 @@ export default function GenerateCertificates() {
             </button>
             <button
               type="button"
-              disabled={generating || editableRows.filter((r) => r.is_valid).length === 0}
+              disabled={generating || generationOutcomeUnknown || editableRows.filter((r) => r.is_valid).length === 0}
               onClick={handleConfirmGeneration}
               className="px-6 py-2.5 bg-teal-600 hover:bg-teal-500 disabled:opacity-50 text-white font-semibold rounded-xl text-xs inline-flex items-center gap-2 shadow-sm transition"
             >
@@ -1499,6 +1520,9 @@ export default function GenerateCertificates() {
           </div>
         </div>
       )}
+      {editingTemplate && <TemplateLayoutEditor template={editingTemplate} onClose={() => setEditingTemplate(null)} onSaved={(updated) => {
+        setTemplates((items) => items.map((item) => item.id === updated.id ? updated : item));
+      }} />}
     </div>
   );
 }

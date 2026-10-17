@@ -3,6 +3,7 @@ import csv
 import hashlib
 import io
 import logging
+import re
 import uuid
 from datetime import datetime
 
@@ -28,7 +29,7 @@ from apps.verification.authentication import OptionalJWTAuthentication
 from apps.verification.models import VerificationAttempt
 
 from .emails import send_certificate_issued_email
-from .generator import generate_certificate_image
+from .generator import generate_certificate_image, load_template_image
 from .models import Certificate, CertificatePDF, CertificateTemplate, Course, GenerationBatch
 from .permissions import (
     IsCertiVerifyAdmin,
@@ -45,6 +46,60 @@ from .serializers import (
 User = get_user_model()
 
 logger = logging.getLogger(__name__)
+
+
+def _missing_template_fields(template, values, custom_values=None):
+    """Return unresolved placeholders configured in the saved template layout."""
+    layout = getattr(template, "layout_config", None) or {}
+    custom_values = custom_values or {}
+    aliases = {
+        "recipient_name": "student_name",
+        "student_name": "student_name",
+        "certificate_id": "certificate_number",
+        "certificate_number": "certificate_number",
+        "course_description": "completion_description",
+        "issuer_name": "issuer",
+    }
+    required = set()
+    for element in layout.get("elements", []) or []:
+        if isinstance(element, dict) and isinstance(element.get("text"), str):
+            required.update(re.findall(r"\{\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}\}", element["text"]))
+    missing = []
+    for field in sorted(required):
+        source_field = aliases.get(field, field)
+        value = values.get(source_field)
+        if value is None or not str(value).strip():
+            value = custom_values.get(field, custom_values.get(source_field, ""))
+        if (
+            value is None
+            or not str(value).strip()
+            or str(value).strip().lower() in {"none", "null"}
+            or re.search(r"\{\{\s*[A-Za-z_][A-Za-z0-9_]*\s*\}\}", str(value))
+        ):
+            missing.append(field)
+    return missing
+
+
+def _send_and_record_certificate_email(certificate):
+    """Keep email delivery outcome separate from the already-created certificate."""
+    try:
+        email_sent, email_error = send_certificate_issued_email(certificate)
+    except Exception:
+        logger.exception("Certificate email delivery raised unexpectedly for %s", certificate.certificate_number)
+        email_sent, email_error = False, "Email delivery failed. Use the existing retry action to try again."
+
+    certificate.email_sent = bool(email_sent)
+    certificate.email_error = (email_error or "")[:2000]
+    try:
+        certificate.save(update_fields=["email_sent", "email_error"])
+    except Exception:
+        logger.exception("Could not persist email status for generated certificate %s", certificate.certificate_number)
+        certificate.email_error = (
+            "Email was accepted, but its delivery status could not be saved."
+            if email_sent
+            else "Email delivery failed and its status could not be saved."
+        )
+    return bool(email_sent), certificate.email_error
 
 
 # ---------------------------------------------------------------------------
@@ -281,16 +336,28 @@ class CertificateVerifyView(APIView):
                 status=status.HTTP_404_NOT_FOUND,
             )
 
+        certificate_status = certificate.status
+        is_verified = certificate_status == Certificate.Status.VERIFIED
+        if certificate_status == Certificate.Status.PENDING:
+            verification_result = "PENDING"
+            message = "This certificate is in the registry but is pending verification."
+        elif certificate_status == Certificate.Status.REJECTED:
+            verification_result = "REJECTED"
+            message = "This certificate was reviewed and rejected."
+        elif is_verified:
+            verification_result = "VERIFIED"
+            message = "This certificate has been verified against the OneSmarter-CertiVerify registry."
+        else:
+            verification_result = "NOT_VERIFIED"
+            message = "This certificate does not have a verified status."
+
         return Response(
             {
                 "certificate_number": certificate.certificate_number,
                 "found": True,
-                "verification_result": "VERIFIED",
-                "message": (
-                    "This certificate number matches a record issued by "
-                    "OneSmarter-CertiVerify. The presence of this record "
-                    "confirms the certificate was issued through this system."
-                ),
+                "verification_result": verification_result,
+                "status": certificate_status,
+                "message": message,
                 "title": certificate.title,
                 "issuer": certificate.issuer,
                 "issue_date": certificate.issue_date,
@@ -299,9 +366,42 @@ class CertificateVerifyView(APIView):
                 "course_name": certificate.course_name or "",
                 "start_date": certificate.start_date,
                 "end_date": certificate.end_date,
+                "preview_url": (
+                    f"/certificates/verify/{certificate.certificate_number}/preview/"
+                    if is_verified and certificate.file
+                    else None
+                ),
             },
             status=status.HTTP_200_OK,
         )
+
+
+class PublicCertificatePreviewView(APIView):
+    """Serve only the saved preview for a verified certificate, keyed by its public number."""
+    permission_classes = [AllowAny]
+    authentication_classes = [OptionalJWTAuthentication]
+
+    def get(self, request, certificate_number):
+        certificate = get_object_or_404(
+            Certificate, certificate_number=(certificate_number or "").strip().upper()
+        )
+        if certificate.status != Certificate.Status.VERIFIED or not certificate.file:
+            return Response({"detail": "No public certificate preview is available."}, status=status.HTTP_404_NOT_FOUND)
+        try:
+            if not certificate.file.storage.exists(certificate.file.name):
+                return Response({"detail": "No public certificate preview is available."}, status=status.HTTP_404_NOT_FOUND)
+            with certificate.file.open("rb") as source:
+                image = Image.open(source).convert("RGB")
+                preview = io.BytesIO()
+                image.save(preview, format="PNG")
+                raw_bytes = preview.getvalue()
+            response = HttpResponse(raw_bytes, content_type="image/png")
+            response["X-Content-Type-Options"] = "nosniff"
+            response["Cache-Control"] = "public, max-age=300"
+            return response
+        except Exception:
+            logger.exception("Unable to serve public preview for certificate %s", certificate.certificate_number)
+            return Response({"detail": "Certificate preview is unavailable."}, status=status.HTTP_404_NOT_FOUND)
 
 
 # ---------------------------------------------------------------------------
@@ -402,7 +502,7 @@ class CertificatePDFDownloadView(APIView):
     access, no path traversal risk, no unsafe filename forwarding.
     """
 
-    permission_classes = [AllowAny]
+    permission_classes = [IsAuthenticated]
     authentication_classes = [OptionalJWTAuthentication]
 
     def get(self, request, pk):
@@ -412,22 +512,6 @@ class CertificatePDFDownloadView(APIView):
         )
 
         user = request.user
-        if not (user and user.is_authenticated):
-            token_str = request.query_params.get("token")
-            if token_str:
-                from rest_framework_simplejwt.authentication import JWTAuthentication
-                try:
-                    jwt_auth = JWTAuthentication()
-                    validated_token = jwt_auth.get_validated_token(token_str)
-                    user = jwt_auth.get_user(validated_token)
-                except Exception:
-                    user = None
-
-        if not (user and user.is_authenticated):
-            return Response(
-                {"detail": "Authentication credentials were not provided."},
-                status=status.HTTP_401_UNAUTHORIZED,
-            )
 
         # Enforce access control
         is_admin = is_certiverify_admin(user)
@@ -1019,13 +1103,31 @@ class BulkGenerateView(APIView):
         batch_title = (request.data.get("certificate_title") or "").strip() or course.title or "Certificate of Completion"
         batch_issuer = (request.data.get("issuer") or "").strip() or course.issuer or "OneSmarter, Inc."
         batch_description = (request.data.get("completion_description") or "").strip()
-        if not batch_description and template and template.description:
-            batch_description = template.description.strip()
 
-        raw_layout_settings = request.data.get("layout_settings")
         layout_settings = dict(template.layout_config or {})
-        if raw_layout_settings and isinstance(raw_layout_settings, dict):
-            layout_settings.update(raw_layout_settings)
+        shared_field_values = request.data.get("field_values", {})
+        if isinstance(shared_field_values, dict):
+            saved_field_values = dict(layout_settings.get("field_values", {}))
+            saved_field_values.update(shared_field_values)
+            layout_settings["field_values"] = saved_field_values
+
+        # Decode the batch's template only once; each rendering call draws on its
+        # own copy, so recipient text cannot leak into another recipient's image.
+        try:
+            template_background = load_template_image(template.image.path)
+        except Exception:
+            logger.exception("Could not load template image for batch %s", batch.id)
+            batch.status = GenerationBatch.Status.FAILED
+            batch.failed = len(rows)
+            batch.error_report = [{
+                "row_number": (row.get("row_number", index + 1) if isinstance(row, dict) else index + 1),
+                "student_name": (row.get("student_name", "") if isinstance(row, dict) else ""),
+                "student_email": (row.get("student_email", "") if isinstance(row, dict) else ""),
+                "error": "Template image could not be loaded; see the server log for details.",
+            } for index, row in enumerate(rows)]
+            batch.completed_at = timezone.now()
+            batch.save(update_fields=["status", "failed", "error_report", "completed_at"])
+            return Response(GenerationBatchSerializer(batch).data, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
         for r in rows:
             student_email = (r.get("student_email") or "").strip().lower()
@@ -1097,8 +1199,31 @@ class BulkGenerateView(APIView):
                 cert_num = f"OSCV-{year}-{uuid.uuid4().hex[:8].upper()}"
 
             try:
+                row_layout = dict(layout_settings)
+                row_fields = dict(layout_settings.get("field_values", {}))
+                custom_fields = r.get("custom_fields", {})
+                if isinstance(custom_fields, dict):
+                    row_fields.update(custom_fields)
+                row_layout["field_values"] = row_fields
+                missing_fields = _missing_template_fields(
+                    template,
+                    {
+                        "student_name": student_name,
+                        "certificate_number": cert_num,
+                        "course_name": course_name,
+                        "start_date": start_date.strftime("%d/%m/%Y"),
+                        "end_date": end_date.strftime("%d/%m/%Y"),
+                        "issue_date": issue_date.strftime("%d/%m/%Y"),
+                        "completion_description": desc,
+                        "issuer": issuer_name,
+                    },
+                    row_fields,
+                )
+                if missing_fields:
+                    raise ValueError("Missing values for configured template field(s): " + ", ".join(missing_fields))
                 png_bytes, sha256_hex = generate_certificate_image(
                     template_path=template.image.path,
+                    template_image=template_background,
                     student_name=student_name,
                     course_name=course_name,
                     start_date=start_date.strftime("%d/%m/%Y"),
@@ -1107,7 +1232,7 @@ class BulkGenerateView(APIView):
                     certificate_number=cert_num,
                     issuer_name=issuer_name,
                     completion_description=desc,
-                    layout_overrides=layout_settings,
+                    layout_overrides=row_layout,
                 )
 
                 with transaction.atomic():
@@ -1156,10 +1281,7 @@ class BulkGenerateView(APIView):
                         )
 
                 # Send email notification outside atomic transaction
-                email_ok, email_err = send_certificate_issued_email(cert)
-                cert.email_sent = email_ok
-                cert.email_error = email_err
-                cert.save(update_fields=["email_sent", "email_error"])
+                email_ok, email_err = _send_and_record_certificate_email(cert)
 
                 if email_ok:
                     emails_sent += 1
@@ -1175,7 +1297,11 @@ class BulkGenerateView(APIView):
                     "row_number": row_num,
                     "student_name": student_name,
                     "student_email": student_email,
-                    "error": str(exc),
+                    "error": (
+                        str(exc)
+                        if isinstance(exc, ValueError)
+                        else "Certificate rendering or storage failed; see the server log for details."
+                    ),
                 })
 
         # Finalize batch
@@ -1191,28 +1317,40 @@ class BulkGenerateView(APIView):
             else GenerationBatch.Status.FAILED
         )
         batch.completed_at = timezone.now()
-        batch.save()
+        batch_save_warning = None
+        try:
+            batch.save()
+        except Exception:
+            logger.exception("Batch %s generated but its final summary could not be saved", batch.id)
+            batch_save_warning = "Certificates were generated, but the batch summary could not be saved."
 
-        log_action(
-            action=AuditLog.Action.BATCH_GENERATED,
-            actor=request.user,
-            target_type="GenerationBatch",
-            target_id=batch.id,
-            description=f"Batch #{batch.id} generated: {successful_count} created, {failed_count} failed, {skipped_duplicates} skipped",
-            metadata={
-                "batch_id": batch.id,
-                "course_id": course.id,
-                "template_id": template.id,
-                "successful": successful_count,
-                "failed": failed_count,
-                "skipped_duplicates": skipped_duplicates,
-                "emails_sent": emails_sent,
-                "emails_failed": emails_failed,
-            },
-            ip_address=request.META.get("REMOTE_ADDR"),
-        )
+        response_data = GenerationBatchSerializer(batch).data
+        if batch_save_warning:
+            response_data["warning"] = batch_save_warning
+        try:
+            log_action(
+                action=AuditLog.Action.BATCH_GENERATED,
+                actor=request.user,
+                target_type="GenerationBatch",
+                target_id=batch.id,
+                description=f"Batch #{batch.id} generated: {successful_count} created, {failed_count} failed, {skipped_duplicates} skipped",
+                metadata={
+                    "batch_id": batch.id,
+                    "course_id": course.id,
+                    "template_id": template.id,
+                    "successful": successful_count,
+                    "failed": failed_count,
+                    "skipped_duplicates": skipped_duplicates,
+                    "emails_sent": emails_sent,
+                    "emails_failed": emails_failed,
+                },
+                ip_address=request.META.get("REMOTE_ADDR"),
+            )
+        except Exception:
+            logger.exception("Batch %s generated but its audit entry could not be written", batch.id)
+            response_data["warning"] = "; ".join(filter(None, [response_data.get("warning"), "Batch generated; the audit entry could not be recorded."]))
 
-        return Response(GenerationBatchSerializer(batch).data, status=status.HTTP_201_CREATED)
+        return Response(response_data, status=status.HTTP_201_CREATED)
 
 
 # ---------------------------------------------------------------------------
@@ -1273,13 +1411,16 @@ class SingleGenerateView(APIView):
         if name_err:
             return Response({"detail": name_err, "student_name": name_err}, status=status.HTTP_400_BAD_REQUEST)
 
-        if not (start_date_str and end_date_str and issue_date_str):
-            return Response({"detail": "Start date, end date, and issue date are required."}, status=status.HTTP_400_BAD_REQUEST)
-
         try:
             course = Course.objects.get(pk=course_id)
         except (Course.DoesNotExist, ValueError):
             return Response({"detail": "Selected course not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        # The selected course is authoritative for course dates; issuance defaults
+        # to today when the administrator did not explicitly provide a date.
+        start_date_str = start_date_str or course.start_date.strftime("%Y-%m-%d")
+        end_date_str = end_date_str or course.end_date.strftime("%Y-%m-%d")
+        issue_date_str = issue_date_str or timezone.localdate().strftime("%Y-%m-%d")
 
         if not template.image or not template.image.storage.exists(template.image.name):
             return Response({"detail": "Template image file is missing from storage."}, status=status.HTTP_400_BAD_REQUEST)
@@ -1297,16 +1438,17 @@ class SingleGenerateView(APIView):
         certificate_title = (request.data.get("certificate_title") or "").strip() or course.title or "Certificate of Completion"
         issuer_name = (request.data.get("issuer") or "").strip() or course.issuer or "OneSmarter, Inc."
         
-        # Use provided description override, or fallback to saved template description
+        # The template description is metadata. Dynamic text belongs in the saved layout,
+        # or in an explicit generation override, to avoid printing it over static artwork.
         completion_description = (request.data.get("completion_description") or "").strip()
-        if not completion_description and template.description:
-            completion_description = template.description.strip()
 
-        # Merge template layout_config with any request layout_settings
+        # Formatting is taken only from the saved administrator-managed template.
         layout_settings = dict(template.layout_config or {})
-        raw_layout_settings = request.data.get("layout_settings")
-        if raw_layout_settings and isinstance(raw_layout_settings, dict):
-            layout_settings.update(raw_layout_settings)
+        shared_field_values = request.data.get("field_values", {})
+        if isinstance(shared_field_values, dict):
+            saved_field_values = dict(layout_settings.get("field_values", {}))
+            saved_field_values.update(shared_field_values)
+            layout_settings["field_values"] = saved_field_values
 
         # Check duplicate & reissue rules
         dup_qs = Certificate.objects.filter(course_name__iexact=course_name)
@@ -1334,6 +1476,26 @@ class SingleGenerateView(APIView):
 
         if end_date < start_date:
             return Response({"detail": "End date cannot be earlier than start date."}, status=status.HTTP_400_BAD_REQUEST)
+
+        missing_fields = _missing_template_fields(
+            template,
+            {
+                "student_name": student_name,
+                "certificate_number": "OSCV-PREVIEW-000000",
+                "course_name": course_name,
+                "start_date": start_date.strftime("%d/%m/%Y"),
+                "end_date": end_date.strftime("%d/%m/%Y"),
+                "issue_date": issue_date.strftime("%d/%m/%Y"),
+                "completion_description": completion_description,
+                "issuer": issuer_name,
+            },
+            layout_settings.get("field_values", {}),
+        )
+        if missing_fields:
+            return Response(
+                {"detail": "Missing values for configured template field(s): " + ", ".join(missing_fields)},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
         # Unique certificate number
         year = issue_date.year
@@ -1399,37 +1561,42 @@ class SingleGenerateView(APIView):
                     )
 
             # Send email
-            email_ok, email_err = send_certificate_issued_email(cert)
-            cert.email_sent = email_ok
-            cert.email_error = email_err
-            cert.save(update_fields=["email_sent", "email_error"])
+            email_ok, email_err = _send_and_record_certificate_email(cert)
 
             action_type = AuditLog.Action.CERTIFICATE_REISSUED if existing_cert else AuditLog.Action.CERTIFICATE_GENERATED
-            log_action(
-                action=action_type,
-                actor=request.user,
-                target_type="Certificate",
-                target_id=cert.id,
-                description=f"{'Reissued' if existing_cert else 'Generated'} single certificate {cert_num} for {user.username if user else student_email} ({course_name})",
-                metadata={
-                    "certificate_number": cert_num,
-                    "student_name": student_name,
-                    "student_id": user.id if user else None,
-                    "recipient_email": student_email,
-                    "course_id": course.id,
-                    "template_id": template.id,
-                    "email_sent": email_ok,
-                    "reissue": bool(existing_cert),
-                },
-                ip_address=request.META.get("REMOTE_ADDR"),
-            )
+            audit_warning = None
+            try:
+                log_action(
+                    action=action_type,
+                    actor=request.user,
+                    target_type="Certificate",
+                    target_id=cert.id,
+                    description=f"{'Reissued' if existing_cert else 'Generated'} single certificate {cert_num} for {user.username if user else student_email} ({course_name})",
+                    metadata={
+                        "certificate_number": cert_num,
+                        "student_name": student_name,
+                        "student_id": user.id if user else None,
+                        "recipient_email": student_email,
+                        "course_id": course.id,
+                        "template_id": template.id,
+                        "email_sent": email_ok,
+                        "reissue": bool(existing_cert),
+                    },
+                    ip_address=request.META.get("REMOTE_ADDR"),
+                )
+            except Exception:
+                logger.exception("Certificate %s generated but its audit entry could not be written", cert_num)
+                audit_warning = "Certificate generated; the audit entry could not be recorded."
 
             serializer = CertificateSerializer(cert, context={"request": request})
-            return Response(serializer.data, status=status.HTTP_201_CREATED)
+            response_data = serializer.data
+            if audit_warning:
+                response_data["warning"] = audit_warning
+            return Response(response_data, status=status.HTTP_201_CREATED)
 
         except Exception as exc:
             logger.exception("Failed to generate single certificate")
-            return Response({"detail": f"Failed to generate certificate: {exc}"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+            return Response({"detail": "Certificate generation failed. Check the server log for diagnostic details."}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
 # ---------------------------------------------------------------------------
@@ -1447,13 +1614,27 @@ class PreviewCertificateView(APIView):
 
     def post(self, request):
         template_id = request.data.get("template_id")
+        course_id = request.data.get("course_id")
         template_file = request.FILES.get("template_file") or request.FILES.get("image")
         student_name = (request.data.get("student_name") or "John Doe").strip()
-        course_name = (request.data.get("course_name") or "Course of Completion").strip()
+        course_name = (request.data.get("course_name") or "").strip()
         start_date_str = (request.data.get("start_date") or "").strip()
         end_date_str = (request.data.get("end_date") or "").strip()
         issue_date_str = (request.data.get("issue_date") or "").strip()
-        issuer_name = (request.data.get("issuer_name") or request.data.get("issuer") or "OneSmarter, Inc.").strip()
+        issuer_name = (request.data.get("issuer_name") or request.data.get("issuer") or "").strip()
+
+        course = None
+        if course_id:
+            try:
+                course = Course.objects.get(pk=course_id)
+            except (Course.DoesNotExist, ValueError):
+                return Response({"detail": "Selected course not found."}, status=status.HTTP_404_NOT_FOUND)
+        if course:
+            course_name = course_name or course.name
+            start_date_str = start_date_str or course.start_date.strftime("%Y-%m-%d")
+            end_date_str = end_date_str or course.end_date.strftime("%Y-%m-%d")
+            issuer_name = issuer_name or course.issuer
+        issuer_name = issuer_name or "OneSmarter, Inc."
 
         template = None
         if not template_id and template_file:
@@ -1479,22 +1660,41 @@ class PreviewCertificateView(APIView):
             return Response({"detail": "Template image file missing from storage."}, status=status.HTTP_400_BAD_REQUEST)
 
         completion_description = (request.data.get("completion_description") or "").strip()
-        if not completion_description and template.description:
-            completion_description = template.description.strip()
 
         layout_settings = dict(template.layout_config or {})
-        raw_layout_settings = request.data.get("layout_settings")
-        if raw_layout_settings and isinstance(raw_layout_settings, dict):
-            layout_settings.update(raw_layout_settings)
+        shared_field_values = request.data.get("field_values", {})
+        if isinstance(shared_field_values, dict):
+            saved_field_values = dict(layout_settings.get("field_values", {}))
+            saved_field_values.update(shared_field_values)
+            layout_settings["field_values"] = saved_field_values
 
-        # Parse dates with flexible DD/MM/YYYY handling
-        start_date, _ = parse_date_flexible(start_date_str, "Start date") if start_date_str else (timezone.now().date(), None)
-        end_date, _ = parse_date_flexible(end_date_str, "End date") if end_date_str else (timezone.now().date(), None)
-        issue_date, _ = parse_date_flexible(issue_date_str, "Issue date") if issue_date_str else (timezone.now().date(), None)
+        # Preview uses course dates when available, leaves unresolved optional dates blank,
+        # and uses the real current date for the system-generated issue date.
+        start_date, start_err = parse_date_flexible(start_date_str, "Start date") if start_date_str else (None, None)
+        end_date, end_err = parse_date_flexible(end_date_str, "End date") if end_date_str else (None, None)
+        issue_date, issue_err = parse_date_flexible(issue_date_str, "Issue date") if issue_date_str else (timezone.localdate(), None)
+        date_err = start_err or end_err or issue_err
+        if date_err:
+            return Response({"detail": date_err}, status=status.HTTP_400_BAD_REQUEST)
+        if start_date and end_date and end_date < start_date:
+            return Response({"detail": "End date cannot be earlier than start date."}, status=status.HTTP_400_BAD_REQUEST)
 
-        start_disp = start_date.strftime("%d/%m/%Y") if start_date else "01/07/2026"
-        end_disp = end_date.strftime("%d/%m/%Y") if end_date else "01/10/2026"
-        issue_disp = issue_date.strftime("%d/%m/%Y") if issue_date else "13/10/2026"
+        start_disp = start_date.strftime("%d/%m/%Y") if start_date else ""
+        end_disp = end_date.strftime("%d/%m/%Y") if end_date else ""
+        issue_disp = issue_date.strftime("%d/%m/%Y")
+        field_values = layout_settings.get("field_values", {})
+        missing_fields = _missing_template_fields(template, {
+            "student_name": student_name,
+            "certificate_number": "OSCV-PREVIEW-000000",
+            "course_name": course_name,
+            "start_date": start_disp,
+            "end_date": end_disp,
+            "issue_date": issue_disp,
+            "completion_description": completion_description,
+            "issuer": issuer_name,
+        }, field_values)
+        if missing_fields:
+            return Response({"detail": "Missing values for configured template field(s): " + ", ".join(missing_fields)}, status=status.HTTP_400_BAD_REQUEST)
 
         try:
             png_bytes, sha256_hex = generate_certificate_image(
@@ -1517,7 +1717,7 @@ class PreviewCertificateView(APIView):
             })
         except Exception as exc:
             logger.exception("Failed generating preview certificate")
-            return Response({"detail": f"Failed to generate preview: {exc}"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+            return Response({"detail": "Could not generate preview. Check the server log for details."}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
 # ---------------------------------------------------------------------------
@@ -1554,12 +1754,19 @@ class RetryEmailView(APIView):
     permission_classes = [IsAuthenticated, IsCertiVerifyAdmin]
 
     def post(self, request, pk):
-        cert = get_object_or_404(Certificate.objects.select_related("owner", "course"), pk=pk)
+        with transaction.atomic():
+            cert = get_object_or_404(
+                Certificate.objects.select_for_update().select_related("owner", "course"), pk=pk
+            )
 
-        email_ok, email_err = send_certificate_issued_email(cert)
-        cert.email_sent = email_ok
-        cert.email_error = email_err
-        cert.save(update_fields=["email_sent", "email_error"])
+            if cert.email_sent:
+                return Response({
+                    "success": True,
+                    "email_sent": True,
+                    "message": "Certificate email was already accepted by the mail backend; no duplicate was sent.",
+                }, status=status.HTTP_200_OK)
+
+            email_ok, email_err = _send_and_record_certificate_email(cert)
 
         log_action(
             action=AuditLog.Action.EMAIL_RETRY,
@@ -1593,31 +1800,15 @@ class CertificateImageView(APIView):
     GET /api/certificates/<pk>/image/
     Serves the personalized certificate image.
     Accessible only to certificate owner or CertiVerify administrator.
-    Supports JWT Bearer header or '?token=<jwt_token>' query param for browser <img> tags.
+    Uses normal JWT Bearer authentication; credentials are never accepted in query strings.
     """
-    permission_classes = [AllowAny]
+    permission_classes = [IsAuthenticated]
     authentication_classes = [OptionalJWTAuthentication]
 
     def get(self, request, pk):
         cert = get_object_or_404(Certificate.objects.select_related("owner"), pk=pk)
 
         user = request.user
-        if not (user and user.is_authenticated):
-            token_str = request.query_params.get("token")
-            if token_str:
-                from rest_framework_simplejwt.authentication import JWTAuthentication
-                try:
-                    jwt_auth = JWTAuthentication()
-                    validated_token = jwt_auth.get_validated_token(token_str)
-                    user = jwt_auth.get_user(validated_token)
-                except Exception:
-                    user = None
-
-        if not (user and user.is_authenticated):
-            return Response(
-                {"detail": "Authentication credentials were not provided."},
-                status=status.HTTP_401_UNAUTHORIZED,
-            )
 
         is_admin = is_certiverify_admin(user)
         is_owner = cert.owner_id == user.id

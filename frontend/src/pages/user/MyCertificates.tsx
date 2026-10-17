@@ -8,7 +8,8 @@ import CertificateDetails from '../../components/CertificateDetails';
 import LoadingSkeleton from '../../components/LoadingSkeleton';
 import EmptyState from '../../components/EmptyState';
 import ErrorMessage from '../../components/ErrorMessage';
-import { resolveCertificateMediaUrl } from '../../lib/media';
+import AuthenticatedCertificateImage from '../../components/AuthenticatedCertificateImage';
+import { downloadBlob } from '../../lib/download';
 
 export default function MyCertificates() {
   const [certs, setCerts] = useState<Cert[]>([]);
@@ -112,9 +113,7 @@ export default function MyCertificates() {
               <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
                 {filtered.map(c => {
                   const rawThumb = c.imageUrl || (c.file && !c.isPdf ? c.file : null);
-                  const thumb = resolveCertificateMediaUrl(rawThumb);
                   const rawDownload = c.downloadUrl || (c.hasPdf && c.pdfDownloadUrl ? c.pdfDownloadUrl : c.imageUrl || c.file);
-                  const downloadLink = resolveCertificateMediaUrl(rawDownload);
                   const isImageFailed = failedImages[c.key] === true;
 
                   return (
@@ -123,9 +122,9 @@ export default function MyCertificates() {
                       className="hover:bg-slate-50/80 dark:hover:bg-slate-800/40 transition"
                     >
                       <td className="py-3 px-4">
-                        {thumb && !isImageFailed ? (
-                          <img
-                            src={thumb}
+                        {rawThumb && !isImageFailed ? (
+                          <AuthenticatedCertificateImage
+                            certificateId={c.key}
                             alt={c.title}
                             className="w-16 h-11 object-cover rounded-md border border-slate-200 dark:border-slate-700 shadow-xs cursor-pointer hover:opacity-90 transition"
                             onClick={() => setSelectedCert(c)}
@@ -192,16 +191,23 @@ export default function MyCertificates() {
                             <svg viewBox="0 0 24 24" className="w-3 h-3 fill-current" aria-hidden="true"><path d="M20.447 20.452h-3.554v-5.569c0-1.328-.027-3.037-1.852-3.037-1.853 0-2.136 1.445-2.136 2.939v5.667H9.351V9h3.414v1.561h.046c.477-.9 1.637-1.85 3.37-1.85 3.601 0 4.267 2.37 4.267 5.455v6.286zM5.337 7.433a2.062 2.062 0 0 1-2.063-2.065 2.064 2.064 0 1 1 2.063 2.065zm1.782 13.019H3.555V9h3.564v11.452zM22.225 0H1.771C.792 0 0 .774 0 1.729v20.542C0 23.227.792 24 1.771 24h20.451C23.2 24 24 23.227 24 22.271V1.729C24 .774 23.2 0 22.222 0h.003z"/></svg>
                             <span>LinkedIn</span>
                           </button>
-                          {downloadLink && !isImageFailed && (
-                            <a
-                              href={downloadLink}
-                              download={`certificate_${c.number}.${c.hasPdf ? 'pdf' : 'png'}`}
+                          {rawDownload && !isImageFailed && (
+                            <button
+                              type="button"
+                              onClick={async () => {
+                                try {
+                                  const blob = c.hasPdf ? await certificateService.pdfBlob(c.key) : await certificateService.imageBlob(c.key);
+                                  downloadBlob(blob, `certificate_${c.number}.${c.hasPdf ? 'pdf' : 'png'}`);
+                                } catch {
+                                  setFailedImages(prev => ({ ...prev, [c.key]: true }));
+                                }
+                              }}
                               className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-semibold text-slate-700 dark:text-slate-300 hover:text-slate-900 bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 rounded-lg transition"
                               title="Download Certificate"
                             >
                               <Download className="w-3.5 h-3.5 text-teal-600" />
                               <span>Download</span>
-                            </a>
+                            </button>
                           )}
                         </div>
                       </td>

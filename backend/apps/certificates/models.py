@@ -299,10 +299,13 @@ def template_upload_path(instance, filename):
 
 
 class CertificateTemplate(models.Model):
-    """An uploaded background image used to generate personalized certificates."""
+    """An uploaded certificate background and its editable source when available."""
 
     name = models.CharField(max_length=200)
     image = models.ImageField(upload_to=template_upload_path)
+    # Preserve uploaded PDF bytes. ``image`` remains the legacy first-page preview
+    # so existing clients and records continue to work without a schema rewrite.
+    original_pdf = models.FileField(upload_to=template_upload_path, blank=True, null=True)
     version = models.PositiveIntegerField(default=1)
     file_format = models.CharField(max_length=10, default="PNG")
     uploaded_by = models.ForeignKey(

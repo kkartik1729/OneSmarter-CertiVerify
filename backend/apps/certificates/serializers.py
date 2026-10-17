@@ -363,6 +363,7 @@ class CertificateTemplateSerializer(serializers.ModelSerializer):
     # Use FileField rather than DRF's ImageField so that DRF's internal image.verify()
     # does not fail on Figma PNGs with complex metadata chunks (iCCP, pHYs, etc.)
     image = serializers.FileField(required=True)
+    original_pdf = serializers.FileField(required=False, allow_null=True, write_only=True)
     description = serializers.CharField(
         required=False,
         allow_blank=True,
@@ -376,6 +377,7 @@ class CertificateTemplateSerializer(serializers.ModelSerializer):
             "id",
             "name",
             "image",
+            "original_pdf",
             "image_url",
             "description",
             "layout_config",
@@ -387,6 +389,26 @@ class CertificateTemplateSerializer(serializers.ModelSerializer):
             "updated_at",
         ]
         read_only_fields = ["id", "uploaded_by", "uploaded_by_username", "image_url", "created_at", "updated_at"]
+
+    def create(self, validated_data):
+        original_pdf = validated_data.pop("original_pdf", None)
+        image = validated_data.get("image")
+        if original_pdf is None:
+            original_pdf = getattr(image, "_original_pdf", None)
+        obj = super().create(validated_data)
+        if original_pdf:
+            obj.original_pdf.save(original_pdf.name, original_pdf, save=True)
+        return obj
+
+    def update(self, instance, validated_data):
+        original_pdf = validated_data.pop("original_pdf", None)
+        image = validated_data.get("image")
+        if original_pdf is None:
+            original_pdf = getattr(image, "_original_pdf", None)
+        obj = super().update(instance, validated_data)
+        if original_pdf:
+            obj.original_pdf.save(original_pdf.name, original_pdf, save=True)
+        return obj
 
     def get_image_url(self, obj: CertificateTemplate) -> str | None:
         if not obj.image:
@@ -443,6 +465,9 @@ class CertificateTemplateSerializer(serializers.ModelSerializer):
 
                 converted_file = ContentFile(png_bytes, name=f"{safe_base}.png")
                 converted_file._template_format = "PDF"
+                # If the client did not send a second copy, preserve the original
+                # upload on the converted preview object for create/update hooks.
+                converted_file._original_pdf = ContentFile(content, name=f"{safe_base}.pdf")
                 return converted_file
             except serializers.ValidationError:
                 raise

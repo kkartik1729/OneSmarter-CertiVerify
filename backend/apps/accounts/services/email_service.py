@@ -10,10 +10,12 @@ credentials/tokens are never printed to logs.
 import logging
 import smtplib
 import socket
+import time
 from typing import Optional
 
 from django.conf import settings
-from django.core.mail import EmailMultiAlternatives
+from django.core.mail import EmailMultiAlternatives, get_connection
+from django.core.mail.backends.smtp import EmailBackend as SMTPEmailBackend
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +47,8 @@ def is_smtp_configured() -> tuple[bool, str]:
                 "SMTP email backend is active but EMAIL_HOST_USER or EMAIL_HOST_PASSWORD "
                 "is not configured with valid credentials in backend/.env."
             )
+        if getattr(settings, "EMAIL_USE_TLS", False) and getattr(settings, "EMAIL_USE_SSL", False):
+            return False, "EMAIL_USE_TLS and EMAIL_USE_SSL cannot both be enabled."
     return True, ""
 
 
@@ -100,7 +104,41 @@ def send_account_email(
                     att_filename, att_content, att_mimetype = att
                     msg.attach(att_filename, att_content, att_mimetype)
 
-        sent_count = msg.send(fail_silently=False)
+        # Use a private connection for this message. SMTP configuration/auth/TLS
+        # failures happen before any message data is submitted, so opening can be
+        # retried once safely. Never retry sendmail failures: the server may have
+        # accepted the message before a disconnect, and retrying could duplicate it.
+        connection = get_connection(fail_silently=False)
+        if isinstance(connection, SMTPEmailBackend):
+            sent_count = 0
+            for attempt in range(2):
+                try:
+                    opened = connection.open()
+                    if opened is False:
+                        raise EmailDeliveryError("SMTP connection could not be opened.")
+                    msg.connection = connection
+                    break
+                except (smtplib.SMTPConnectError, smtplib.SMTPServerDisconnected, socket.timeout, OSError):
+                    try:
+                        connection.close()
+                    except Exception:
+                        logger.debug("SMTP connection cleanup failed after open error.", exc_info=True)
+                    if attempt == 1:
+                        raise
+                    logger.warning("SMTP connection failed before sending; retrying once.")
+                    time.sleep(0.25)
+                    connection = get_connection(fail_silently=False)
+            try:
+                sent_count = msg.send(fail_silently=False)
+            finally:
+                try:
+                    connection.close()
+                except Exception:
+                    logger.debug("SMTP connection cleanup failed.", exc_info=True)
+        else:
+            # Keep locmem, console, and other configured test backends working.
+            msg.connection = connection
+            sent_count = msg.send(fail_silently=False)
         if sent_count < 1:
             logger.error("SMTP server rejected delivery for recipient: %s", clean_recipient)
             raise EmailDeliveryError("Mail server did not accept the message for delivery.")

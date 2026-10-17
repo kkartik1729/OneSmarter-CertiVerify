@@ -25,6 +25,7 @@ export const EP = {
   certificate: (id: string | number) => `/certificates/${encodeURIComponent(String(id))}/`,
   certificateImage: (id: string | number, download = false) =>
     `/certificates/${encodeURIComponent(String(id))}/image/${download ? '?download=true' : ''}`,
+  certificatePdf: (id: string | number) => `/certificates/${encodeURIComponent(String(id))}/pdf/download/`,
   review: (id: string | number) => `/certificates/${encodeURIComponent(String(id))}/review/`,
   verify: (num: string) => `/certificates/verify/${encodeURIComponent(num)}/`,
   retryEmail: (id: string | number) => `/certificates/${encodeURIComponent(String(id))}/retry-email/`,

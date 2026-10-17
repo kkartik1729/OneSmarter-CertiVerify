@@ -12,7 +12,9 @@ import {
 } from 'lucide-react';
 import type { Cert } from '../types';
 import StatusBadge from './StatusBadge';
-import { resolveCertificateMediaUrl } from '../lib/media';
+import AuthenticatedCertificateImage from './AuthenticatedCertificateImage';
+import { certificateService } from '../services';
+import { downloadBlob } from '../lib/download';
 import { getCredentialUrlInfo } from '../lib/credentialUrl';
 
 interface CertificateDetailsProps {
@@ -29,6 +31,8 @@ export default function CertificateDetails({
   const [imgFailed, setImgFailed] = useState(false);
   const [copied, setCopied] = useState(false);
   const [showLinkedIn, setShowLinkedIn] = useState(initialLinkedInOpen);
+  const [actionError, setActionError] = useState<string | null>(null);
+  const [expandedImage, setExpandedImage] = useState(false);
 
   useEffect(() => {
     if (initialLinkedInOpen) {
@@ -63,9 +67,18 @@ export default function CertificateDetails({
     }
   };
 
-  const resolvedImg = resolveCertificateMediaUrl(cert.imageUrl || cert.file);
-  const resolvedDownload = resolveCertificateMediaUrl(cert.downloadUrl || cert.imageUrl || cert.file);
-  const resolvedPdf = resolveCertificateMediaUrl(cert.pdfDownloadUrl);
+  const hasImage = Boolean(cert.imageUrl || (cert.file && !cert.isPdf));
+  const hasPdf = Boolean(cert.hasPdf && cert.pdfDownloadUrl);
+
+  const downloadCertificate = async (pdf: boolean) => {
+    setActionError(null);
+    try {
+      const blob = pdf ? await certificateService.pdfBlob(cert.key) : await certificateService.imageBlob(cert.key);
+      downloadBlob(blob, `certificate_${cert.number}.${pdf ? 'pdf' : 'png'}`);
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : 'Certificate download failed.');
+    }
+  };
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm animate-in fade-in">
@@ -152,27 +165,27 @@ export default function CertificateDetails({
         </div>
 
         {/* Certificate Image Preview */}
-        {(cert.imageUrl || (cert.file && !cert.isPdf)) && (
+        {hasImage && (
           <div className="space-y-2">
             <div className="flex items-center justify-between">
               <span className="text-xs font-semibold text-slate-700 dark:text-slate-300">
                 Official Generated Certificate:
               </span>
-              {resolvedDownload && !imgFailed && (
-                <a
-                  href={resolvedDownload}
-                  download={`certificate_${cert.number}.png`}
+              {!imgFailed && (
+                <button
+                  type="button"
+                  onClick={() => downloadCertificate(false)}
                   className="text-[11px] font-semibold text-teal-600 hover:underline flex items-center gap-1"
                 >
                   <span>Download Image</span>
                   <ExternalLink className="w-3 h-3" />
-                </a>
+                </button>
               )}
             </div>
             <div className="rounded-xl overflow-hidden border border-slate-200 dark:border-slate-800 bg-slate-950 flex items-center justify-center p-2 min-h-36">
-              {resolvedImg && !imgFailed ? (
-                <img
-                  src={resolvedImg}
+              {!imgFailed ? (
+                <AuthenticatedCertificateImage
+                  certificateId={cert.key}
                   alt={cert.title}
                   className="max-h-72 w-auto object-contain rounded shadow"
                   onError={() => setImgFailed(true)}
@@ -215,38 +228,44 @@ export default function CertificateDetails({
         )}
 
         {/* Document link if uploaded or stored in DB */}
-        {(cert.hasPdf && resolvedPdf) ? (
+        {hasPdf ? (
           <div className="flex items-center justify-between p-3 rounded-xl bg-teal-50 dark:bg-teal-950/40 border border-teal-200 dark:border-teal-800 text-xs">
             <div className="flex items-center gap-2 text-teal-800 dark:text-teal-300 font-medium">
               <FileText className="w-4 h-4 text-teal-600" />
               <span>Official Certificate PDF (PostgreSQL Stored)</span>
             </div>
-            <a
-              href={resolvedPdf}
-              download
+            <button
+              type="button"
+              onClick={() => downloadCertificate(true)}
               className="inline-flex items-center gap-1 px-3 py-1 bg-teal-600 hover:bg-teal-700 text-white rounded-lg transition"
             >
               <span>Download PDF</span>
               <ExternalLink className="w-3 h-3" />
-            </a>
+            </button>
           </div>
-        ) : resolvedImg ? (
+        ) : hasImage ? (
           <div className="flex items-center justify-between p-3 rounded-xl bg-teal-50 dark:bg-teal-950/40 border border-teal-200 dark:border-teal-800 text-xs">
             <div className="flex items-center gap-2 text-teal-800 dark:text-teal-300 font-medium">
               <FileText className="w-4 h-4 text-teal-600" />
               <span>Attached Certificate Document</span>
             </div>
-            <a
-              href={resolvedImg}
-              target="_blank"
-              rel="noopener noreferrer"
+            <button
+              type="button"
+              onClick={() => setExpandedImage(true)}
               className="inline-flex items-center gap-1 px-3 py-1 bg-teal-600 hover:bg-teal-700 text-white rounded-lg transition"
             >
               <span>View Document</span>
               <ExternalLink className="w-3 h-3" />
-            </a>
+            </button>
           </div>
         ) : null}
+        {actionError && <p role="alert" className="text-xs text-rose-700 dark:text-rose-300">{actionError}</p>}
+        {expandedImage && (
+          <div className="fixed inset-0 z-[60] flex items-center justify-center bg-slate-950/90 p-4" role="dialog" aria-modal="true" aria-label="Certificate image preview" onClick={() => setExpandedImage(false)}>
+            <button type="button" onClick={() => setExpandedImage(false)} className="absolute right-4 top-4 rounded-lg bg-white/10 px-3 py-2 text-sm font-semibold text-white">Close</button>
+            <AuthenticatedCertificateImage certificateId={cert.key} alt={cert.title} className="max-h-[90vh] max-w-full object-contain" />
+          </div>
+        )}
 
         {/* ── Credential URL / LinkedIn Actions ── */}
         <div className="space-y-3">

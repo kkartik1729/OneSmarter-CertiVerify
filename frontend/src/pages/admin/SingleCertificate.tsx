@@ -13,6 +13,7 @@ import {
 } from 'lucide-react';
 import {
   courseService,
+  certificateService,
   templateService,
   generationService,
   adminUsersService,
@@ -58,6 +59,13 @@ export default function SingleCertificate() {
   const [loadingPreview, setLoadingPreview] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [createdCert, setCreatedCert] = useState<Cert | null>(null);
+  const [generatedImagePreviewUrl, setGeneratedImagePreviewUrl] = useState<string | null>(null);
+  const [loadingGeneratedImage, setLoadingGeneratedImage] = useState(false);
+  const [generatedImageError, setGeneratedImageError] = useState<string | null>(null);
+
+  useEffect(() => () => {
+    if (generatedImagePreviewUrl) URL.revokeObjectURL(generatedImagePreviewUrl);
+  }, [generatedImagePreviewUrl]);
 
   // Alerts
   const [error, setError] = useState<string | null>(null);
@@ -214,10 +222,11 @@ export default function SingleCertificate() {
       const c = courses.find((course) => course.id === Number(selectedCourseId));
       const res = await generationService.preview({
         template_id: tplId,
+        course_id: Number(selectedCourseId) || undefined,
         student_name: studentDisplayName.trim() || 'Student Name',
-        course_name: c?.name || 'Course Name',
-        start_date: startDate || '2026-07-01',
-        end_date: endDate || '2026-10-01',
+        course_name: c?.name || '',
+        start_date: startDate || c?.start_date || '',
+        end_date: endDate || c?.end_date || '',
         issue_date: issueDate || new Date().toISOString().slice(0, 10),
         issuer_name: c?.issuer || 'OneSmarter, Inc.',
         completion_description: descriptionOverride.trim() || undefined,
@@ -266,11 +275,14 @@ export default function SingleCertificate() {
     }
     setStudentNameError(null);
 
-    if (!startDate || !endDate || !issueDate) {
-      setError('Start date, end date, and issue date are required.');
+    const courseDefaults = courses.find((course) => course.id === Number(selectedCourseId));
+    const resolvedStartDate = startDate || courseDefaults?.start_date || '';
+    const resolvedEndDate = endDate || courseDefaults?.end_date || '';
+    if (!resolvedStartDate || !resolvedEndDate) {
+      setError('Course start and end dates are missing. Set them on the selected course or enter them here.');
       return;
     }
-    if (endDate < startDate) {
+    if (resolvedEndDate < resolvedStartDate) {
       setDateError('End date cannot be earlier than start date.');
       setError('End date cannot be earlier than start date.');
       return;
@@ -287,9 +299,9 @@ export default function SingleCertificate() {
         user_id: selectedStudent ? selectedStudent.id : undefined,
         student_email: emailToUse,
         student_name: trimmedName,
-        start_date: startDate,
-        end_date: endDate,
-        issue_date: issueDate,
+        start_date: resolvedStartDate,
+        end_date: resolvedEndDate,
+        issue_date: issueDate || new Date().toISOString().slice(0, 10),
         completion_description: descriptionOverride.trim() || undefined,
       });
       setCreatedCert(cert);
@@ -350,25 +362,42 @@ export default function SingleCertificate() {
             </div>
             <div>
               <h3 className="text-base font-bold text-teal-900 dark:text-teal-200">
-                Certificate Generated & Issued Successfully!
+                Certificate Generated Successfully
               </h3>
               <p className="text-xs text-teal-700 dark:text-teal-300 font-mono mt-0.5">
                 Certificate Number: {createdCert.number} · Recipient: {createdCert.recipient}
               </p>
+              <p className="text-xs text-slate-700 dark:text-slate-300 mt-1">
+                Certificate status: <strong>{createdCert.status}</strong> · Email: <strong>{createdCert.emailSent ? 'Sent' : 'Pending'}</strong>
+              </p>
+              {createdCert.emailError && (
+                <p className="text-xs text-amber-800 dark:text-amber-300 mt-1">{createdCert.emailError}</p>
+              )}
             </div>
           </div>
 
           <div className="flex flex-wrap items-center gap-3 pt-2">
             {createdCert.imageUrl && (
-              <a
-                href={createdCert.imageUrl}
-                target="_blank"
-                rel="noreferrer"
+              <button
+                type="button"
+                disabled={loadingGeneratedImage}
+                onClick={async () => {
+                  setLoadingGeneratedImage(true);
+                  setGeneratedImageError(null);
+                  try {
+                    const imageBlob = await certificateService.imageBlob(createdCert.key);
+                    setGeneratedImagePreviewUrl(URL.createObjectURL(imageBlob));
+                  } catch (err) {
+                    setGeneratedImageError(errMsg(err));
+                  } finally {
+                    setLoadingGeneratedImage(false);
+                  }
+                }}
                 className="px-4 py-2 bg-teal-600 hover:bg-teal-700 text-white font-semibold text-xs rounded-xl shadow-sm inline-flex items-center gap-1.5"
               >
                 <Eye className="w-3.5 h-3.5" />
-                <span>View Generated Certificate Image</span>
-              </a>
+                <span>{loadingGeneratedImage ? 'Loading Certificate Image…' : 'View Generated Certificate Image'}</span>
+              </button>
             )}
             <button
               type="button"
@@ -390,6 +419,17 @@ export default function SingleCertificate() {
               <ArrowRight className="w-3.5 h-3.5" />
             </Link>
           </div>
+          {generatedImageError && <p role="alert" className="text-xs text-rose-700 dark:text-rose-300">{generatedImageError}</p>}
+          {generatedImagePreviewUrl && (
+            <div className="rounded-xl border border-teal-200 dark:border-teal-800 bg-white dark:bg-slate-900 p-3 space-y-3">
+              <div className="flex justify-end">
+                <button type="button" onClick={() => setGeneratedImagePreviewUrl(null)} className="text-xs font-semibold text-slate-600 hover:text-slate-900 dark:text-slate-300 dark:hover:text-white">
+                  Close Preview
+                </button>
+              </div>
+              <img src={generatedImagePreviewUrl} alt={`Generated certificate ${createdCert.number}`} className="mx-auto max-h-[75vh] max-w-full rounded-lg object-contain" />
+            </div>
+          )}
         </div>
       )}
 
@@ -696,11 +736,10 @@ export default function SingleCertificate() {
             {/* 5. Dates */}
             <div className="space-y-2">
               <label className="block font-semibold text-slate-700 dark:text-slate-300">
-                5. Course Start Date *
+                5. Course Start Date (optional override; defaults to selected course)
               </label>
               <input
                 type="date"
-                required
                 value={startDate}
                 onChange={(e) => handleStartDateChange(e.target.value)}
                 className="w-full px-3.5 py-2.5 bg-slate-50 dark:bg-slate-800 border border-slate-300 dark:border-slate-700 rounded-xl text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-teal-500"
@@ -709,11 +748,10 @@ export default function SingleCertificate() {
 
             <div className="space-y-2">
               <label className="block font-semibold text-slate-700 dark:text-slate-300">
-                6. Course End Date *
+                6. Course End Date (optional override; defaults to selected course)
               </label>
               <input
                 type="date"
-                required
                 min={startDate || undefined}
                 value={endDate}
                 onChange={(e) => handleEndDateChange(e.target.value)}
@@ -732,11 +770,10 @@ export default function SingleCertificate() {
 
             <div className="space-y-2">
               <label className="block font-semibold text-slate-700 dark:text-slate-300">
-                7. Certificate Issue Date *
+                7. Certificate Issue Date (optional; defaults to today)
               </label>
               <input
                 type="date"
-                required
                 value={issueDate}
                 onChange={(e) => setIssueDate(e.target.value)}
                 className="w-full px-3.5 py-2.5 bg-slate-50 dark:bg-slate-800 border border-slate-300 dark:border-slate-700 rounded-xl text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-teal-500"

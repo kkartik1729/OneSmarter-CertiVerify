@@ -371,6 +371,14 @@ class AccountsAuthAndMFATestCase(TestCase):
         new_secret = confirm_res.data["secret"]
         challenge = confirm_res.data["challenge"]
 
+        missing_payload = self.client.post("/api/accounts/mfa/recovery/complete/", {})
+        self.assertEqual(missing_payload.status_code, status.HTTP_400_BAD_REQUEST)
+        invalid_code = self.client.post("/api/accounts/mfa/recovery/complete/", {
+            "challenge": challenge,
+            "code": "not-a-code",
+        })
+        self.assertEqual(invalid_code.status_code, status.HTTP_400_BAD_REQUEST)
+
         # Step 3: Complete recovery with valid OTP
         new_otp = pyotp.TOTP(new_secret).now()
         complete_res = self.client.post("/api/accounts/mfa/recovery/complete/", {
@@ -389,6 +397,12 @@ class AccountsAuthAndMFATestCase(TestCase):
         self.assertEqual(self.admin.profile.role, "ADMIN")
         self.assertEqual(self.admin.profile.totp_secret, new_secret)
         self.assertNotEqual(self.admin.profile.totp_secret, old_secret)
+
+        replay = self.client.post("/api/accounts/mfa/recovery/complete/", {
+            "challenge": challenge,
+            "code": new_otp,
+        })
+        self.assertEqual(replay.status_code, status.HTTP_400_BAD_REQUEST)
 
     def test_expired_recovery_token_rejected(self):
         """Expired recovery token must be rejected."""

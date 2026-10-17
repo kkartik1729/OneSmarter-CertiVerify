@@ -1,6 +1,6 @@
 import type { Cert, NewCert, Verification } from '../types';
 import { EP } from './endpoints';
-import { ApiError, http } from './http';
+import { ApiError, http, httpBlob } from './http';
 import { asList, mapCert, mapPublicRecord } from './mappers';
 
 export const certificateService = {
@@ -9,6 +9,14 @@ export const certificateService = {
 
   /** GET /certificates/<id>/ */
   get: async (key: string): Promise<Cert> => mapCert(await http<unknown>('GET', EP.certificate(key))),
+
+  /** GET the protected certificate image with the active administrator's bearer token. */
+  imageBlob: async (key: string | number): Promise<Blob> => {
+    const blob = await httpBlob(EP.certificateImage(key));
+    if (!blob.type.startsWith('image/')) throw new ApiError(500, 'The server did not return a certificate image.');
+    return blob;
+  },
+  pdfBlob: (key: string | number): Promise<Blob> => httpBlob(EP.certificatePdf(key)),
 
   /** POST /certificates/ (multipart) */
   async create(c: NewCert): Promise<Cert> {
@@ -70,6 +78,7 @@ export const templateService = {
     const f = new FormData();
     f.append('name', name);
     f.append('image', file);
+    if (file.name.toLowerCase().endsWith('.pdf')) f.append('original_pdf', file);
     if (description) f.append('description', description);
     return http<import('../types').CertificateTemplate>('POST', EP.templates, f);
   },
@@ -77,10 +86,14 @@ export const templateService = {
   replace: async (id: number | string, file: File, name?: string, description?: string): Promise<import('../types').CertificateTemplate> => {
     const f = new FormData();
     f.append('image', file);
+    if (file.name.toLowerCase().endsWith('.pdf')) f.append('original_pdf', file);
     if (name) f.append('name', name);
     if (description !== undefined) f.append('description', description);
     return http<import('../types').CertificateTemplate>('PUT', EP.template(id), f);
   },
+
+  saveLayout: async (id: number | string, layout_config: Record<string, any>): Promise<import('../types').CertificateTemplate> =>
+    http<import('../types').CertificateTemplate>('PATCH', EP.template(id), { layout_config }),
 
   delete: async (id: number | string): Promise<void> =>
     http<void>('DELETE', EP.template(id)),
@@ -129,6 +142,7 @@ export const generationService = {
       issuer?: string;
       completion_description?: string;
       output_format?: string;
+      field_values?: Record<string, string>;
     }
   ): Promise<import('../types').GenerationBatch> => {
     return http<import('../types').GenerationBatch>('POST', EP.bulkGenerate, {
@@ -136,7 +150,7 @@ export const generationService = {
       template_id: templateId,
       rows,
       ...sharedFields,
-    });
+    }, true, Number(import.meta.env.VITE_BULK_GENERATION_TIMEOUT_MS) || 120000);
   },
 
   /** Single manual certificate generation */
@@ -154,14 +168,22 @@ export const generationService = {
     end_date: string;
     issue_date: string;
     output_format?: string;
+    field_values?: Record<string, string>;
     allow_reissue?: boolean;
   }): Promise<Cert> => {
-    return mapCert(await http<unknown>('POST', EP.singleGenerate, payload));
+    return mapCert(await http<unknown>(
+      'POST',
+      EP.singleGenerate,
+      payload,
+      true,
+      Number(import.meta.env.VITE_CERTIFICATE_GENERATION_TIMEOUT_MS) || 60000,
+    ));
   },
 
   /** Preview certificate image */
   preview: async (payload: {
     template_id: number;
+    course_id?: number;
     student_name?: string;
     course_name?: string;
     start_date?: string;
@@ -169,6 +191,7 @@ export const generationService = {
     issue_date?: string;
     issuer_name?: string;
     completion_description?: string;
+    field_values?: Record<string, string>;
   }): Promise<{ preview_url: string; file_size: number; sha256: string }> => {
     return http<{ preview_url: string; file_size: number; sha256: string }>('POST', EP.previewCertificate, payload);
   },

@@ -1,10 +1,19 @@
 from datetime import date
+import io
+import os
+import tempfile
+from unittest import mock
 
 from django.contrib.auth import get_user_model
 from django.test import TestCase
+from django.test import override_settings
+from django.utils import timezone
 from rest_framework.test import APIClient
 
 from apps.certificates.models import Certificate
+from apps.certificates.models import CertificatePDF
+from apps.certificates.generator import generate_certificate_image
+from PIL import Image, ImageDraw
 
 User = get_user_model()
 
@@ -88,7 +97,7 @@ class CertificateAPITests(TestCase):
         )
         self.assertEqual(
             response.data["message"],
-            "This certificate number matches a record issued by OneSmarter-CertiVerify. The presence of this record confirms the certificate was issued through this system.",
+            "This certificate has been verified against the OneSmarter-CertiVerify registry.",
         )
 
     def test_verification_is_case_insensitive(self):
@@ -103,7 +112,7 @@ class CertificateAPITests(TestCase):
             "VERIFIED",
         )
 
-    def test_pending_certificate_is_verified_if_found(self):
+    def test_pending_certificate_is_not_reported_as_verified(self):
         self.certificate.status = Certificate.Status.PENDING
         self.certificate.save()
 
@@ -115,10 +124,10 @@ class CertificateAPITests(TestCase):
         self.assertTrue(response.data["found"])
         self.assertEqual(
             response.data["verification_result"],
-            "VERIFIED",
+            "PENDING",
         )
 
-    def test_rejected_certificate_is_verified_if_found(self):
+    def test_rejected_certificate_is_not_reported_as_verified(self):
         self.certificate.status = Certificate.Status.REJECTED
         self.certificate.rejection_reason = "Invalid certificate"
         self.certificate.save()
@@ -131,8 +140,24 @@ class CertificateAPITests(TestCase):
         self.assertTrue(response.data["found"])
         self.assertEqual(
             response.data["verification_result"],
-            "VERIFIED",
+            "REJECTED",
         )
+
+    def test_public_preview_is_limited_to_verified_record(self):
+        from django.core.files.base import ContentFile
+
+        image_bytes = io.BytesIO()
+        Image.new("RGB", (8, 8), "teal").save(image_bytes, format="PNG")
+        with tempfile.TemporaryDirectory() as media_root, override_settings(MEDIA_ROOT=media_root):
+            self.certificate.file.save("public-preview.png", ContentFile(image_bytes.getvalue()), save=True)
+            response = self.client.get("/api/certificates/verify/CERT-API-001/preview/")
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response["Content-Type"], "image/png")
+
+            self.certificate.status = Certificate.Status.PENDING
+            self.certificate.save(update_fields=["status"])
+            hidden_response = self.client.get("/api/certificates/verify/CERT-API-001/preview/")
+            self.assertEqual(hidden_response.status_code, 404)
 
     def test_unknown_certificate_returns_not_verified(self):
         response = self.client.get(
@@ -240,6 +265,213 @@ class CertificateAPITests(TestCase):
         self.client.force_authenticate(user=self.user)
         response = self.client.get("/api/accounts/admin/users/")
         self.assertEqual(response.status_code, 403)
+
+
+class TemplateRenderingRegressionTests(TestCase):
+    def test_certificate_id_layout_token_resolves_once_without_literal_name(self):
+        from apps.certificates import generator
+
+        temp = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
+        temp.close()
+        try:
+            Image.new("RGB", (600, 400), "white").save(temp.name)
+            original_draw = ImageDraw.Draw
+            drawn_text = []
+
+            class DrawSpy:
+                def __init__(self, image):
+                    self.inner = original_draw(image)
+
+                def text(self, xy, text, *args, **kwargs):
+                    drawn_text.append(str(text))
+                    return self.inner.text(xy, text, *args, **kwargs)
+
+                def __getattr__(self, name):
+                    return getattr(self.inner, name)
+
+            certificate_number = "OSCV-2026-1B85D2BC"
+            with mock.patch.object(generator.ImageDraw, "Draw", side_effect=DrawSpy):
+                output, _ = generate_certificate_image(
+                    template_path=temp.name,
+                    student_name="Alex Chen",
+                    course_name="Example course",
+                    start_date="01/07/2026",
+                    end_date="01/10/2026",
+                    issue_date="16/10/2026",
+                    certificate_number=certificate_number,
+                    layout_overrides={"elements": [{
+                        "type": "text", "text": "certificate_id", "x": .2,
+                        "y": .7, "width": .6, "fontSize": 24, "color": "#202020",
+                    }]},
+                )
+            self.assertIn(certificate_number, drawn_text)
+            self.assertNotIn("certificate_id", drawn_text)
+            self.assertEqual(drawn_text.count(certificate_number), 1)
+            self.assertTrue(output.startswith(b"\x89PNG"))
+        finally:
+            os.unlink(temp.name)
+
+    def test_explicit_recipient_layer_is_not_drawn_twice(self):
+        from apps.certificates import generator
+
+        temp = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
+        temp.close()
+        try:
+            Image.new("RGB", (600, 400), "white").save(temp.name)
+            original_draw = ImageDraw.Draw
+            drawn_text = []
+
+            class DrawSpy:
+                def __init__(self, image):
+                    self.inner = original_draw(image)
+
+                def text(self, xy, text, *args, **kwargs):
+                    drawn_text.append(str(text))
+                    return self.inner.text(xy, text, *args, **kwargs)
+
+                def __getattr__(self, name):
+                    return getattr(self.inner, name)
+
+            with mock.patch.object(generator.ImageDraw, "Draw", side_effect=DrawSpy):
+                output, _ = generate_certificate_image(
+                    template_path=temp.name,
+                    student_name="Alex Chen",
+                    course_name="Example course",
+                    start_date="01/07/2026",
+                    end_date="01/10/2026",
+                    issue_date="16/10/2026",
+                    certificate_number="OSCV-2026-TEST0001",
+                    layout_overrides={"elements": [{
+                        "type": "text", "text": "{{ recipient_name }}", "x": .2,
+                        "y": .5, "width": .6, "fontSize": 24, "color": "#202020",
+                    }]},
+                )
+            self.assertEqual(drawn_text.count("Alex Chen"), 1)
+            self.assertTrue(output.startswith(b"\x89PNG"))
+        finally:
+            os.unlink(temp.name)
+
+    def test_template_cover_and_custom_fields_are_applied_to_generated_image(self):
+        temp = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
+        temp.close()
+        try:
+            Image.new("RGB", (600, 400), (230, 230, 230)).save(temp.name)
+            output, _ = generate_certificate_image(
+                template_path=temp.name,
+                student_name="Alex Chen",
+                course_name="Example course",
+                start_date="01/07/2026",
+                end_date="01/10/2026",
+                issue_date="16/10/2026",
+                certificate_number="OSCV-2026-TEST0002",
+                layout_overrides={
+                    "redactions": [{"x": .1, "y": .1, "width": .2, "height": .1, "color": "#ffffff"}],
+                    "field_values": {"instructor_name": "Taylor Instructor"},
+                    "elements": [{"type": "text", "text": "{{ instructor_name }}", "x": .4,
+                                  "y": .4, "width": .4, "fontSize": 18, "color": "#202020"}],
+                },
+            )
+            rendered = Image.open(io.BytesIO(output)).convert("RGB")
+            self.assertEqual(rendered.getpixel((70, 50)), (255, 255, 255))
+        finally:
+            os.unlink(temp.name)
+
+
+class CertificateEmailDeliveryTests(TestCase):
+    @override_settings(EMAIL_BACKEND="django.core.mail.backends.locmem.EmailBackend")
+    def test_certificate_attachment_uses_recipient_and_pdf_bytes(self):
+        from django.core import mail
+        from apps.certificates.emails import send_certificate_issued_email
+        from apps.certificates.models import Course
+
+        course = Course.objects.create(
+            name="Example course",
+            title="Test certificate",
+            issuer="OneSmarter",
+            start_date=date(2026, 7, 1),
+            end_date=date(2026, 10, 1),
+        )
+
+        cert = Certificate.objects.create(
+            owner=None,
+            recipient_email="recipient@example.com",
+            title="Test certificate",
+            issuer="OneSmarter",
+            certificate_number="OSCV-2026-EMAIL001",
+            recipient_name="Alex Chen",
+            issue_date=date(2026, 10, 16),
+            course_name="Example course",
+            course=course,
+            start_date=date(2026, 8, 1),
+            end_date=date(2026, 8, 30),
+        )
+        pdf_bytes = b"%PDF-1.4\nmock-certificate-pdf"
+        CertificatePDF.objects.create(
+            certificate=cert,
+            content=pdf_bytes,
+            original_filename=f"{cert.certificate_number}.pdf",
+            file_size=len(pdf_bytes),
+        )
+
+        success, error = send_certificate_issued_email(cert)
+
+        self.assertTrue(success, error)
+        self.assertEqual(len(mail.outbox), 1)
+        message = mail.outbox[0]
+        self.assertEqual(message.to, ["recipient@example.com"])
+        attachment = next(item for item in message.attachments if hasattr(item, "get_filename"))
+        self.assertEqual(attachment.get_filename(), f"{cert.certificate_number}.pdf")
+        self.assertEqual(attachment.get_payload(decode=True), pdf_bytes)
+        self.assertIn(cert.certificate_number, message.body)
+        self.assertIn("Course Start Date: 01/07/2026", message.body)
+        self.assertIn("Course End Date: 01/10/2026", message.body)
+        self.assertNotIn("Issue Date", message.body)
+        html_message = next(body for body, content_type in message.alternatives if content_type == "text/html")
+        self.assertIn("Course Start Date:", html_message)
+        self.assertIn("01/07/2026", html_message)
+        self.assertIn("Course End Date:", html_message)
+        self.assertIn("01/10/2026", html_message)
+        self.assertNotIn("Issue Date:", html_message)
+        self.assertIn(cert.certificate_number, html_message)
+
+    @override_settings(EMAIL_BACKEND="django.core.mail.backends.locmem.EmailBackend")
+    def test_email_backend_failure_is_reported_without_claiming_success(self):
+        from apps.accounts.services.email_service import EmailDeliveryError, send_account_email
+
+        with mock.patch("apps.accounts.services.email_service.EmailMultiAlternatives.send", side_effect=RuntimeError("mock transport error")):
+            with self.assertRaises(EmailDeliveryError):
+                send_account_email("recipient@example.com", "Test", "Body")
+
+
+class CertificateAPIRemainingTests(TestCase):
+    def setUp(self):
+        self.user = User.objects.create_user(username="certificate_api_user_2", password="TestPass123!")
+        self.other_user = User.objects.create_user(username="other_certificate_user_2", password="TestPass123!")
+        self.client = APIClient()
+        self.certificate = Certificate.objects.create(
+            owner=self.user,
+            title="Python Programming",
+            issuer="OneSmarter Inc.",
+            certificate_number="CERT-API-REMAINING-001",
+            recipient_name="Test Recipient",
+            issue_date=date(2026, 10, 9),
+            status=Certificate.Status.VERIFIED,
+        )
+
+    def test_retry_email_is_idempotent_after_success(self):
+        admin = User.objects.create_superuser(
+            username="retry_email_admin", email="retry-email-admin@example.com", password="TestPass123!"
+        )
+        self.certificate.email_sent = True
+        self.certificate.save(update_fields=["email_sent"])
+        self.client.force_authenticate(user=admin)
+
+        with mock.patch("apps.certificates.views.send_certificate_issued_email") as send_email:
+            response = self.client.post(f"/api/certificates/{self.certificate.pk}/retry-email/")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.data["email_sent"])
+        send_email.assert_not_called()
 
     def test_admin_creates_certificate_assigned_to_selected_user(self):
         admin_user = User.objects.create_superuser(
@@ -451,19 +683,19 @@ class CertificateGenerationTests(TestCase):
         res = self.client.post("/api/certificates/generate/validate-csv/", {
             "file": csv_file,
             "course_id": self.course.id,
-            "batch_course_name": "Overridden Batch Course",
-            "batch_start_date": "2026-07-01",
-            "batch_end_date": "2026-10-01",
-            "batch_issue_date": "2026-10-14",
         }, format="multipart")
 
         self.assertEqual(res.status_code, 200)
         self.assertEqual(res.data["total_rows"], 1)
         self.assertEqual(res.data["valid_rows_count"], 1)
+        self.assertEqual(res.data["rows"][0]["course_name"], self.course.name)
+        self.assertEqual(res.data["rows"][0]["start_date"], "01/07/2026")
+        self.assertEqual(res.data["rows"][0]["end_date"], "01/10/2026")
+        self.assertEqual(res.data["rows"][0]["issue_date"], timezone.localdate().strftime("%d/%m/%Y"))
         row = res.data["rows"][0]
         self.assertTrue(row["is_valid"])
         self.assertEqual(row["student_name"], "Kartik Hande")
-        self.assertEqual(row["course_name"], "Overridden Batch Course")
+        self.assertEqual(row["course_name"], self.course.name)
         self.assertEqual(row["start_date"], "01/07/2026")
 
 
@@ -544,6 +776,14 @@ class CertificateGenerationTests(TestCase):
         self.assertEqual(verify_res.status_code, 200)
         self.assertEqual(verify_res.data["verification_result"], "VERIFIED")
 
+        # The manual-generation preview endpoint returns the protected binary image
+        # when called by an authorized administrator using normal API authentication.
+        self.client.force_authenticate(user=self.admin)
+        image_res = self.client.get(f"/api/certificates/{cert.id}/image/")
+        self.assertEqual(image_res.status_code, 200)
+        self.assertTrue(image_res["Content-Type"].startswith("image/"))
+        self.assertTrue(image_res.content)
+
         # Owner can view image
         self.client.force_authenticate(user=self.student)
         # Verify PDF document is stored and can be downloaded by owner
@@ -556,6 +796,46 @@ class CertificateGenerationTests(TestCase):
         self.client.force_authenticate(user=self.other_student)
         forbidden_res = self.client.get(f"/api/certificates/{cert.id}/image/")
         self.assertEqual(forbidden_res.status_code, 403)
+
+    def test_email_failure_does_not_turn_generated_certificate_into_http_error(self):
+        self.client.force_authenticate(user=self.admin)
+        with mock.patch(
+            "apps.certificates.views.send_certificate_issued_email",
+            return_value=(False, "Mock SMTP unavailable"),
+        ):
+            response = self.client.post("/api/certificates/generate/single/", {
+                "course_id": self.course.id,
+                "template_id": self.template.id,
+                "user_id": self.other_student.id,
+                "student_name": "Other Student",
+            }, format="json")
+
+        self.assertEqual(response.status_code, 201)
+        self.assertFalse(response.data["email_sent"])
+        self.assertEqual(response.data["email_error"], "Mock SMTP unavailable")
+        certificate = Certificate.objects.get(certificate_number=response.data["certificate_number"])
+        self.assertEqual(certificate.start_date, self.course.start_date)
+        self.assertEqual(certificate.end_date, self.course.end_date)
+        self.assertEqual(certificate.issue_date, timezone.localdate())
+
+    def test_saved_template_font_formatting_survives_api_reopen(self):
+        self.client.force_authenticate(user=self.admin)
+        layout_config = {
+            "elements": [{
+                "type": "text", "text": "{{ recipient_name }}", "x": .25, "y": .4,
+                "width": .5, "fontSize": 30, "fontFamily": "Serif", "bold": True,
+                "align": "center", "color": "#123456",
+            }],
+        }
+        response = self.client.patch(
+            f"/api/certificates/templates/{self.template.id}/",
+            {"layout_config": layout_config},
+            format="json",
+        )
+        self.assertEqual(response.status_code, 200)
+        reopened = self.client.get(f"/api/certificates/templates/{self.template.id}/")
+        self.assertEqual(reopened.data["layout_config"], layout_config)
+        self.assertEqual(reopened.data["layout_config"]["elements"][0]["fontSize"], 30)
 
     def test_template_deletion_protection(self):
         from apps.certificates.models import GenerationBatch
@@ -612,6 +892,27 @@ class CertificateGenerationTests(TestCase):
         self.assertEqual(res2.status_code, 201)
         self.assertEqual(res2.data["successful"], 0)
         self.assertEqual(res2.data["skipped_duplicates"], 1)
+
+    def test_bulk_generation_decodes_template_background_once(self):
+        self.client.force_authenticate(user=self.admin)
+        rows = [
+            {"row_number": 2, "student_name": "Kartik Hande", "student_email": "kartik@example.com",
+             "course_name": self.course.name, "start_date": "2026-07-01", "end_date": "2026-10-01", "issue_date": "2026-10-13"},
+            {"row_number": 3, "student_name": "Other Student", "student_email": "other@example.com",
+             "course_name": self.course.name, "start_date": "2026-07-01", "end_date": "2026-10-01", "issue_date": "2026-10-13"},
+        ]
+        from apps.certificates.generator import load_template_image
+        with mock.patch("apps.certificates.views.load_template_image", wraps=load_template_image) as load_mock:
+            with mock.patch("apps.certificates.views.send_certificate_issued_email", return_value=(True, "")):
+                response = self.client.post("/api/certificates/generate/bulk/", {
+                    "course_id": self.course.id,
+                    "template_id": self.template.id,
+                    "rows": rows,
+                }, format="json")
+
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.data["successful"], 2)
+        load_mock.assert_called_once_with(self.template.image.path)
 
     def test_retry_email_endpoint(self):
         self.client.force_authenticate(user=self.admin)
@@ -720,8 +1021,8 @@ class CertificateGenerationTests(TestCase):
         self.assertEqual(res.status_code, 400)
         self.assertIn("1–29 characters", res.data.get("detail", ""))
 
-    def test_image_access_with_token_query_parameter(self):
-        """Test that certificate image can be accessed using ?token= query parameter."""
+    def test_image_access_uses_bearer_auth_and_rejects_query_tokens(self):
+        """Private certificate image access uses Authorization, never query-string tokens."""
         # Generate certificate for student
         self.client.force_authenticate(user=self.admin)
         res = self.client.post("/api/certificates/generate/single/", {
@@ -741,14 +1042,19 @@ class CertificateGenerationTests(TestCase):
         from rest_framework_simplejwt.tokens import RefreshToken
         token = str(RefreshToken.for_user(self.student).access_token)
 
-        # Unauthenticated client requesting with ?token= query parameter
+        # Query-string credentials must not authorize private image access.
         unauth_client = APIClient()
         img_res = unauth_client.get(f"/api/certificates/{cert_id}/image/?token={token}")
+        self.assertEqual(img_res.status_code, 401)
+
+        bearer_client = APIClient()
+        bearer_client.credentials(HTTP_AUTHORIZATION=f"Bearer {token}")
+        img_res = bearer_client.get(f"/api/certificates/{cert_id}/image/")
         self.assertEqual(img_res.status_code, 200)
         self.assertIn("image/png", img_res["Content-Type"])
 
         # Download flag sets Content-Disposition
-        dl_res = unauth_client.get(f"/api/certificates/{cert_id}/image/?token={token}&download=true")
+        dl_res = bearer_client.get(f"/api/certificates/{cert_id}/image/?download=true")
         self.assertEqual(dl_res.status_code, 200)
         self.assertIn("attachment", dl_res["Content-Disposition"])
         self.assertIn(cert_num, dl_res["Content-Disposition"])

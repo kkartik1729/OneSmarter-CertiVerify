@@ -32,7 +32,7 @@ ALLOWED_HOSTS = [
     host.strip()
     for host in os.getenv(
         "DJANGO_ALLOWED_HOSTS",
-        "localhost,127.0.0.1,10.151.34.218"
+        "localhost,127.0.0.1"
     ).split(",")
     if host.strip()
 ]
@@ -222,8 +222,6 @@ CORS_ALLOWED_ORIGINS = [
     "http://127.0.0.1:5174",
     "http://localhost:5175",
     "http://127.0.0.1:5175",
-
-    "http://10.151.34.218:5173",
 ] + _cors_list
 
 # Include PUBLIC_FRONTEND_URL in CORS if configured

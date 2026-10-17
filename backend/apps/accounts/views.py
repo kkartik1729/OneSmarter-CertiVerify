@@ -29,6 +29,7 @@ from django.core.cache import cache
 from django.core.exceptions import ValidationError as DjangoValidationError
 
 from django.core.mail import send_mail
+from django.db import transaction
 
 from django.utils import timezone
 
@@ -1232,6 +1233,7 @@ class MFARecoveryCompleteView(APIView):
 
 
 
+    @transaction.atomic
     def post(self, request):
 
         challenge = str(request.data.get("challenge", "")).strip()
@@ -1298,7 +1300,7 @@ class MFARecoveryCompleteView(APIView):
 
         recovery_token_id = token.get("recovery_token_id")
 
-        recovery_record = MFARecoveryToken.objects.filter(
+        recovery_record = MFARecoveryToken.objects.select_for_update().filter(
 
             id=recovery_token_id,
 
@@ -1321,6 +1323,8 @@ class MFARecoveryCompleteView(APIView):
 
 
         profile = get_or_sync_profile(user)
+
+        profile = UserProfile.objects.select_for_update().get(pk=profile.pk)
 
         secret = profile.pending_totp_secret
 

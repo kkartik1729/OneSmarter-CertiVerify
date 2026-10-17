@@ -78,6 +78,7 @@ def _get_or_create_certificate_pdf_bytes(certificate) -> bytes:
                 certificate_number=certificate.certificate_number,
                 issuer_name=certificate.issuer,
                 completion_description=certificate.completion_description,
+                layout_overrides=certificate.template.layout_config or {},
                 output_format="PDF",
             )
             CertificatePDF.store(
@@ -125,9 +126,9 @@ def send_certificate_issued_email(certificate) -> tuple[bool, str]:
 
     recipient_name = certificate.recipient_name or (owner.get_full_name() if owner else "") or (owner.username if owner else "Student")
     course_name = certificate.course_name or (certificate.course.name if certificate.course else certificate.title)
-    start_disp = _format_date(certificate.start_date)
-    end_disp = _format_date(certificate.end_date)
-    issue_disp = _format_date(certificate.issue_date)
+    course = certificate.course if certificate.course_id else None
+    start_disp = _format_date((course.start_date if course else None) or certificate.start_date)
+    end_disp = _format_date((course.end_date if course else None) or certificate.end_date)
 
     subject = f"Your OneSmarter Certificate of Completion — {certificate.certificate_number}"
 
@@ -172,10 +173,10 @@ def send_certificate_issued_email(certificate) -> tuple[bool, str]:
         "Certificate Details:\n"
         f"- Title: {certificate.title}\n"
         f"- Course: {course_name}\n"
-        f"- Certificate Number: {certificate.certificate_number}\n"
+        f"- Certificate ID: {certificate.certificate_number}\n"
         f"- Course Start Date: {start_disp}\n"
         f"- Course End Date: {end_disp}\n"
-        f"- Issue Date: {issue_disp}\n\n"
+        f"\n"
         "Your personalized certificate PDF is attached to this email.\n\n"
         "Certificate Verification:\n"
         f"{verification_url}\n\n"
@@ -199,9 +200,8 @@ def send_certificate_issued_email(certificate) -> tuple[bool, str]:
             <tr><td style="padding: 4px 0; color: #64748b; width: 140px;">Title:</td><td style="font-weight: 600;">{certificate.title}</td></tr>
             <tr><td style="padding: 4px 0; color: #64748b;">Course:</td><td style="font-weight: 600;">{course_name}</td></tr>
             <tr><td style="padding: 4px 0; color: #64748b;">Certificate ID:</td><td style="font-family: monospace; font-weight: 700; color: #0d9488;">{certificate.certificate_number}</td></tr>
-            <tr><td style="padding: 4px 0; color: #64748b;">Start Date:</td><td>{start_disp}</td></tr>
-            <tr><td style="padding: 4px 0; color: #64748b;">End Date:</td><td>{end_disp}</td></tr>
-            <tr><td style="padding: 4px 0; color: #64748b;">Issue Date:</td><td>{issue_disp}</td></tr>
+            <tr><td style="padding: 4px 0; color: #64748b;">Course Start Date:</td><td>{start_disp}</td></tr>
+            <tr><td style="padding: 4px 0; color: #64748b;">Course End Date:</td><td>{end_disp}</td></tr>
           </table>
         </div>
 

@@ -28,7 +28,7 @@ import {
   Loader2,
 } from 'lucide-react';
 import { EP } from '../services/endpoints';
-import { http, ApiError } from '../services/http';
+import { API_BASE, http, ApiError } from '../services/http';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -37,6 +37,8 @@ interface PublicCertRecord {
   certificate_number: string;
   found: boolean;
   verification_result: string;
+  status?: string;
+  preview_url?: string | null;
   message: string;
   title?: string;
   issuer?: string;
@@ -294,21 +296,22 @@ function VerifiedCard({
   data: PublicCertRecord;
   onReset: () => void;
 }) {
+  const isVerified = data.verification_result === 'VERIFIED';
   return (
-    <div className="bg-teal-50/50 dark:bg-teal-950/20 border border-teal-200 dark:border-teal-800 rounded-2xl p-6 shadow-sm space-y-5">
+    <div className={`${isVerified ? 'bg-teal-50/50 dark:bg-teal-950/20 border-teal-200 dark:border-teal-800' : 'bg-amber-50/60 dark:bg-amber-950/20 border-amber-200 dark:border-amber-800'} border rounded-2xl p-6 shadow-sm space-y-5`}>
       {/* Header */}
       <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-4">
         <div className="flex items-center gap-3">
-          <div className="w-12 h-12 rounded-xl bg-teal-600 flex items-center justify-center shadow-md shadow-teal-500/20 flex-shrink-0">
-            <CheckCircle2 className="w-7 h-7 text-white" />
+          <div className={`w-12 h-12 rounded-xl ${isVerified ? 'bg-teal-600 shadow-teal-500/20' : 'bg-amber-500 shadow-amber-500/20'} flex items-center justify-center shadow-md flex-shrink-0`}>
+            {isVerified ? <CheckCircle2 className="w-7 h-7 text-white" /> : <AlertTriangle className="w-7 h-7 text-white" />}
           </div>
           <div>
             <div className="flex items-center gap-2 flex-wrap">
               <h2 className="text-lg font-bold text-slate-900 dark:text-white">
-                Certificate Record Found
+                {isVerified ? 'Verified Certificate' : 'Certificate Not Verified'}
               </h2>
-              <span className="text-[11px] font-semibold px-2 py-0.5 rounded-full bg-teal-100 text-teal-800 dark:bg-teal-900/60 dark:text-teal-300">
-                VERIFIED
+              <span className={`text-[11px] font-semibold px-2 py-0.5 rounded-full ${isVerified ? 'bg-teal-100 text-teal-800 dark:bg-teal-900/60 dark:text-teal-300' : 'bg-amber-100 text-amber-900 dark:bg-amber-900/50 dark:text-amber-200'}`}>
+                {data.verification_result || data.status || 'NOT_VERIFIED'}
               </span>
             </div>
             <p className="text-xs text-slate-600 dark:text-slate-400 mt-0.5">
@@ -320,6 +323,18 @@ function VerifiedCard({
           {data.certificate_number}
         </span>
       </div>
+
+      {data.verification_result === 'VERIFIED' && data.preview_url && (
+        <div className="overflow-hidden rounded-xl border border-slate-200 dark:border-slate-700 bg-white">
+          <img
+            src={`${API_BASE.replace(/\/+$/, '')}${data.preview_url}`}
+            alt={`Certificate ${data.certificate_number}`}
+            className="block h-auto w-full object-contain"
+            loading="lazy"
+            referrerPolicy="no-referrer"
+          />
+        </div>
+      )}
 
       {/* Fields grid */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">

@@ -9,6 +9,7 @@ import { StatCardSkeleton } from '../../components/LoadingSkeleton';
 import StatusBadge from '../../components/StatusBadge';
 import CertificateDetails from '../../components/CertificateDetails';
 import ErrorMessage from '../../components/ErrorMessage';
+import { downloadBlob } from '../../lib/download';
 import { toast } from '../../lib/ui';
 
 export default function UserDashboard() {
@@ -269,28 +270,23 @@ export default function UserDashboard() {
                       <Eye className="w-3.5 h-3.5" />
                       <span>View</span>
                     </button>
-                    {c.hasPdf && c.pdfDownloadUrl ? (
-                      <a
-                        href={c.pdfDownloadUrl}
-                        download
+                    {(c.hasPdf || c.file) ? (
+                      <button
+                        type="button"
+                        onClick={async () => {
+                          try {
+                            const blob = c.hasPdf ? await certificateService.pdfBlob(c.key) : await certificateService.imageBlob(c.key);
+                            downloadBlob(blob, `certificate_${c.number}.${c.hasPdf ? 'pdf' : 'png'}`);
+                          } catch (err) {
+                            setError(errMsg(err));
+                          }
+                        }}
                         className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-semibold text-slate-700 hover:text-slate-900 bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:text-slate-300 dark:hover:bg-slate-700 rounded-lg transition"
-                        title="Download PDF"
+                        title={c.hasPdf ? 'Download PDF' : 'Download Certificate Image'}
                       >
                         <Download className="w-3.5 h-3.5" />
-                        <span>PDF</span>
-                      </a>
-                    ) : c.file ? (
-                      <a
-                        href={c.file}
-                        download
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-semibold text-slate-700 hover:text-slate-900 bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:text-slate-300 dark:hover:bg-slate-700 rounded-lg transition"
-                        title="Download File"
-                      >
-                        <Download className="w-3.5 h-3.5" />
-                        <span>File</span>
-                      </a>
+                        <span>{c.hasPdf ? 'PDF' : 'Image'}</span>
+                      </button>
                     ) : null}
                   </div>
                 </div>

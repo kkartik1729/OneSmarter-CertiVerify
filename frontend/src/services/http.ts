@@ -3,7 +3,7 @@ import { tokens } from './tokens';
 
 const RAW = ((import.meta.env.VITE_API_BASE_URL as string | undefined) ?? (import.meta.env.VITE_API_URL as string | undefined) ?? '').trim().replace(/\/+$/, '');
 /** Base URL of the API. "/api" is added if you forgot it. */
-export const API_BASE = RAW ? (/\/api$/.test(RAW) ? RAW : `${RAW}/api`) : 'http://127.0.0.1:8000/api';
+export const API_BASE = RAW ? (/\/api$/.test(RAW) ? RAW : `${RAW}/api`) : '/api';
 const TIMEOUT_MS = Number(import.meta.env.VITE_API_TIMEOUT_MS) || 15000;
 
 type Method = 'GET' | 'POST' | 'PATCH' | 'PUT' | 'DELETE';
@@ -39,9 +39,9 @@ function buildError(status: number, data: unknown): ApiError {
 interface Raw { ok: boolean; status: number; data: unknown }
 
 /** One HTTP call. Throws ApiError(0) only when the server cannot be reached. */
-async function request(method: Method, path: string, body: unknown, withAuth: boolean): Promise<Raw> {
+async function request(method: Method, path: string, body: unknown, withAuth: boolean, timeoutMs = TIMEOUT_MS): Promise<Raw> {
   const ctl = new AbortController();
-  const timer = setTimeout(() => ctl.abort(), TIMEOUT_MS);
+  const timer = setTimeout(() => ctl.abort(), timeoutMs);
   const isForm = body instanceof FormData;
   const headers: Record<string, string> = { Accept: 'application/json' };
   if (body !== undefined && !isForm) headers['Content-Type'] = 'application/json';
@@ -105,13 +105,39 @@ function refreshAccessToken(): Promise<boolean> {
  * withAuth=false is for login / register / refresh (no Bearer header, no refresh-and-retry).
  * On a 401 it refreshes once and retries once; if that fails the session is cleared. No loops.
  */
-export async function http<T>(method: Method, path: string, body?: unknown, withAuth = true): Promise<T> {
-  let res = await request(method, path, body, withAuth);
+export async function http<T>(method: Method, path: string, body?: unknown, withAuth = true, timeoutMs = TIMEOUT_MS): Promise<T> {
+  let res = await request(method, path, body, withAuth, timeoutMs);
   if (withAuth && res.status === 401) {
     const refreshed = tokens.refresh ? await refreshAccessToken() : false;
-    if (refreshed) res = await request(method, path, body, true);
+    if (refreshed) res = await request(method, path, body, true, timeoutMs);
     if (!refreshed || res.status === 401) expireSession();
   }
   if (!res.ok) throw buildError(res.status, res.data);
   return res.data as T;
+}
+
+/** Fetch an authenticated image/PDF response while preserving the shared refresh behavior. */
+export async function httpBlob(path: string): Promise<Blob> {
+  const fetchBlob = () => fetch(API_BASE + path, {
+    headers: tokens.access ? { Authorization: `Bearer ${tokens.access}` } : {},
+  });
+  let response: Response;
+  try {
+    response = await fetchBlob();
+    if (response.status === 401) {
+      const refreshed = tokens.refresh ? await refreshAccessToken() : false;
+      if (refreshed) response = await fetchBlob();
+      if (!refreshed || response.status === 401) expireSession();
+    }
+  } catch {
+    throw new ApiError(0, 'Network error: cannot reach the server.');
+  }
+  if (!response.ok) {
+    const text = await response.text();
+    let data: unknown = null;
+    try { data = text ? JSON.parse(text) : null; } catch { data = { detail: text }; }
+    throw buildError(response.status, data);
+  }
+  const blob = await response.blob();
+  return blob;
 }

@@ -116,6 +116,17 @@ def send_account_email(
                     opened = connection.open()
                     if opened is False:
                         raise EmailDeliveryError("SMTP connection could not be opened.")
+                    # Django's SMTP backend completes TCP, TLS/SSL and AUTH in
+                    # open(). Verify the server still has this session before
+                    # handing it to EmailMessage; some relays close a session
+                    # immediately after the handshake. This is still before
+                    # message submission, so reconnecting here cannot duplicate
+                    # a certificate email.
+                    response_code, _ = connection.connection.noop()
+                    if response_code != 250:
+                        raise smtplib.SMTPServerDisconnected(
+                            f"SMTP preflight NOOP returned {response_code}."
+                        )
                     msg.connection = connection
                     break
                 except (smtplib.SMTPConnectError, smtplib.SMTPServerDisconnected, socket.timeout, OSError):
@@ -124,8 +135,11 @@ def send_account_email(
                     except Exception:
                         logger.debug("SMTP connection cleanup failed after open error.", exc_info=True)
                     if attempt == 1:
+                        logger.error("SMTP connection preflight failed after one retry.")
                         raise
-                    logger.warning("SMTP connection failed before sending; retrying once.")
+                    logger.warning(
+                        "SMTP connection or preflight failed before message submission; retrying once."
+                    )
                     time.sleep(0.25)
                     connection = get_connection(fail_silently=False)
             try:

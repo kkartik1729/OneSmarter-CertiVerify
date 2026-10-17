@@ -407,12 +407,22 @@ def generate_certificate_image(
         mx0, my0, mx1, my1 = layout["mask_rect"]
         draw.rectangle([mx0, my0, mx1, my1], fill=bg_color + (255,))
 
+    certificate_id_layer_rendered = False
     for element in elements:
         if not isinstance(element, dict) or element.get("type", "text") != "text":
             continue
         value = element.get("text", "")
         if not isinstance(value, str):
             continue
+        has_certificate_id = bool(re.search(
+            r"\{\{\s*(?:certificate_id|certificate_number)\s*\}\}", value, re.IGNORECASE
+        )) or value.strip().casefold() in {"certificate_id", "certificate_number"}
+        if has_certificate_id:
+            # A template must show one identifier layer, even if an older saved
+            # layout accidentally contains the field more than once.
+            if certificate_id_layer_rendered:
+                continue
+            certificate_id_layer_rendered = True
         text_value = re.sub(
             r"\{\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}\}",
             lambda match: context.get(match.group(1), ""),
@@ -421,6 +431,9 @@ def generate_certificate_image(
         if text_value.strip().casefold() in {"certificate_id", "certificate_number"}:
             # Support older layouts that stored the field name without braces.
             text_value = certificate_number
+        if has_certificate_id:
+            id_value = re.sub(r"Certificate\s+ID\s*:\s*", "", text_value, flags=re.IGNORECASE).strip()
+            text_value = f"Certificate ID: {id_value}"
         if not text_value:
             continue
         def coord(key, fallback):

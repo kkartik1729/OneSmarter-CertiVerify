@@ -21,11 +21,23 @@ const keepCertificateIdPlaceholder = (previous: string, next: string) => {
   return next;
 };
 
+const withCertificateIdLabel = (text: string) => {
+  if (/^(?:certificate_id|certificate_number)$/i.test(text.trim())) {
+    return 'Certificate ID: {{ certificate_id }}';
+  }
+  const hasIdentifier = /\{\{\s*(?:certificate_id|certificate_number)\s*\}\}/i.test(text);
+  return hasIdentifier && !/^\s*Certificate\s+ID\s*:/i.test(text)
+    ? `Certificate ID: ${text}`
+    : text;
+};
+
 /** Positions reusable text layers over the template preview in normalized coordinates. */
 export default function TemplateLayoutEditor({ template, onClose, onSaved }: {
   template: CertificateTemplate; onClose: () => void; onSaved: (template: CertificateTemplate) => void;
 }) {
-  const original = useMemo(() => Array.isArray(template.layout_config?.elements) ? template.layout_config.elements as TextElement[] : [], [template]);
+  const original = useMemo(() => Array.isArray(template.layout_config?.elements)
+    ? (template.layout_config.elements as TextElement[]).map((item) => ({ ...item, text: withCertificateIdLabel(item.text) }))
+    : [], [template]);
   const [elements, setElements] = useState<TextElement[]>(original.map((element) => ({ ...element })));
   const [redactions, setRedactions] = useState<Redaction[]>(Array.isArray(template.layout_config?.redactions) ? template.layout_config.redactions as Redaction[] : []);
   const [selected, setSelected] = useState(0);
@@ -123,7 +135,10 @@ export default function TemplateLayoutEditor({ template, onClose, onSaved }: {
         <aside className="space-y-3 text-sm text-slate-800 dark:text-slate-100">
           <div className="font-semibold">Choose a field, then click its position</div>
           <p className="text-xs text-slate-500 dark:text-slate-400">Certificate ID preview: OSCV-YYYY-XXXXXXXX. The real unique ID and year are inserted when a certificate is generated.</p>
-          <div className="flex flex-wrap gap-1">{FIELDS.map((field) => <button key={field} onClick={() => setPlacementText(`{{ ${field} }}`)} className={`rounded-md border px-2 py-1 text-xs text-slate-800 dark:text-slate-100 ${placementText === `{{ ${field} }}` ? 'border-blue-600 bg-blue-50 dark:bg-blue-950' : 'border-slate-300 dark:border-slate-600 hover:bg-slate-100 dark:hover:bg-slate-800'}`}>{field}</button>)}</div>
+          <div className="flex flex-wrap gap-1">{FIELDS.map((field) => {
+            const fieldText = field === 'certificate_id' ? 'Certificate ID: {{ certificate_id }}' : `{{ ${field} }}`;
+            return <button key={field} onClick={() => setPlacementText(fieldText)} className={`rounded-md border px-2 py-1 text-xs text-slate-800 dark:text-slate-100 ${placementText === fieldText ? 'border-blue-600 bg-blue-50 dark:bg-blue-950' : 'border-slate-300 dark:border-slate-600 hover:bg-slate-100 dark:hover:bg-slate-800'}`}>{field}</button>;
+          })}</div>
           <button onClick={() => setPlacementText('New text')} className="rounded-md bg-slate-100 px-3 py-2 text-slate-800 hover:bg-slate-200 dark:bg-slate-800 dark:text-slate-100 dark:hover:bg-slate-700">Place text</button>
           <button onClick={() => setPlacementText('__cover__')} className="ml-2 rounded-md bg-amber-50 px-3 py-2 text-amber-900 hover:bg-amber-100 dark:bg-amber-950 dark:text-amber-200 dark:hover:bg-amber-900">Cover printed text</button>
           {placementText && <p className="text-xs text-blue-700 dark:text-blue-300">Click on the certificate to {placementText === '__cover__' ? 'place a cover area' : `place ${placementText}`}.</p>}

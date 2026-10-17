@@ -306,9 +306,56 @@ class TemplateRenderingRegressionTests(TestCase):
                         "y": .7, "width": .6, "fontSize": 24, "color": "#202020",
                     }]},
                 )
-            self.assertIn(certificate_number, drawn_text)
+            labelled_identifier = f"Certificate ID: {certificate_number}"
+            self.assertIn(labelled_identifier, drawn_text)
             self.assertNotIn("certificate_id", drawn_text)
-            self.assertEqual(drawn_text.count(certificate_number), 1)
+            self.assertEqual(drawn_text.count(labelled_identifier), 1)
+            self.assertEqual(sum(text.count(certificate_number) for text in drawn_text), 1)
+            self.assertTrue(output.startswith(b"\x89PNG"))
+        finally:
+            os.unlink(temp.name)
+
+    def test_certificate_id_label_and_value_render_once_for_labeled_and_duplicate_layers(self):
+        from apps.certificates import generator
+
+        temp = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
+        temp.close()
+        try:
+            Image.new("RGB", (600, 400), "white").save(temp.name)
+            original_draw = ImageDraw.Draw
+            drawn_text = []
+
+            class DrawSpy:
+                def __init__(self, image):
+                    self.inner = original_draw(image)
+
+                def text(self, xy, text, *args, **kwargs):
+                    drawn_text.append(str(text))
+                    return self.inner.text(xy, text, *args, **kwargs)
+
+                def __getattr__(self, name):
+                    return getattr(self.inner, name)
+
+            certificate_number = "OSCV-2026-1B85D2BC"
+            with mock.patch.object(generator.ImageDraw, "Draw", side_effect=DrawSpy):
+                output, _ = generate_certificate_image(
+                    template_path=temp.name,
+                    student_name="Alex Chen",
+                    course_name="Example course",
+                    start_date="01/07/2026",
+                    end_date="01/10/2026",
+                    issue_date="16/10/2026",
+                    certificate_number=certificate_number,
+                    layout_overrides={"elements": [
+                        {"type": "text", "text": "Certificate ID: {{ certificate_id }}", "x": .2,
+                         "y": .7, "width": .6, "fontSize": 24, "color": "#202020"},
+                        {"type": "text", "text": "{{ certificate_number }}", "x": .2,
+                         "y": .75, "width": .6, "fontSize": 24, "color": "#202020"},
+                    ]},
+                )
+            labelled_identifier = f"Certificate ID: {certificate_number}"
+            self.assertEqual(drawn_text.count(labelled_identifier), 1)
+            self.assertEqual(sum(text.count(certificate_number) for text in drawn_text), 1)
             self.assertTrue(output.startswith(b"\x89PNG"))
         finally:
             os.unlink(temp.name)
@@ -380,6 +427,46 @@ class TemplateRenderingRegressionTests(TestCase):
 
 
 class CertificateEmailDeliveryTests(TestCase):
+    @override_settings(
+        EMAIL_BACKEND="django.core.mail.backends.smtp.EmailBackend",
+        EMAIL_HOST="smtp.example.test",
+        EMAIL_HOST_USER="sender@example.test",
+        EMAIL_HOST_PASSWORD="test-password",
+        EMAIL_USE_TLS=True,
+        EMAIL_USE_SSL=False,
+    )
+    def test_smtp_preflight_reconnects_before_sending_once(self):
+        import smtplib
+        from types import SimpleNamespace
+        from django.core.mail.backends.smtp import EmailBackend
+        from apps.accounts.services.email_service import send_account_email
+
+        connection = EmailBackend()
+        first_protocol = mock.Mock()
+        first_protocol.noop.side_effect = smtplib.SMTPServerDisconnected("Server not connected")
+        second_protocol = mock.Mock()
+        second_protocol.noop.return_value = (250, b"OK")
+        open_calls = 0
+
+        def open_connection():
+            nonlocal open_calls
+            open_calls += 1
+            connection.connection = SimpleNamespace(
+                close=mock.Mock(),
+                protocol=first_protocol if open_calls == 1 else second_protocol,
+            )
+            connection.connection.noop = connection.connection.protocol.noop
+            return True
+
+        with mock.patch("apps.accounts.services.email_service.get_connection", return_value=connection), \
+             mock.patch.object(connection, "open", side_effect=open_connection), \
+             mock.patch.object(connection, "close", side_effect=lambda: setattr(connection, "connection", None)), \
+             mock.patch("apps.accounts.services.email_service.EmailMultiAlternatives.send", return_value=1) as send:
+            self.assertTrue(send_account_email("recipient@example.test", "Subject", "Body"))
+
+        self.assertEqual(open_calls, 2)
+        send.assert_called_once_with(fail_silently=False)
+
     @override_settings(EMAIL_BACKEND="django.core.mail.backends.locmem.EmailBackend")
     def test_certificate_attachment_uses_recipient_and_pdf_bytes(self):
         from django.core import mail
@@ -970,6 +1057,35 @@ class CertificateGenerationTests(TestCase):
         self.assertEqual(response.status_code, 201)
         self.assertEqual(response.data["successful"], 2)
         load_mock.assert_called_once_with(self.template.image.path)
+
+    def test_bulk_email_failure_is_recorded_and_other_recipients_continue(self):
+        self.client.force_authenticate(user=self.admin)
+        rows = [
+            {"row_number": 2, "student_name": "First Student", "student_email": "first@example.com",
+             "course_name": self.course.name},
+            {"row_number": 3, "student_name": "Second Student", "student_email": "second@example.com",
+             "course_name": self.course.name},
+        ]
+        with mock.patch(
+            "apps.certificates.views.send_certificate_issued_email",
+            side_effect=[(False, "Mock SMTP unavailable"), (True, "")],
+        ) as send_email:
+            response = self.client.post("/api/certificates/generate/bulk/", {
+                "course_id": self.course.id,
+                "template_id": self.template.id,
+                "rows": rows,
+            }, format="json")
+
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.data["successful"], 2)
+        self.assertEqual(response.data["emails_sent"], 1)
+        self.assertEqual(response.data["emails_failed"], 1)
+        self.assertEqual(send_email.call_count, 2)
+        first = Certificate.objects.get(recipient_email="first@example.com")
+        second = Certificate.objects.get(recipient_email="second@example.com")
+        self.assertFalse(first.email_sent)
+        self.assertEqual(first.email_error, "Mock SMTP unavailable")
+        self.assertTrue(second.email_sent)
 
     def test_retry_email_endpoint(self):
         self.client.force_authenticate(user=self.admin)

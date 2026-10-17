@@ -15,6 +15,7 @@ import {
   History,
   Sparkles,
   Pencil,
+  Trash2,
   X,
 } from 'lucide-react';
 import {
@@ -120,6 +121,8 @@ export default function GenerateCertificates() {
   const [newCourseStart, setNewCourseStart] = useState('');
   const [newCourseEnd, setNewCourseEnd] = useState('');
   const [savingCourse, setSavingCourse] = useState(false);
+  const [editingCourseId, setEditingCourseId] = useState<number | null>(null);
+  const [deletingCourseId, setDeletingCourseId] = useState<number | null>(null);
 
   // Template upload state
   const [showUploadTemplate, setShowUploadTemplate] = useState(false);
@@ -211,22 +214,88 @@ export default function GenerateCertificates() {
     setSavingCourse(true);
     setError(null);
     try {
-      const created = await courseService.create({
+      const values = {
         name: newCourseName.trim(),
         title: newCourseTitle.trim() || 'Certificate of Completion',
         issuer: newCourseIssuer.trim() || 'OneSmarter, Inc.',
         start_date: newCourseStart,
         end_date: newCourseEnd,
-      });
-      setCourses((prev) => [created, ...prev]);
-      setSelectedCourseId(created.id);
+      };
+      const saved = editingCourseId
+        ? await courseService.update(editingCourseId, values)
+        : await courseService.create(values);
+      setCourses((prev) => editingCourseId
+        ? prev.map((course) => course.id === saved.id ? saved : course)
+        : [saved, ...prev]);
+      setSelectedCourseId(saved.id);
       setShowNewCourse(false);
+      setEditingCourseId(null);
       setNewCourseName('');
-      setSuccessMsg(`Course "${created.name}" created successfully.`);
+      setNewCourseTitle('Certificate of Completion');
+      setNewCourseIssuer('OneSmarter, Inc.');
+      setNewCourseStart('');
+      setNewCourseEnd('');
+      setSuccessMsg(editingCourseId
+        ? `Course "${saved.name}" updated successfully.`
+        : `Course "${saved.name}" created successfully.`);
     } catch (err) {
       setError(errMsg(err));
     } finally {
       setSavingCourse(false);
+    }
+  };
+
+  const handleEditCourse = (course: Course) => {
+    setError(null);
+    setSuccessMsg(null);
+    setEditingCourseId(course.id);
+    setNewCourseName(course.name);
+    setNewCourseTitle(course.title);
+    setNewCourseIssuer(course.issuer);
+    setNewCourseStart(course.start_date);
+    setNewCourseEnd(course.end_date);
+    setShowNewCourse(true);
+  };
+
+  const handleDeleteCourse = async (course: Course) => {
+    const confirmed = window.confirm(
+      `Delete course "${course.name}"? This can affect related certificates and generation history. The server will block deletion if protected records are linked.`
+    );
+    if (!confirmed) return;
+    setDeletingCourseId(course.id);
+    setError(null);
+    setSuccessMsg(null);
+    try {
+      await courseService.delete(course.id);
+      setCourses((prev) => prev.filter((item) => item.id !== course.id));
+      setSelectedCourseId((current) => current === course.id
+        ? (courses.find((item) => item.id !== course.id)?.id ?? '')
+        : current);
+      setSuccessMsg(`Course "${course.name}" deleted successfully.`);
+    } catch (err) {
+      setError(errMsg(err));
+    } finally {
+      setDeletingCourseId(null);
+    }
+  };
+
+  const toggleCourseForm = () => {
+    if (showNewCourse) {
+      setShowNewCourse(false);
+      setEditingCourseId(null);
+      setNewCourseName('');
+      setNewCourseTitle('Certificate of Completion');
+      setNewCourseIssuer('OneSmarter, Inc.');
+      setNewCourseStart('');
+      setNewCourseEnd('');
+    } else {
+      setEditingCourseId(null);
+      setNewCourseName('');
+      setNewCourseTitle('Certificate of Completion');
+      setNewCourseIssuer('OneSmarter, Inc.');
+      setNewCourseStart('');
+      setNewCourseEnd('');
+      setShowNewCourse(true);
     }
   };
 
@@ -536,17 +605,17 @@ export default function GenerateCertificates() {
               </div>
               <button
                 type="button"
-                onClick={() => setShowNewCourse(!showNewCourse)}
+                onClick={toggleCourseForm}
                 className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-teal-50 dark:bg-teal-950/60 text-teal-600 dark:text-teal-400 rounded-xl text-xs font-semibold hover:bg-teal-100 dark:hover:bg-teal-900 transition border border-teal-200 dark:border-teal-800"
               >
-                <Plus className="w-3.5 h-3.5" />
+                {showNewCourse ? <X className="w-3.5 h-3.5" /> : <Plus className="w-3.5 h-3.5" />}
                 <span>{showNewCourse ? 'Close' : 'New Course'}</span>
               </button>
             </div>
 
             {showNewCourse ? (
               <form onSubmit={handleCreateCourse} className="p-4 bg-slate-50 dark:bg-slate-800/50 rounded-xl border border-slate-200 dark:border-slate-700 space-y-3 text-xs">
-                <h4 className="font-semibold text-slate-900 dark:text-white">Register New Course</h4>
+                <h4 className="font-semibold text-slate-900 dark:text-white">{editingCourseId ? 'Edit Course' : 'Register New Course'}</h4>
                 <div>
                   <label className="block text-slate-600 dark:text-slate-300 mb-1">Course Name *</label>
                   <input
@@ -604,7 +673,7 @@ export default function GenerateCertificates() {
                 <div className="flex justify-end gap-2 pt-2">
                   <button
                     type="button"
-                    onClick={() => setShowNewCourse(false)}
+                    onClick={toggleCourseForm}
                     className="px-3 py-1.5 rounded-lg text-slate-600 hover:bg-slate-200 dark:text-slate-400"
                   >
                     Cancel
@@ -614,7 +683,7 @@ export default function GenerateCertificates() {
                     disabled={savingCourse}
                     className="px-3.5 py-1.5 bg-teal-600 hover:bg-teal-700 text-white font-semibold rounded-lg shadow-sm"
                   >
-                    {savingCourse ? 'Saving...' : 'Save Course'}
+                    {savingCourse ? 'Saving...' : editingCourseId ? 'Save Changes' : 'Save Course'}
                   </button>
                 </div>
               </form>
@@ -650,6 +719,25 @@ export default function GenerateCertificates() {
                       <span className="font-semibold text-slate-900 dark:text-white">
                         {selectedCourse.start_date} → {selectedCourse.end_date}
                       </span>
+                    </div>
+                    <div className="flex flex-wrap justify-end gap-2 border-t border-slate-200 pt-3 mt-3 dark:border-slate-700">
+                      <button
+                        type="button"
+                        onClick={() => handleEditCourse(selectedCourse)}
+                        disabled={savingCourse || deletingCourseId !== null}
+                        className="inline-flex items-center gap-1.5 rounded-lg border border-slate-300 px-3 py-1.5 font-semibold text-slate-700 hover:bg-white disabled:opacity-50 dark:border-slate-600 dark:text-slate-200 dark:hover:bg-slate-700"
+                      >
+                        <Pencil className="h-3.5 w-3.5" /> Edit course
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleDeleteCourse(selectedCourse)}
+                        disabled={savingCourse || deletingCourseId !== null}
+                        className="inline-flex items-center gap-1.5 rounded-lg border border-rose-200 px-3 py-1.5 font-semibold text-rose-700 hover:bg-rose-50 disabled:opacity-50 dark:border-rose-900 dark:text-rose-300 dark:hover:bg-rose-950/50"
+                      >
+                        <Trash2 className="h-3.5 w-3.5" />
+                        {deletingCourseId === selectedCourse.id ? 'Deleting…' : 'Delete course'}
+                      </button>
                     </div>
                   </div>
                 )}

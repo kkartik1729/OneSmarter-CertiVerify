@@ -17,6 +17,7 @@ from django.shortcuts import get_object_or_404
 from django.utils import timezone
 
 from rest_framework import generics, status
+from rest_framework.exceptions import APIException
 from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
@@ -65,6 +66,10 @@ def _missing_template_fields(template, values, custom_values=None):
         if isinstance(element, dict) and isinstance(element.get("text"), str):
             required.update(re.findall(r"\{\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}\}", element["text"]))
     missing = []
+    optional_fields = {
+        "course_name", "course_description", "completion_description",
+        "start_date", "end_date", "issue_date",
+    }
     for field in sorted(required):
         source_field = aliases.get(field, field)
         value = values.get(source_field)
@@ -76,7 +81,10 @@ def _missing_template_fields(template, values, custom_values=None):
             or str(value).strip().lower() in {"none", "null"}
             or re.search(r"\{\{\s*[A-Za-z_][A-Za-z0-9_]*\s*\}\}", str(value))
         ):
-            missing.append(field)
+            # These values are optional template content. An empty replacement
+            # is safer than blocking generation or leaving a placeholder behind.
+            if field not in optional_fields:
+                missing.append(field)
     return missing
 
 
@@ -591,6 +599,15 @@ class CourseListCreateView(generics.ListCreateAPIView):
         serializer.save(created_by=self.request.user)
 
 
+class CourseHasProtectedRecords(APIException):
+    status_code = status.HTTP_409_CONFLICT
+    default_detail = (
+        "This course is linked to certificates or generation history and cannot be deleted. "
+        "Those records have been preserved."
+    )
+    default_code = "course_has_protected_records"
+
+
 class CourseDetailView(generics.RetrieveUpdateDestroyAPIView):
     """
     GET/PATCH/DELETE /api/certificates/courses/<pk>/
@@ -609,6 +626,11 @@ class CourseDetailView(generics.RetrieveUpdateDestroyAPIView):
         from rest_framework.exceptions import PermissionDenied
         if not is_certiverify_admin(self.request.user):
             raise PermissionDenied("Only administrators can delete courses.")
+        if (
+            Certificate.objects.filter(course=instance).exists()
+            or GenerationBatch.objects.filter(course=instance).exists()
+        ):
+            raise CourseHasProtectedRecords()
         instance.delete()
 
 

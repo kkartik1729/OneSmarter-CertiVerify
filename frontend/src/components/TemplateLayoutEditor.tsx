@@ -13,6 +13,14 @@ const previewFontFamily = (family?: string) => ({
   Monospace: '"DejaVu Sans Mono", Consolas, monospace',
 }[family || 'Arial'] || 'Arial, sans-serif');
 
+const keepCertificateIdPlaceholder = (previous: string, next: string) => {
+  const identifierToken = /\{\{\s*(?:certificate_id|certificate_number)\s*\}\}/i;
+  if (identifierToken.test(previous) && !identifierToken.test(next)) {
+    return `${next.trimEnd()} {{ certificate_id }}`.trim();
+  }
+  return next;
+};
+
 /** Positions reusable text layers over the template preview in normalized coordinates. */
 export default function TemplateLayoutEditor({ template, onClose, onSaved }: {
   template: CertificateTemplate; onClose: () => void; onSaved: (template: CertificateTemplate) => void;
@@ -108,12 +116,13 @@ export default function TemplateLayoutEditor({ template, onClose, onSaved }: {
             {elements.map((item, index) => <div key={index} onPointerDown={(event) => beginDrag(event, 'text', index)}
               className={`absolute cursor-move border border-dashed px-1 py-0.5 whitespace-nowrap ${selected === index ? 'border-blue-600 bg-blue-100/40' : 'border-transparent hover:border-blue-400'}`}
               style={{ left: `${item.x * 100}%`, top: `${item.y * 100}%`, width: `${item.width * 100}%`, fontSize: `${Math.max(1, item.fontSize * fontScale)}px`, fontFamily: previewFontFamily(item.fontFamily), lineHeight: 1.15, color: item.color, fontWeight: item.bold ? 700 : 400, textAlign: item.align as CanvasTextAlign }}>
-              {item.text.replace(/\{\{\s*([\w]+)\s*\}\}/g, (_, key) => ({ recipient_name: 'Alex Morgan', student_name: 'Alex Morgan', certificate_id: 'OSCV-2026-EXAMPLE', certificate_number: 'OSCV-2026-EXAMPLE', course_name: 'Sample Course', course_description: 'Completion description', start_date: '01/07/2026', end_date: '01/10/2026', issue_date: '16/10/2026' } as Record<string, string>)[key] || key)}
+              {item.text.replace(/\{\{\s*([\w]+)\s*\}\}/g, (_, key) => ({ recipient_name: 'Alex Morgan', student_name: 'Alex Morgan', certificate_id: 'OSCV-YYYY-XXXXXXXX', certificate_number: 'OSCV-YYYY-XXXXXXXX', course_name: 'Sample Course', course_description: 'Completion description', start_date: '01/07/2026', end_date: '01/10/2026', issue_date: '16/10/2026' } as Record<string, string>)[key] || key)}
             </div>)}
           </div>
         </div>
         <aside className="space-y-3 text-sm text-slate-800 dark:text-slate-100">
           <div className="font-semibold">Choose a field, then click its position</div>
+          <p className="text-xs text-slate-500 dark:text-slate-400">Certificate ID preview: OSCV-YYYY-XXXXXXXX. The real unique ID and year are inserted when a certificate is generated.</p>
           <div className="flex flex-wrap gap-1">{FIELDS.map((field) => <button key={field} onClick={() => setPlacementText(`{{ ${field} }}`)} className={`rounded-md border px-2 py-1 text-xs text-slate-800 dark:text-slate-100 ${placementText === `{{ ${field} }}` ? 'border-blue-600 bg-blue-50 dark:bg-blue-950' : 'border-slate-300 dark:border-slate-600 hover:bg-slate-100 dark:hover:bg-slate-800'}`}>{field}</button>)}</div>
           <button onClick={() => setPlacementText('New text')} className="rounded-md bg-slate-100 px-3 py-2 text-slate-800 hover:bg-slate-200 dark:bg-slate-800 dark:text-slate-100 dark:hover:bg-slate-700">Place text</button>
           <button onClick={() => setPlacementText('__cover__')} className="ml-2 rounded-md bg-amber-50 px-3 py-2 text-amber-900 hover:bg-amber-100 dark:bg-amber-950 dark:text-amber-200 dark:hover:bg-amber-900">Cover printed text</button>
@@ -126,7 +135,7 @@ export default function TemplateLayoutEditor({ template, onClose, onSaved }: {
             <button className="text-red-600" onClick={() => { setRedactions((items) => items.filter((_, i) => i !== selectedRedaction)); setSelectedRedaction(null); }}>Delete cover</button>
           </div>}
           {active && selectedRedaction === null && <div className="space-y-2 border-t pt-3 dark:border-slate-700">
-            <label className="block">Text<input className="mt-1 w-full rounded border border-slate-300 bg-white p-2 text-slate-900 dark:border-slate-600 dark:bg-slate-800 dark:text-slate-100" value={active.text} onChange={(e) => setElements((items) => items.map((x, i) => i === selected ? { ...x, text: e.target.value } : x))} /></label>
+            <label className="block">Text<input className="mt-1 w-full rounded border border-slate-300 bg-white p-2 text-slate-900 dark:border-slate-600 dark:bg-slate-800 dark:text-slate-100" value={active.text} onChange={(e) => setElements((items) => items.map((x, i) => i === selected ? { ...x, text: keepCertificateIdPlaceholder(x.text, e.target.value) } : x))} /></label>
             <label className="block">Font size (template image px)<input type="number" min="8" max="120" className="mt-1 w-full rounded border border-slate-300 bg-white p-2 text-slate-900 dark:border-slate-600 dark:bg-slate-800 dark:text-slate-100" value={active.fontSize} onChange={(e) => setElements((items) => items.map((x, i) => i === selected ? { ...x, fontSize: Number(e.target.value) || 8 } : x))} /></label>
             <label className="block">Font family<select className="mt-1 w-full rounded border border-slate-300 bg-white p-2 text-slate-900 dark:border-slate-600 dark:bg-slate-800 dark:text-slate-100" value={active.fontFamily || 'Arial'} onChange={(e) => setElements((items) => items.map((x, i) => i === selected ? { ...x, fontFamily: e.target.value } : x))}><option>Arial</option><option>DejaVu Sans</option><option>Serif</option><option>Monospace</option></select></label>
             <label className="block">Color<input type="color" className="ml-2 align-middle" value={active.color} onChange={(e) => setElements((items) => items.map((x, i) => i === selected ? { ...x, color: e.target.value } : x))} /></label>

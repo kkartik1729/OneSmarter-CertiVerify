@@ -248,7 +248,7 @@ export default function UserDashboard() {
           {recentCerts.length === 0 ? (
             <p className="text-xs text-slate-400 py-6 text-center">No certificates in your account.</p>
           ) : (
-            <div className="divide-y divide-slate-100 dark:divide-slate-800">
+            <div className="max-h-72 overflow-y-auto overscroll-contain [scrollbar-color:#94a3b8_transparent] dark:[scrollbar-color:#64748b_transparent] divide-y divide-slate-100 dark:divide-slate-800">
               {recentCerts.map(c => (
                 <div key={c.key} className="py-3.5 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs">
                   <div className="min-w-0 flex-1">
@@ -318,7 +318,7 @@ export default function UserDashboard() {
           {recentLookups.length === 0 ? (
             <p className="text-xs text-slate-400 py-6 text-center">No lookup queries recorded yet.</p>
           ) : (
-            <div className="divide-y divide-slate-100 dark:divide-slate-800">
+            <div className="max-h-72 overflow-y-auto overscroll-contain [scrollbar-color:#94a3b8_transparent] dark:[scrollbar-color:#64748b_transparent] divide-y divide-slate-100 dark:divide-slate-800">
               {recentLookups.map(v => {
                 const isFound = v.result === 'FOUND' || v.result === 'VERIFIED';
                 return (

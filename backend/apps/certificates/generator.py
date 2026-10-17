@@ -578,7 +578,9 @@ def generate_certificate_image(
     has_explicit_issue_date = "issue_date" in normalized_fields
     if layout.get("show_cert_id", True) and not has_explicit_certificate_id:
         draw.text((left_x, meta_y), cert_text, font=detail_font, fill=detail_color)
-    if layout.get("show_issue_date", True) and not has_explicit_issue_date:
+    # Issue dates remain in the certificate record for audit and verification,
+    # but only appear in the artwork when the template explicitly opts in.
+    if layout.get("show_issue_date", False) and not has_explicit_issue_date:
         date_tw = _text_width(draw, date_text, detail_font)
         draw.text((right_x - date_tw, meta_y), date_text, font=detail_font, fill=detail_color)
 

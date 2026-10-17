@@ -385,7 +385,7 @@ export default function AdminDashboard() {
           {recentCerts.length === 0 ? (
             <p className="text-xs text-slate-400 py-6 text-center">No certificates added yet.</p>
           ) : (
-            <div className="divide-y divide-slate-100 dark:divide-slate-800">
+            <div className="max-h-72 overflow-y-auto overscroll-contain [scrollbar-color:#94a3b8_transparent] dark:[scrollbar-color:#64748b_transparent] divide-y divide-slate-100 dark:divide-slate-800">
               {recentCerts.map(c => (
                 <div key={c.id} className="py-3 flex items-center justify-between gap-3 text-xs">
                   <div className="min-w-0">
@@ -428,7 +428,7 @@ export default function AdminDashboard() {
           {recentVerifies.length === 0 ? (
             <p className="text-xs text-slate-400 py-6 text-center">No verification attempts recorded yet.</p>
           ) : (
-            <div className="divide-y divide-slate-100 dark:divide-slate-800">
+            <div className="max-h-72 overflow-y-auto overscroll-contain [scrollbar-color:#94a3b8_transparent] dark:[scrollbar-color:#64748b_transparent] divide-y divide-slate-100 dark:divide-slate-800">
               {recentVerifies.map(v => {
                 const isFound = v.result === 'FOUND' || v.result === 'VERIFIED';
                 return (

@@ -12,6 +12,8 @@ from rest_framework.test import APIClient
 
 from apps.certificates.models import Certificate
 from apps.certificates.models import CertificatePDF
+from apps.certificates.models import Course
+from apps.certificates.models import GenerationBatch
 from apps.certificates.generator import generate_certificate_image
 from PIL import Image, ImageDraw
 
@@ -711,6 +713,61 @@ class CertificateGenerationTests(TestCase):
         }, format="json")
         self.assertEqual(res.status_code, 400)
         self.assertIn("end_date", res.data)
+
+    def test_admin_can_update_existing_course(self):
+        self.client.force_authenticate(user=self.admin)
+        course_id = self.course.id
+        res = self.client.patch(f"/api/certificates/courses/{course_id}/", {
+            "name": "Updated Course Name",
+            "start_date": "2026-07-15",
+            "end_date": "2026-10-15",
+        }, format="json")
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(res.data["id"], course_id)
+        self.assertEqual(res.data["name"], "Updated Course Name")
+        self.assertEqual(Course.objects.filter(pk=course_id).count(), 1)
+
+    def test_course_delete_is_blocked_when_certificate_is_linked(self):
+        self.client.force_authenticate(user=self.admin)
+        certificate = Certificate.objects.create(
+            owner=self.student,
+            recipient_email=self.student.email,
+            title="Certificate of Completion",
+            issuer=self.course.issuer,
+            certificate_number="OSCV-2026-COURSEGUARD",
+            recipient_name="Kartik Hande",
+            issue_date=date(2026, 10, 1),
+            course=self.course,
+            course_name=self.course.name,
+        )
+        response = self.client.delete(f"/api/certificates/courses/{self.course.id}/")
+        self.assertEqual(response.status_code, 409)
+        self.assertTrue(Course.objects.filter(pk=self.course.id).exists())
+        self.assertTrue(Certificate.objects.filter(pk=certificate.id, course=self.course).exists())
+
+    def test_admin_can_delete_unreferenced_course(self):
+        self.client.force_authenticate(user=self.admin)
+        response = self.client.delete(f"/api/certificates/courses/{self.course.id}/")
+        self.assertEqual(response.status_code, 204)
+        self.assertFalse(Course.objects.filter(pk=self.course.id).exists())
+
+    def test_course_delete_is_blocked_when_generation_history_is_linked(self):
+        self.client.force_authenticate(user=self.admin)
+        batch = GenerationBatch.objects.create(course=self.course, created_by=self.admin)
+        response = self.client.delete(f"/api/certificates/courses/{self.course.id}/")
+        self.assertEqual(response.status_code, 409)
+        self.assertTrue(Course.objects.filter(pk=self.course.id).exists())
+        self.assertTrue(GenerationBatch.objects.filter(pk=batch.id, course=self.course).exists())
+
+    def test_non_admin_cannot_update_or_delete_course(self):
+        self.client.force_authenticate(user=self.student)
+        course_url = f"/api/certificates/courses/{self.course.id}/"
+        update_response = self.client.patch(course_url, {"name": "Unauthorized edit"}, format="json")
+        delete_response = self.client.delete(course_url)
+        self.assertEqual(update_response.status_code, 403)
+        self.assertEqual(delete_response.status_code, 403)
+        self.course.refresh_from_db()
+        self.assertEqual(self.course.name, "Full Stack Python")
 
     def test_validate_csv_with_registered_and_unregistered_users(self):
         self.client.force_authenticate(user=self.admin)

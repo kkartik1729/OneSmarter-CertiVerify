@@ -18,7 +18,8 @@ const titleMap: Record<string, string> = {
 };
 
 export default function AdminLayout() {
-  const [collapsed, setCollapsed] = useState(false);
+  const [collapsed, setCollapsed] = useState(true);
+  const [hoverExpanded, setHoverExpanded] = useState(false);
   const [mobileOpen, setMobileOpen] = useState(false);
   const location = useLocation();
 
@@ -29,7 +30,9 @@ export default function AdminLayout() {
       <Sidebar
         navItems={ADMIN_NAV}
         collapsed={collapsed}
-        onToggleCollapse={() => setCollapsed(prev => !prev)}
+        hoverExpanded={hoverExpanded}
+        onHoverExpandedChange={setHoverExpanded}
+        onToggleCollapse={() => { setCollapsed(prev => !prev); setHoverExpanded(false); }}
         mobileOpen={mobileOpen}
         onCloseMobile={() => setMobileOpen(false)}
         isAdmin={true}
@@ -37,7 +40,7 @@ export default function AdminLayout() {
 
       <div
         className={`flex-1 flex flex-col transition-all duration-300 min-w-0 ${
-          collapsed ? 'lg:pl-20' : 'lg:pl-64'
+          collapsed && !hoverExpanded ? 'lg:pl-20' : 'lg:pl-64'
         }`}
       >
         <TopNavbar

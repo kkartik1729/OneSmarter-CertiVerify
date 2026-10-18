@@ -21,6 +21,7 @@ import hashlib
 import io
 import logging
 import re
+from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFont
 
@@ -31,6 +32,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 _FONT_CACHE: dict[tuple[str, int], ImageFont.FreeTypeFont] = {}
+_BUNDLED_FONT_DIR = Path(__file__).resolve().parent / "fonts"
 
 _BOLD_CANDIDATES = [
     "arialbd.ttf",
@@ -66,6 +68,18 @@ def _try_load_font(candidates: list[str], size: int):
 
 def _get_font(size: int, bold: bool = False, family: str = "Arial"):
     """Load the requested family; missing family files fall back to Arial candidates, then Pillow's built-in font."""
+    bundled_families = {
+        "Caladea": (_BUNDLED_FONT_DIR / "Caladea-Bold.ttf", _BUNDLED_FONT_DIR / "Caladea-Regular.ttf"),
+        "Amiri": (_BUNDLED_FONT_DIR / "Amiri-Bold.ttf", _BUNDLED_FONT_DIR / "Amiri-Regular.ttf"),
+        "Lato": (_BUNDLED_FONT_DIR / "Lato" / "Lato-Bold.ttf", _BUNDLED_FONT_DIR / "Lato" / "Lato-Regular.ttf"),
+        "Poppins": (_BUNDLED_FONT_DIR / "Poppins" / "Poppins-Bold.ttf", _BUNDLED_FONT_DIR / "Poppins" / "Poppins-Regular.ttf"),
+    }
+    if family in bundled_families:
+        bold_file, regular_file = bundled_families[family]
+        font = _try_load_font([str(bold_file if bold else regular_file)], size)
+        if font:
+            return font
+        raise OSError(f"Bundled font files for {family} are missing; refusing to substitute another family.")
     family_candidates = {
         "Arial": (_BOLD_CANDIDATES, _REGULAR_CANDIDATES),
         "DejaVu Sans": (["DejaVuSans-Bold.ttf", *_BOLD_CANDIDATES], ["DejaVuSans.ttf", *_REGULAR_CANDIDATES]),

@@ -1,6 +1,7 @@
 
 from django.contrib.auth import get_user_model
 from django.contrib.auth.password_validation import validate_password
+import re
 from rest_framework import serializers
 
 from .models import UserProfile
@@ -128,6 +129,28 @@ class UserProfileSerializer(serializers.ModelSerializer):
             ).exists()
         except Exception:
             return False
+
+    def validate_organization(self, value):
+        value = value.strip()
+        if value and (not re.search(r"[^\W\d_]", value, re.UNICODE) or re.search(r"[^\w\s.,&'’()\-/+]", value, re.UNICODE) or re.search(r"\d", value)):
+            raise serializers.ValidationError("Please enter a valid organization name.")
+        return value
+
+    def validate_phone(self, value):
+        value = value.strip()
+        if self.instance and value == self.instance.phone:
+            return value
+        if not value:
+            return ""
+        normalized = re.sub(r"[\s().-]", "", value)
+        if not re.fullmatch(r"\+[1-9]\d{6,14}", normalized):
+            raise serializers.ValidationError("Please enter a valid phone number for the selected country.")
+        # India has a fixed 10-digit national subscriber number. Other countries
+        # are validated against libphonenumber metadata in the shared UI, while
+        # this API enforces the universal E.164 storage shape for every region.
+        if normalized.startswith("+91") and len(normalized) != 13:
+            raise serializers.ValidationError("Please enter a valid phone number for the selected country.")
+        return normalized
 
     def get_role(self, obj):
         if getattr(obj.user, "is_superuser", False) or getattr(obj.user, "is_staff", False):

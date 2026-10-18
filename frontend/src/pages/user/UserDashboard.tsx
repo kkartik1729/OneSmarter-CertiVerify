@@ -125,11 +125,10 @@ export default function UserDashboard() {
               <AlertTriangle className="w-5 h-5 text-amber-600 dark:text-amber-400 flex-shrink-0 mt-0.5" />
               <div>
                 <h4 className="text-sm font-bold text-amber-950 dark:text-amber-200">
-                  Email Verification Required to Claim Issued Certificates
+                  Verify Your Account Email to Claim Issued Certificates
                 </h4>
                 <p className="text-xs text-amber-800/90 dark:text-amber-300/80 mt-1 max-w-xl">
-                  Your registered email <span className="font-semibold">{user.email}</span> is not verified yet.
-                  Enter the 6-digit code sent to your inbox to link any previously issued certificates.
+                  Your account email <span className="font-semibold">{user.email}</span> is not verified yet. This is account email verification, not a certificate verification code. Verify it to securely link previously issued certificates.
                 </p>
                 {verifyError && (
                   <p className="text-xs font-semibold text-rose-600 dark:text-rose-400 mt-2">

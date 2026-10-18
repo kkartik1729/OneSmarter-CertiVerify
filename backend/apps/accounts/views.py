@@ -148,6 +148,13 @@ class CurrentUserView(APIView):
         profile = get_or_sync_profile(request.user)
         return Response(UserProfileSerializer(profile).data)
 
+    def patch(self, request):
+        profile = get_or_sync_profile(request.user)
+        serializer = UserProfileSerializer(profile, data=request.data, partial=True)
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+        return Response(serializer.data)
+
 
 class MFAChallengeToken(Token):
 

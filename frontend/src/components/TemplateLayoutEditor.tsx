@@ -11,6 +11,10 @@ const previewFontFamily = (family?: string) => ({
   'DejaVu Sans': '"DejaVu Sans", Arial, sans-serif',
   Serif: '"DejaVu Serif", Georgia, serif',
   Monospace: '"DejaVu Sans Mono", Consolas, monospace',
+  Caladea: 'Caladea, Georgia, serif',
+  Amiri: 'Amiri, Georgia, serif',
+  Lato: 'Lato, Arial, sans-serif',
+  Poppins: 'Poppins, Arial, sans-serif',
 }[family || 'Arial'] || 'Arial, sans-serif');
 
 const keepCertificateIdPlaceholder = (previous: string, next: string) => {
@@ -114,14 +118,14 @@ export default function TemplateLayoutEditor({ template, onClose, onSaved }: {
     finally { setSaving(false); }
   };
   const active = elements[selected];
-  return <div className="fixed inset-0 z-[80] bg-slate-950/80 p-3 sm:p-6 overflow-auto" role="dialog" aria-modal="true" aria-label={`Edit ${template.name} layout`}>
-    <div className="mx-auto max-w-6xl rounded-2xl bg-white dark:bg-slate-900 shadow-2xl overflow-hidden">
+  return <div className="fixed inset-0 z-[80] bg-slate-950/35 p-3 sm:p-6 overflow-y-auto backdrop-blur-[1px]" role="dialog" aria-modal="true" aria-label={`Edit ${template.name} layout`}>
+    <div className="mx-auto max-w-6xl max-h-[calc(100vh-1.5rem)] sm:max-h-[calc(100vh-3rem)] rounded-2xl bg-white/90 dark:bg-slate-900/90 shadow-2xl backdrop-blur-md flex flex-col overflow-hidden">
       <header className="flex items-center justify-between gap-3 p-4 border-b border-slate-200 dark:border-slate-700">
         <div><h2 className="font-bold text-lg text-slate-900 dark:text-white">Template layout · {template.name}</h2><p className="text-xs text-slate-500 dark:text-slate-400">Drag text layers to position them. Changes are saved per template.</p></div>
         <button className="px-3 py-2 rounded-lg border border-slate-300 text-slate-800 hover:bg-slate-100 dark:border-slate-600 dark:text-slate-100 dark:hover:bg-slate-800" onClick={onClose}>Close</button>
       </header>
-      <div className="grid lg:grid-cols-[1fr_280px] gap-4 p-4">
-        <div className="max-h-[72vh] overflow-auto bg-slate-100 dark:bg-slate-800 p-3 rounded-xl">
+      <div className="grid lg:grid-cols-[minmax(0,1fr)_280px] gap-4 p-4 min-h-0 overflow-y-auto lg:overflow-hidden">
+        <div className="lg:max-h-[calc(100vh-9rem)] overflow-auto bg-slate-100 dark:bg-slate-800 p-3 rounded-xl">
           <div className={`relative mx-auto w-fit max-w-full select-none ${placementText ? 'cursor-crosshair' : ''}`} style={{ lineHeight: 0 }} onClick={place}>
             <img ref={imageRef} src={template.image_url || template.image} alt={`${template.name} page preview`} onLoad={() => { const image = imageRef.current; if (image?.naturalWidth) setFontScale(image.getBoundingClientRect().width / image.naturalWidth); }} className="block max-h-[68vh] max-w-full object-contain" draggable={false} />
             {redactions.map((cover, index) => <div key={`cover-${index}`} onPointerDown={(event) => beginDrag(event, 'redaction', index)} className={`absolute cursor-move border border-dashed ${selectedRedaction === index ? 'border-amber-600' : 'border-transparent hover:border-amber-400'}`} style={{ left: `${cover.x * 100}%`, top: `${cover.y * 100}%`, width: `${cover.width * 100}%`, height: `${cover.height * 100}%`, background: cover.color }} />)}
@@ -132,7 +136,7 @@ export default function TemplateLayoutEditor({ template, onClose, onSaved }: {
             </div>)}
           </div>
         </div>
-        <aside className="space-y-3 text-sm text-slate-800 dark:text-slate-100">
+        <aside className="space-y-3 text-sm text-slate-800 dark:text-slate-100 lg:max-h-[calc(100vh-9rem)] overflow-y-auto pr-1">
           <div className="font-semibold">Choose a field, then click its position</div>
           <p className="text-xs text-slate-500 dark:text-slate-400">Certificate ID preview: OSCV-YYYY-XXXXXXXX. The real unique ID and year are inserted when a certificate is generated.</p>
           <div className="flex flex-wrap gap-1">{FIELDS.map((field) => {
@@ -152,10 +156,10 @@ export default function TemplateLayoutEditor({ template, onClose, onSaved }: {
           {active && selectedRedaction === null && <div className="space-y-2 border-t pt-3 dark:border-slate-700">
             <label className="block">Text<input className="mt-1 w-full rounded border border-slate-300 bg-white p-2 text-slate-900 dark:border-slate-600 dark:bg-slate-800 dark:text-slate-100" value={active.text} onChange={(e) => setElements((items) => items.map((x, i) => i === selected ? { ...x, text: keepCertificateIdPlaceholder(x.text, e.target.value) } : x))} /></label>
             <label className="block">Font size (template image px)<input type="number" min="8" max="120" className="mt-1 w-full rounded border border-slate-300 bg-white p-2 text-slate-900 dark:border-slate-600 dark:bg-slate-800 dark:text-slate-100" value={active.fontSize} onChange={(e) => setElements((items) => items.map((x, i) => i === selected ? { ...x, fontSize: Number(e.target.value) || 8 } : x))} /></label>
-            <label className="block">Font family<select className="mt-1 w-full rounded border border-slate-300 bg-white p-2 text-slate-900 dark:border-slate-600 dark:bg-slate-800 dark:text-slate-100" value={active.fontFamily || 'Arial'} onChange={(e) => setElements((items) => items.map((x, i) => i === selected ? { ...x, fontFamily: e.target.value } : x))}><option>Arial</option><option>DejaVu Sans</option><option>Serif</option><option>Monospace</option></select></label>
+            <label className="block">Font family<select className="mt-1 w-full rounded border border-slate-300 bg-white p-2 text-slate-900 dark:border-slate-600 dark:bg-slate-800 dark:text-slate-100" value={active.fontFamily || 'Arial'} onChange={(e) => setElements((items) => items.map((x, i) => i === selected ? { ...x, fontFamily: e.target.value } : x))}><option value="Arial">Arial</option><option value="DejaVu Sans">DejaVu Sans</option><option value="Serif">Serif</option><option value="Monospace">Monospace</option><option value="Caladea">Caladea (Certificate Serif)</option><option value="Amiri">Amiri (Elegant Serif)</option><option value="Lato">Lato</option><option value="Poppins">Poppins</option></select></label>
             <label className="block">Color<input type="color" className="ml-2 align-middle" value={active.color} onChange={(e) => setElements((items) => items.map((x, i) => i === selected ? { ...x, color: e.target.value } : x))} /></label>
             <label className="block">Width<input type="range" min=".15" max=".9" step=".01" className="w-full" value={active.width} onChange={(e) => setElements((items) => items.map((x, i) => i === selected ? { ...x, width: Number(e.target.value) } : x))} /></label>
-            <label className="block">Alignment<select className="mt-1 w-full rounded border p-2 text-slate-900" value={active.align} onChange={(e) => setElements((items) => items.map((x, i) => i === selected ? { ...x, align: e.target.value } : x))}><option value="left">Left</option><option value="center">Center</option><option value="right">Right</option></select></label>
+            <label className="block">Alignment<select className="mt-1 w-full rounded border border-slate-300 bg-white p-2 text-slate-900 focus:outline-none focus:ring-2 focus:ring-blue-500 dark:border-slate-600 dark:bg-slate-800 dark:text-slate-100" value={active.align} onChange={(e) => setElements((items) => items.map((x, i) => i === selected ? { ...x, align: e.target.value } : x))}><option className="bg-white text-slate-900 dark:bg-slate-800 dark:text-slate-100" value="left">Left</option><option className="bg-white text-slate-900 dark:bg-slate-800 dark:text-slate-100" value="center">Center</option><option className="bg-white text-slate-900 dark:bg-slate-800 dark:text-slate-100" value="right">Right</option></select></label>
             <label className="inline-flex items-center gap-2"><input type="checkbox" checked={!!active.bold} onChange={(e) => setElements((items) => items.map((x, i) => i === selected ? { ...x, bold: e.target.checked } : x))} />Bold</label>
             <button className="text-red-600" onClick={() => { setElements((items) => items.filter((_, i) => i !== selected)); setSelected(0); }}>Delete selected layer</button>
           </div>}

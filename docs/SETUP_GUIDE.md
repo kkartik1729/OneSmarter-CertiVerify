@@ -1,284 +1,194 @@
-# OneSmarter CertiVerify — Complete Multi-Laptop Setup Guide
+# OneSmarter CertiVerify — Windows Local Setup
 
-This guide provides step-by-step instructions for cloning, setting up, and running **OneSmarter-CertiVerify** on a new laptop (Windows, macOS, or Linux).
+This guide configures a fresh, independent development environment after cloning the shared repository. It does not copy another developer's database, media, `.env` files, or credentials.
 
----
+## Repository layout and local ports
 
-## 📋 System Prerequisites
+- `backend/`: Django 5.2.18, Django REST Framework, PostgreSQL settings, migrations, uploaded/generated media.
+- `frontend/`: React 18, TypeScript, Vite. Use the committed `package-lock.json` with `npm ci`.
+- `docs/`: API, schema, and setup documentation.
+- Vite runs at `http://localhost:5173` and proxies `/api` to Django at `http://127.0.0.1:8005` by default (`frontend/vite.config.ts`). Run Django on **8005** unless you also update the local `DEV_API_PROXY_TARGET`.
+- PostgreSQL is the default database. The committed backend example uses port **5432**, the usual local PostgreSQL port. This project currently falls back to port 8000 if `DB_PORT` is absent, so keep the local `.env` value explicit and match the port shown by the installed PostgreSQL service.
 
-Ensure the following tools are installed on the laptop before starting:
+## 1. Install prerequisites
 
-| Tool | Recommended Version | Download Link / Command |
-| :--- | :--- | :--- |
-| **Git** | 2.30+ | [git-scm.com](https://git-scm.com/) |
-| **Python** | 3.10, 3.11, or 3.12 | [python.org](https://www.python.org/downloads/) *(Ensure **"Add python.exe to PATH"** is checked on Windows)* |
-| **Node.js & npm** | Node 18+ or 20+ (LTS) | [nodejs.org](https://nodejs.org/) |
-| **PostgreSQL** *(Recommended)* | 14, 15, or 16 | [postgresql.org](https://www.postgresql.org/download/) *(Or use SQLite for zero-config testing)* |
+Install Git for Windows, Python 3.12 (64-bit), Node.js 20 LTS (npm included), and PostgreSQL 14–16 (or a compatible newer release). Django 5.2 supports Python 3.10 and later; Python 3.12 is the recommended version for this setup. During Python installation, enable **Add Python to PATH**.
 
----
+Check versions in PowerShell:
 
-## 🚀 Step 1: Clone the GitHub Repository
-
-Open **PowerShell** (Windows) or **Terminal** (macOS/Linux):
-
-```bash
-git clone https://github.com/<your-username>/OneSmarter-CertiVerify.git
-cd OneSmarter-CertiVerify
+```powershell
+git --version
+py -3.12 --version
+node --version
+npm --version
 ```
 
-The repository structure:
-```text
-OneSmarter-CertiVerify/
-├── backend/          # Django REST Framework (Python)
-├── frontend/         # React.js + TypeScript + Vite + Tailwind CSS
-├── docs/             # Documentation & Architecture Guides
-├── README.md         # Project overview
-└── .gitignore        # Git ignore rules
+If `py -3.12` is unavailable, install Python 3.12, reopen PowerShell, and retry.
+
+## 2. Clone or inspect the existing checkout
+
+For a new clone:
+
+```powershell
+git clone https://github.com/kkartik1729/OneSmarter-CertiVerify.git
+Set-Location OneSmarter-CertiVerify
 ```
 
----
+For an existing clone, open PowerShell in its root and inspect before changing anything:
 
-## 🐍 Step 2: Backend Setup (Django REST Framework)
-
-### 2.1 Navigate to Backend
-```bash
-cd backend
+```powershell
+git status --short
+git branch --show-current
+git remote -v
 ```
 
-### 2.2 Create & Activate Python Virtual Environment
+Do not reclone over an existing folder or discard local changes. Open the repository root (the directory containing `backend`, `frontend`, and `docs`) in VS Code with `code .`; in Antigravity, use **Open Folder** and choose that same root.
 
-- **On Windows (PowerShell):**
-  ```powershell
-  python -m venv .venv
-  .\.venv\Scripts\activate
-  ```
-  *(If PowerShell shows an execution policy error, run `Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass` and try again).*
+## 3. Create a local backend environment
 
-- **On macOS / Linux:**
-  ```bash
-  python3 -m venv .venv
-  source .venv/bin/activate
-  ```
+In PowerShell from the repository root:
 
-Your prompt will now show `(.venv)`.
-
-### 2.3 Install Python Dependencies
-```bash
-pip install --upgrade pip
-pip install -r requirements.txt
+```powershell
+Set-Location backend
+py -3.12 -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+python --version
+python -m django --version
 ```
 
-*(This installs Django 5.2, Django REST Framework, SimpleJWT, Pillow, PyPDF, PyPDFium2, PyOTP, QRCode, psycopg2-binary, google-auth, etc.)*
+If PowerShell blocks activation, either run `Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass` in that terminal and activate again, or skip activation and run `\.venv\Scripts\python.exe -m pip ...` and `\.venv\Scripts\python.exe manage.py ...` explicitly. The virtual environment is local and ignored by Git.
 
-### 2.4 Configure Backend Environment Variables (`.env`)
+## 4. Configure local backend settings
 
-Copy the example file to `.env`:
+Create `backend/.env` only if it does not already exist:
 
-- **Windows:**
-  ```powershell
-  copy .env.example .env
-  ```
-- **macOS / Linux:**
-  ```bash
-  cp .env.example .env
-  ```
-
-Open `backend/.env` in any editor (e.g., VS Code or Notepad) and configure your database and settings:
-
-#### Database Option A: PostgreSQL (Recommended)
-1. Open **pgAdmin** or your PostgreSQL command line (`psql -U postgres`).
-2. Create the database:
-   ```sql
-   CREATE DATABASE certiverify_db;
-   ```
-3. In `backend/.env`, set:
-   ```env
-   DJANGO_SECRET_KEY=generate-any-long-random-string-here
-   DJANGO_DEBUG=True
-   DJANGO_ALLOWED_HOSTS=127.0.0.1,localhost
-
-   DB_NAME=certiverify_db
-   DB_USER=postgres
-   DB_PASSWORD=YOUR_POSTGRES_PASSWORD
-   DB_HOST=127.0.0.1
-   DB_PORT=5432
-   ```
-
-#### Database Option B: SQLite (Zero-Config Quick Mode)
-If your friend does not have PostgreSQL installed yet and wants to run the project instantly without installing PostgreSQL, add this line in `backend/.env`:
-```env
-DB_ENGINE=sqlite
+```powershell
+if (-not (Test-Path .env)) { Copy-Item .env.example .env }
+notepad .env
 ```
-*(Django will automatically create and use a local `db.sqlite3` file).*
 
-#### Email Configuration (SMTP)
-The project includes centralized SMTP configuration for email verification OTPs and certificate completion emails:
-```env
-EMAIL_BACKEND=django.core.mail.backends.smtp.EmailBackend
-EMAIL_HOST=smtp.ionos.com
-EMAIL_PORT=587
-EMAIL_USE_TLS=True
-EMAIL_USE_SSL=False
-EMAIL_TIMEOUT=20
-EMAIL_HOST_USER=akshay.kumar@onesmarter.com
-EMAIL_HOST_PASSWORD=YOUR_SMTP_PASSWORD
-DEFAULT_FROM_EMAIL=OneSmarter Support <support@onesmarter.com>
-FRONTEND_URL=http://localhost:5173
+The example is safe for local use and does not contain another developer's credentials. Generate a private Django key in PowerShell with:
+
+```powershell
+python -c "import secrets; print(secrets.token_urlsafe(50))"
 ```
-> **Tip for Local Testing without Real Emails:**
-> Set `EMAIL_BACKEND=django.core.mail.backends.console.EmailBackend` in `backend/.env`. All emails (including verification OTPs) will print straight to the backend terminal window!
 
-### 2.5 Run Database Migrations
-Apply all schema migrations to create the database tables:
-```bash
+Paste the generated value into your local `DJANGO_SECRET_KEY`. Set the database values to the database/user/password you create below. The example uses the console email backend, which prints development messages and OTPs in the Django terminal. To use SMTP, replace it with an SMTP backend and credentials issued specifically for development; never copy production credentials.
+
+Relevant variables:
+
+| Variable | Local value / guidance |
+| --- | --- |
+| `DJANGO_SECRET_KEY` | A fresh random value; keep private. |
+| `DJANGO_DEBUG` | `True` for local development only. |
+| `DJANGO_ALLOWED_HOSTS` | `127.0.0.1,localhost` for localhost work. |
+| `DB_ENGINE` | Leave unset for PostgreSQL; use `sqlite` only for an isolated quick smoke-test database. |
+| `DB_NAME`, `DB_USER`, `DB_PASSWORD` | The separate local PostgreSQL database and account created below. |
+| `DB_HOST`, `DB_PORT` | Usually `127.0.0.1` and `5432`; use the actual local PostgreSQL port. |
+| `FRONTEND_URL` | `http://localhost:5173`. |
+| `EMAIL_BACKEND` | Console backend locally; SMTP is optional. |
+| `GOOGLE_CLIENT_ID` | Optional backend OAuth client ID. Do not put a client secret in frontend config. |
+| `CORS_ALLOWED_ORIGINS` | Usually blank; localhost Vite origins are already allowed by Django. |
+
+## 5. Create a separate local PostgreSQL database
+
+Check that PostgreSQL is installed and its service is running:
+
+```powershell
+Get-Service *postgres*
+Test-NetConnection 127.0.0.1 -Port 5432
+```
+
+Start the PostgreSQL service from Windows Services or an elevated PowerShell session if it is stopped. The service name includes the installed major version. In pgAdmin or `psql`, connect to the local server and create a dedicated role/database. Replace the example password locally; do not use these literal values as credentials:
+
+```sql
+CREATE ROLE certiverify_dev WITH LOGIN PASSWORD 'choose-a-local-password';
+CREATE DATABASE certiverify_db OWNER certiverify_dev;
+```
+
+If a local database with that name already exists, inspect it and choose another development database name instead of dropping or recreating it. Set `DB_NAME`, `DB_USER`, `DB_PASSWORD`, `DB_HOST`, and `DB_PORT` in `backend/.env` to match. Verify a connection before migrations:
+
+```powershell
+psql -h 127.0.0.1 -p 5432 -U certiverify_dev -d certiverify_db -c "SELECT current_database();"
+```
+
+If `psql` is not on `PATH`, use SQL Shell (psql) installed with PostgreSQL or pgAdmin's Query Tool. Do not import another laptop's database backup or production data as part of this setup.
+
+## 6. Review and apply Django migrations
+
+From `backend/` with the virtual environment active:
+
+```powershell
+python manage.py showmigrations
+python manage.py migrate --plan
+```
+
+Review the plan, then apply the project's migrations to the **new local database**:
+
+```powershell
 python manage.py migrate
+python manage.py makemigrations --check
+python manage.py check
+python manage.py test
 ```
 
-### 2.6 Create an Admin Superuser
-Create the initial administrator account:
-```bash
+Do not delete migrations, use `--fake`, flush tables, or run destructive SQL to resolve setup issues. The migrations create the schema; this setup does not create an admin account until the next step.
+
+## 7. Create your own admin and handle MFA
+
+```powershell
 python manage.py createsuperuser
 ```
-Follow the prompts to enter:
-- **Username** (e.g. `admin`)
-- **Email address** (e.g. `admin@onesmarter.com`)
-- **Password**
 
-*(This user automatically receives the `ADMIN` role in CertiVerify).*
+Use your own local username, email, and password. A Django superuser is treated as an admin by this project. Log in through the app and complete authenticator-app MFA enrollment if prompted or required by the account workflow. Do not reuse another person's admin credentials.
 
-### 2.7 (Optional) Test Email Connectivity
-Verify SMTP settings:
-```bash
-python manage.py test_smtp
-```
+## 8. Configure and build the frontend
 
-### 2.8 Start the Backend Server
-```bash
-python manage.py runserver 8000
-```
+Open a second PowerShell terminal at the repository root:
 
-Backend will be running at:
-- **API Base:** `http://127.0.0.1:8000/api/`
-- **Django Admin Panel:** `http://127.0.0.1:8000/admin/`
-
-Leave this terminal running.
-
----
-
-## ⚛️ Step 3: Frontend Setup (React + Vite)
-
-Open a **new terminal tab or window**.
-
-### 3.1 Navigate to Frontend
-```bash
-cd OneSmarter-CertiVerify/frontend
-```
-
-### 3.2 Install Node Modules
-```bash
-npm install
-```
-
-### 3.3 Configure Frontend Environment Variables (`.env`)
-
-Copy the example file to `.env`:
-
-- **Windows:**
-  ```powershell
-  copy .env.example .env
-  ```
-- **macOS / Linux:**
-  ```bash
-  cp .env.example .env
-  ```
-
-Open `frontend/.env` and verify the API URL:
-```env
-# Base URL of the Django REST API (default Django dev port is 8000)
-VITE_API_BASE_URL=http://127.0.0.1:8000/api
-
-# Public HTTPS URL of the deployed frontend for LinkedIn Credential verification (leave blank in dev)
-VITE_PUBLIC_FRONTEND_URL=
-
-# Google OAuth 2.0 Client ID (optional, for Google Sign-In)
-# VITE_GOOGLE_CLIENT_ID=
-```
-
-### 3.4 Start the Frontend Dev Server
-```bash
+```powershell
+Set-Location frontend
+if (-not (Test-Path .env)) { Copy-Item .env.example .env }
+npm ci
+npm run build
 npm run dev
 ```
 
-The frontend will run at:
-- **Website URL:** `http://localhost:5173/`
+The committed frontend example sets `VITE_API_BASE_URL=/api` and `DEV_API_PROXY_TARGET=http://127.0.0.1:8005`; this keeps requests on the same local Vite origin and matches the Django command below. Do not change API URLs in application source files. If Django runs on another port, edit only `DEV_API_PROXY_TARGET` in local `frontend/.env` and restart Vite.
 
----
+Optional Google sign-in requires an authorized OAuth web client. Set the same client ID in `frontend/.env` as `VITE_GOOGLE_CLIENT_ID` and in `backend/.env` as `GOOGLE_CLIENT_ID`, and authorize `http://localhost:5173` in that client's development origins. If no authorized client is available, leave it unset; password login remains available.
 
-## 🌐 Step 4: Verify the Application
+## 9. Start and smoke-test both servers
 
-1. Open your browser and navigate to: `http://localhost:5173/`
-2. Click **Sign In**:
-   - Log in using the superuser account you created in Step 2.6.
-   - You will land on the **Admin Dashboard** (`/admin`).
-3. Explore Admin features:
-   - **Single Certificate:** Issue a certificate with custom recipient name, email, course, dates, and preview.
-   - **Upload Custom Template:** Upload any Figma PNG, JPG, or JPEG certificate layout.
-   - **Bulk CSV Issuance:** Generate certificates in batches from CSV.
-   - **Audit Logs & Security:** View real-time activity and verification history.
-4. Test Recipient / Student View:
-   - Open an incognito browser window.
-   - Register a new account (`/register`).
-   - Log in to access the **Recipient Dashboard** (`/dashboard`).
-   - If an admin previously issued a certificate to that email, it is automatically claimed and displayed under **My Certificates**.
-5. Public Certificate Verification:
-   - Visit `http://localhost:5173/verify` and enter any Certificate ID or scan a QR code.
+In the backend terminal (`backend/`):
 
----
+```powershell
+python manage.py runserver 8005
+```
 
-## 🛠️ Common Issues & Troubleshooting
+In the frontend terminal (`frontend/`):
 
-### 1. `psycopg2` installation error on Windows
-- **Cause:** Missing C++ build tools when compiling psycopg2 from source.
-- **Solution:** We use `psycopg2-binary>=2.9.9` in `requirements.txt` which installs pre-compiled wheels. If you still encounter an issue, install with:
-  ```powershell
-  pip install psycopg2-binary
-  ```
-  Or switch to SQLite by adding `DB_ENGINE=sqlite` in `backend/.env`.
+```powershell
+npm run dev
+```
 
-### 2. Frontend says "Unable to connect to server" or "Network Error"
-- **Cause:** The backend server is not running or running on a different port.
-- **Solution:** Check that `python manage.py runserver 8000` is running in your backend terminal, and ensure `VITE_API_BASE_URL=http://127.0.0.1:8000/api` is in `frontend/.env`.
+Open `http://localhost:5173`. The Django admin is at `http://127.0.0.1:8005/admin/`; the API is at `http://127.0.0.1:8005/api/`. Verify the app can log in with the newly created account and load its courses/templates. Test certificate generation only with local test data and the console email backend; no real email is sent by that backend. Use a fresh local template upload if the clone has no authorized media files.
 
-### 3. CORS Error in browser console
-- **Cause:** Django backend rejected the origin.
-- **Solution:** `backend/config/settings.py` is pre-configured with `http://localhost:5173` and `http://127.0.0.1:5173` in `CORS_ALLOWED_ORIGINS`. If your frontend runs on another port (e.g. `5174`), add it to `CORS_ALLOWED_ORIGINS` in `backend/.env`:
-  ```env
-  CORS_ALLOWED_ORIGINS=http://localhost:5174,http://127.0.0.1:5174
-  ```
+## Optional: access from a phone on the same private Wi-Fi
 
-### 4. Emails failing to send / SMTP timeout
-- **Cause:** Incorrect SMTP credentials or port blocked by network firewall.
-- **Solution:** For local development and testing, switch to the console backend in `backend/.env`:
-  ```env
-  EMAIL_BACKEND=django.core.mail.backends.console.EmailBackend
-  ```
-  The verification codes and emails will output directly into the backend terminal.
+Vite is already configured to bind to `0.0.0.0`. Do not expose these development servers to the public internet. For phone testing, use the laptop's private LAN IPv4 address in the browser. Configure Django `ALLOWED_HOSTS` to include that address and `CORS_ALLOWED_ORIGINS` to include the Vite origin using that address (for example `http://192.168.1.25:5173`); set the local frontend `DEV_API_PROXY_TARGET` to the laptop's LAN address on port 8005. Allow only ports 5173 and 8005 on a trusted private network if Windows Firewall requires it. Return those values to localhost when finished.
 
-### 5. Media files (Certificates / Templates) 404
-- **Cause:** Media serving disabled or `DEBUG=False`.
-- **Solution:** In `backend/.env`, ensure `DJANGO_DEBUG=True`. Django automatically serves uploaded templates and generated PDF/PNG certificates under `/media/` in development.
+## Local-only files and common issues
 
----
+- Backend `.env`, frontend `.env`, `.venv`, `node_modules`, `dist`, `backend/media`, and database dumps/backups are machine-specific and must stay out of commits. Existing uploads and generated records are not included in a fresh clone; obtain any needed template assets from an authorized source and upload them locally.
+- **Repository-owner action before sharing a fresh clone:** this checkout has a tracked file named `backend/certiverify_backup.dump`. The new ignore rule only protects future untracked dumps; it cannot keep a tracked file out of clones. The file was not opened or restored. Do not import it into the friend's local DB. Remove it from repository tracking and, if it contains sensitive data, clean the remote history and rotate affected credentials before asking the friend to clone. This requires an authorized repository change and is not done by this local setup guide.
+- `connection refused` from PostgreSQL: check the service and actual port, then compare them with `DB_HOST`/`DB_PORT`.
+- Frontend API network error: keep Django on port 8005 or align local `DEV_API_PROXY_TARGET`; restart Vite after editing `.env`.
+- Email/OTP testing: keep the console backend selected so messages and codes appear in the backend terminal. Use SMTP only with separate development credentials and an authorized test recipient.
+- Google sign-in unavailable: configure an authorized development client ID and local origin as described above; do not invent or reuse private credentials.
 
-## 📦 Sharing via GitHub Checklist
+## Repository changes
 
-Before your friend clones the repo, ensure:
-1. All changes are committed and pushed:
-   ```bash
-   git status
-   git add .
-   git commit -m "Complete setup configuration and documentation"
-   git push origin main
-   ```
-2. Note that sensitive files (`backend/.env`, `frontend/.env`, `.venv/`, `node_modules/`, `backend/media/`) are ignored by `.gitignore` and are not committed to GitHub.
-3. Your friend just needs to follow **Step 1 through Step 4** above!
+Setup commands above do not require source changes, Git commits, or pushes. Before sharing any changes, inspect `git status` and ensure no local `.env`, database, media, or backup files are staged.

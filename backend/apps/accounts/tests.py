@@ -80,6 +80,28 @@ class AccountsAuthAndMFATestCase(TestCase):
         self.assertEqual(res.status_code, status.HTTP_200_OK)
         self.assertEqual(res.data["role"], "USER")
 
+    def test_profile_patch_updates_allowed_fields_for_user_and_admin(self):
+        for account in (self.user, self.admin):
+            self.client.force_authenticate(user=account)
+            response = self.client.patch("/api/accounts/me/", {
+                "organization": "ABC & Associates",
+                "phone": "+919876543210",
+            }, format="json")
+            self.assertEqual(response.status_code, status.HTTP_200_OK)
+            profile = UserProfile.objects.get(user=account)
+            self.assertEqual(profile.organization, "ABC & Associates")
+            self.assertEqual(profile.phone, "+919876543210")
+            self.assertEqual(response.data["role"], "ADMIN" if account.is_staff or account.is_superuser else "USER")
+
+    def test_profile_patch_rejects_invalid_organization_and_indian_phone(self):
+        self.client.force_authenticate(user=self.user)
+        invalid_org = self.client.patch("/api/accounts/me/", {"organization": "12345"}, format="json")
+        self.assertEqual(invalid_org.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("organization", invalid_org.data)
+        invalid_phone = self.client.patch("/api/accounts/me/", {"phone": "+91987654321"}, format="json")
+        self.assertEqual(invalid_phone.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("phone", invalid_phone.data)
+
     def test_missing_profile_handling_for_admin(self):
         """If an admin's profile is deleted, fetching /me/ recreates it with ADMIN role."""
         UserProfile.objects.filter(user=self.admin).delete()

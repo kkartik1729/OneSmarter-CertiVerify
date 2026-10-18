@@ -2,6 +2,15 @@
 @tailwind components;
 @tailwind utilities;
 
+@font-face{font-family:Caladea;src:url('/fonts/Caladea-Regular.ttf') format('truetype');font-style:normal;font-weight:400;font-display:swap}
+@font-face{font-family:Caladea;src:url('/fonts/Caladea-Bold.ttf') format('truetype');font-style:normal;font-weight:700;font-display:swap}
+@font-face{font-family:Amiri;src:url('/fonts/Amiri-Regular.ttf') format('truetype');font-style:normal;font-weight:400;font-display:swap}
+@font-face{font-family:Amiri;src:url('/fonts/Amiri-Bold.ttf') format('truetype');font-style:normal;font-weight:700;font-display:swap}
+@font-face{font-family:Lato;src:url('/fonts/Lato/Lato-Regular.ttf') format('truetype');font-style:normal;font-weight:400;font-display:swap}
+@font-face{font-family:Lato;src:url('/fonts/Lato/Lato-Bold.ttf') format('truetype');font-style:normal;font-weight:700;font-display:swap}
+@font-face{font-family:Poppins;src:url('/fonts/Poppins/Poppins-Regular.ttf') format('truetype');font-style:normal;font-weight:400;font-display:swap}
+@font-face{font-family:Poppins;src:url('/fonts/Poppins/Poppins-Bold.ttf') format('truetype');font-style:normal;font-weight:700;font-display:swap}
+
 :root{--p:#3B82F6;--pt:#fff;--bg:#070D1A;--s:#0E1626;--t:#fff;--t2:#9FB0C8;--bd:#1F2D45;--ok:#34D399;--wn:#F5A524;--er:#FF6B6B;--in:#38BDF8;--sh:0 1px 2px #0008,0 18px 40px -18px #3B82F644;color-scheme:dark;box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px);font-family:Poppins,Inter,system-ui,-apple-system,"Segoe UI",sans-serif}
 *{box-sizing:border-box}html{scroll-behavior:smooth;scroll-padding-top:96px}body{margin:0;background:var(--bg);color:var(--t);line-height:1.6;font-size:15px;-webkit-font-smoothing:antialiased}
 h1,h2,h3{font-weight:700;line-height:1.08;margin:0 0 .5em;letter-spacing:-.035em}h1{font-size:clamp(2.4rem,6.5vw,4.6rem)}h2{font-size:clamp(1.7rem,3.4vw,2.6rem)}h3{font-size:1rem;letter-spacing:-.01em}p{margin:.4em 0}a{color:#7DD3FC}

@@ -20,8 +20,8 @@ Smart, tamper-proof Certificate Issuance and Verification System built with Djan
 For full detailed setup instructions on another laptop, see the [docs/SETUP_GUIDE.md](docs/SETUP_GUIDE.md).
 
 ### 1. Prerequisites
-- **Python 3.10+ / 3.11+ / 3.12+**
-- **Node.js 18+ / 20+** and **npm**
+- **Python 3.10+** (Python 3.12 recommended)
+- **Node.js 20 LTS** and **npm**
 - **Git**
 - **PostgreSQL** (or use `DB_ENGINE=sqlite` in `.env`)
 
@@ -33,22 +33,16 @@ For full detailed setup instructions on another laptop, see the [docs/SETUP_GUID
 # Navigate to backend
 cd backend
 
-# Create & activate virtual environment
-# Windows (PowerShell):
-python -m venv .venv
-.\.venv\Scripts\activate
-
-# macOS / Linux:
-# python3 -m venv .venv
-# source .venv/bin/activate
+# Create & activate virtual environment (Windows PowerShell)
+py -3.12 -m venv .venv
+.\.venv\Scripts\Activate.ps1
 
 # Install dependencies
 pip install --upgrade pip
 pip install -r requirements.txt
 
-# Configure environment variables
-# Windows: copy .env.example .env
-# macOS/Linux: cp .env.example .env
+# Create your own ignored local config (never copy another developer's .env)
+if (-not (Test-Path .env)) { Copy-Item .env.example .env }
 
 # Run database migrations
 python manage.py migrate
@@ -57,10 +51,10 @@ python manage.py migrate
 python manage.py createsuperuser
 
 # Start Django development server
-python manage.py runserver 8000
+python manage.py runserver 8005
 ```
-- Backend API: `http://127.0.0.1:8000/api/`
-- Django Admin: `http://127.0.0.1:8000/admin/`
+- Backend API: `http://127.0.0.1:8005/api/`
+- Django Admin: `http://127.0.0.1:8005/admin/`
 
 ---
 
@@ -72,12 +66,11 @@ In a new terminal window:
 # Navigate to frontend
 cd frontend
 
-# Install Node dependencies
-npm install
+# Install exact dependencies from the committed lockfile
+npm ci
 
-# Configure environment variables
-# Windows: copy .env.example .env
-# macOS/Linux: cp .env.example .env
+# Create your own ignored local frontend config if needed
+if (-not (Test-Path .env)) { Copy-Item .env.example .env }
 
 # Start React Vite development server
 npm run dev

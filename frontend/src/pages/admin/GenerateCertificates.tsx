@@ -49,12 +49,12 @@ export default function GenerateCertificates() {
 
   // Batch-level defaults (editable before CSV validation)
   const [batchCourseName, setBatchCourseName] = useState('');
-  const [batchCertificateTitle, setBatchCertificateTitle] = useState('Certificate of Completion');
-  const [batchIssuer, setBatchIssuer] = useState('OneSmarter, Inc.');
+  const [batchCertificateTitle, setBatchCertificateTitle] = useState('');
+  const [batchIssuer, setBatchIssuer] = useState('');
   const [batchStartDate, setBatchStartDate] = useState('');
   const [batchEndDate, setBatchEndDate] = useState('');
-  const [batchIssueDate, setBatchIssueDate] = useState(new Date().toISOString().slice(0, 10));
-  const [batchCompletionDescription, setBatchCompletionDescription] = useState('has successfully completed the comprehensive training program and demonstrated professional excellence.');
+  const [batchIssueDate, setBatchIssueDate] = useState('');
+  const [batchCompletionDescription, setBatchCompletionDescription] = useState('');
   const [batchOutputFormat, setBatchOutputFormat] = useState<'PDF' | 'PNG' | 'JPEG'>('PDF');
   const [deletingTemplate, setDeletingTemplate] = useState(false);
 
@@ -175,18 +175,6 @@ export default function GenerateCertificates() {
   useEffect(() => {
     loadInitialData();
   }, []);
-
-  // Sync batch defaults when course selection changes
-  useEffect(() => {
-    const c = courses.find((x) => x.id === Number(selectedCourseId));
-    if (c) {
-      setBatchCourseName(c.name);
-      setBatchCertificateTitle(c.title || 'Certificate of Completion');
-      setBatchIssuer(c.issuer || 'OneSmarter, Inc.');
-      setBatchStartDate(c.start_date);
-      setBatchEndDate(c.end_date);
-    }
-  }, [selectedCourseId, courses]);
 
   const selectedCourse = courses.find((c) => c.id === Number(selectedCourseId));
   const selectedTemplate = templates.find((t) => t.id === Number(selectedTemplateId));
@@ -458,7 +446,7 @@ export default function GenerateCertificates() {
   }
 
   return (
-    <div className="space-y-8">
+    <div className="mx-auto max-w-6xl space-y-8">
       {/* Header Banner */}
       <div className="bg-gradient-to-r from-slate-900 via-indigo-950 to-slate-900 rounded-2xl p-6 sm:p-8 text-white shadow-md border border-slate-800 flex flex-col md:flex-row md:items-center justify-between gap-6">
         <div>
@@ -920,54 +908,54 @@ export default function GenerateCertificates() {
               </span>
             </div>
 
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 text-xs">
+            <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-x-4 gap-y-3 text-xs">
               <div>
-                <label className="block text-slate-600 dark:text-slate-300 mb-1 font-medium">
+                <label className="block min-h-8 text-slate-600 dark:text-slate-300 mb-1 font-medium">
                   Course Name Override (optional)
                 </label>
                 <input
                   type="text"
                   value={batchCourseName}
                   onChange={(e) => setBatchCourseName(e.target.value)}
-                  className="w-full px-3 py-2 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 rounded-lg text-slate-900 dark:text-white font-medium"
+                  className="w-full max-w-md px-3 py-2 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 rounded-lg text-slate-900 dark:text-white font-medium"
                   placeholder="e.g. Full Stack Web Development"
                 />
               </div>
 
               <div>
-                <label className="block text-slate-600 dark:text-slate-300 mb-1 font-medium">
+                <label className="block min-h-8 text-slate-600 dark:text-slate-300 mb-1 font-medium">
                   Certificate Title
                 </label>
                 <input
                   type="text"
                   value={batchCertificateTitle}
                   onChange={(e) => setBatchCertificateTitle(e.target.value)}
-                  className="w-full px-3 py-2 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 rounded-lg text-slate-900 dark:text-white"
+                  className="w-full max-w-sm px-3 py-2 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 rounded-lg text-slate-900 dark:text-white"
                   placeholder="Certificate of Completion"
                 />
               </div>
 
               <div>
-                <label className="block text-slate-600 dark:text-slate-300 mb-1 font-medium">
+                <label className="block min-h-8 text-slate-600 dark:text-slate-300 mb-1 font-medium">
                   Issuing Authority
                 </label>
                 <input
                   type="text"
                   value={batchIssuer}
                   onChange={(e) => setBatchIssuer(e.target.value)}
-                  className="w-full px-3 py-2 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 rounded-lg text-slate-900 dark:text-white"
+                  className="w-full max-w-sm px-3 py-2 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 rounded-lg text-slate-900 dark:text-white"
                   placeholder="OneSmarter, Inc."
                 />
               </div>
 
               <div>
-                <label className="block text-slate-600 dark:text-slate-300 mb-1 font-medium">
+                <label className="block min-h-8 text-slate-600 dark:text-slate-300 mb-1 font-medium">
                   Output Format
                 </label>
                 <select
                   value={batchOutputFormat}
                   onChange={(e) => setBatchOutputFormat(e.target.value as 'PDF' | 'PNG' | 'JPEG')}
-                  className="w-full px-3 py-2 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 rounded-lg text-slate-900 dark:text-white"
+                  className="w-full max-w-sm px-3 py-2 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 rounded-lg text-slate-900 dark:text-white"
                 >
                   <option value="PDF">PDF (Recommended & Print-Ready)</option>
                   <option value="PNG">PNG (High Resolution Image)</option>
@@ -976,19 +964,19 @@ export default function GenerateCertificates() {
               </div>
 
               <div>
-                <label className="block text-slate-600 dark:text-slate-300 mb-1 font-medium">
+                <label className="block min-h-8 text-slate-600 dark:text-slate-300 mb-1 font-medium">
                   Start Date Override (optional)
                 </label>
                 <input
                   type="date"
                   value={batchStartDate}
                   onChange={(e) => setBatchStartDate(e.target.value)}
-                  className="w-full px-3 py-2 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 rounded-lg text-slate-900 dark:text-white"
+                  className="w-full max-w-[16rem] px-3 py-2 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 rounded-lg text-slate-900 dark:text-white"
                 />
               </div>
 
               <div>
-                <label className="block text-slate-600 dark:text-slate-300 mb-1 font-medium">
+                <label className="block min-h-8 text-slate-600 dark:text-slate-300 mb-1 font-medium">
                   End Date Override (optional)
                 </label>
                 <input
@@ -996,7 +984,7 @@ export default function GenerateCertificates() {
                   min={batchStartDate || undefined}
                   value={batchEndDate}
                   onChange={(e) => setBatchEndDate(e.target.value)}
-                  className={`w-full px-3 py-2 bg-white dark:bg-slate-900 border rounded-lg text-slate-900 dark:text-white ${
+                  className={`w-full max-w-[16rem] px-3 py-2 bg-white dark:bg-slate-900 border rounded-lg text-slate-900 dark:text-white ${
                     batchStartDate && batchEndDate && batchEndDate < batchStartDate
                       ? 'border-rose-400 focus:ring-rose-500'
                       : 'border-slate-300 dark:border-slate-700'
@@ -1005,26 +993,26 @@ export default function GenerateCertificates() {
               </div>
 
               <div>
-                <label className="block text-slate-600 dark:text-slate-300 mb-1 font-medium">
+                <label className="block min-h-8 text-slate-600 dark:text-slate-300 mb-1 font-medium">
                   Issue Date Override (optional; defaults to today)
                 </label>
                 <input
                   type="date"
                   value={batchIssueDate}
                   onChange={(e) => setBatchIssueDate(e.target.value)}
-                  className="w-full px-3 py-2 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 rounded-lg text-slate-900 dark:text-white"
+                  className="w-full max-w-[16rem] px-3 py-2 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 rounded-lg text-slate-900 dark:text-white"
                 />
               </div>
 
               <div>
-                <label className="block text-slate-600 dark:text-slate-300 mb-1 font-medium">
+                <label className="block min-h-8 text-slate-600 dark:text-slate-300 mb-1 font-medium">
                   Completion Description
                 </label>
                 <input
                   type="text"
                   value={batchCompletionDescription}
                   onChange={(e) => setBatchCompletionDescription(e.target.value)}
-                  className="w-full px-3 py-2 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 rounded-lg text-slate-900 dark:text-white"
+                  className="w-full max-w-md px-3 py-2 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 rounded-lg text-slate-900 dark:text-white"
                   placeholder="e.g. has successfully completed..."
                 />
               </div>

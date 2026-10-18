@@ -13,7 +13,8 @@ const titleMap: Record<string, string> = {
 };
 
 export default function UserLayout() {
-  const [collapsed, setCollapsed] = useState(false);
+  const [collapsed, setCollapsed] = useState(true);
+  const [hoverExpanded, setHoverExpanded] = useState(false);
   const [mobileOpen, setMobileOpen] = useState(false);
   const location = useLocation();
 
@@ -24,7 +25,9 @@ export default function UserLayout() {
       <Sidebar
         navItems={USER_NAV}
         collapsed={collapsed}
-        onToggleCollapse={() => setCollapsed(prev => !prev)}
+        hoverExpanded={hoverExpanded}
+        onHoverExpandedChange={setHoverExpanded}
+        onToggleCollapse={() => { setCollapsed(prev => !prev); setHoverExpanded(false); }}
         mobileOpen={mobileOpen}
         onCloseMobile={() => setMobileOpen(false)}
         isAdmin={false}
@@ -32,7 +35,7 @@ export default function UserLayout() {
 
       <div
         className={`flex-1 flex flex-col transition-all duration-300 min-w-0 ${
-          collapsed ? 'lg:pl-20' : 'lg:pl-64'
+          collapsed && !hoverExpanded ? 'lg:pl-20' : 'lg:pl-64'
         }`}
       >
         <TopNavbar

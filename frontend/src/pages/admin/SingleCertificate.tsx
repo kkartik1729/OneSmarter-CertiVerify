@@ -10,6 +10,9 @@ import {
   FileStack,
   ArrowRight,
   Upload,
+  Plus,
+  Pencil,
+  Trash2,
 } from 'lucide-react';
 import {
   courseService,
@@ -22,6 +25,7 @@ import {
 import type { Course, CertificateTemplate, AdminUser, Cert } from '../../types';
 import ErrorMessage from '../../components/ErrorMessage';
 import LoadingSkeleton from '../../components/LoadingSkeleton';
+import TemplateLayoutEditor from '../../components/TemplateLayoutEditor';
 
 export default function SingleCertificate() {
   const [courses, setCourses] = useState<Course[]>([]);
@@ -52,7 +56,11 @@ export default function SingleCertificate() {
   const [startDate, setStartDate] = useState('');
   const [endDate, setEndDate] = useState('');
   const [dateError, setDateError] = useState<string | null>(null);
-  const [issueDate, setIssueDate] = useState(new Date().toISOString().slice(0, 10));
+  const [issueDate, setIssueDate] = useState('');
+  const [editingTemplate, setEditingTemplate] = useState<CertificateTemplate | null>(null);
+  const [courseFormOpen, setCourseFormOpen] = useState(false);
+  const [editingCourseId, setEditingCourseId] = useState<number | null>(null);
+  const [courseForm, setCourseForm] = useState({ name: '', title: '', issuer: '', start_date: '', end_date: '' });
 
   // Preview & Submission
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
@@ -84,13 +92,6 @@ export default function SingleCertificate() {
         setTemplates(tList);
         if (cList.length > 0) {
           setSelectedCourseId(cList[0].id);
-          setStartDate(cList[0].start_date);
-          setEndDate(cList[0].end_date);
-          if (cList[0].end_date && cList[0].start_date && cList[0].end_date < cList[0].start_date) {
-            setDateError('End date cannot be earlier than start date.');
-          } else {
-            setDateError(null);
-          }
         }
         if (tList.length > 0) {
           setSelectedTemplateId(tList[0].id);
@@ -107,16 +108,36 @@ export default function SingleCertificate() {
   // Update dates when course selection changes
   const handleCourseChange = (courseId: number) => {
     setSelectedCourseId(courseId);
-    const found = courses.find((c) => c.id === courseId);
-    if (found) {
-      setStartDate(found.start_date);
-      setEndDate(found.end_date);
-      if (found.end_date && found.start_date && found.end_date < found.start_date) {
-        setDateError('End date cannot be earlier than start date.');
-      } else {
-        setDateError(null);
-      }
+    setStartDate('');
+    setEndDate('');
+    setIssueDate('');
+    setDateError(null);
+  };
+
+  const saveCourse = async () => {
+    if (!courseForm.name.trim() || !courseForm.start_date || !courseForm.end_date || courseForm.end_date < courseForm.start_date) {
+      setError('Enter a course name and valid start and end dates.');
+      return;
     }
+    try {
+      const data = { ...courseForm, name: courseForm.name.trim(), title: courseForm.title.trim(), issuer: courseForm.issuer.trim() };
+      const saved = editingCourseId ? await courseService.update(editingCourseId, data) : await courseService.create(data);
+      setCourses((items) => editingCourseId ? items.map((item) => item.id === saved.id ? saved : item) : [saved, ...items]);
+      setSelectedCourseId(saved.id);
+      setCourseFormOpen(false);
+      setEditingCourseId(null);
+      setCourseForm({ name: '', title: '', issuer: '', start_date: '', end_date: '' });
+      setError(null);
+    } catch (err) { setError(errMsg(err)); }
+  };
+
+  const removeCourse = async (course: Course) => {
+    if (!window.confirm(`Delete course “${course.name}”? Deletion is blocked when certificates or generation history reference it.`)) return;
+    try {
+      await courseService.delete(course.id);
+      setCourses((items) => items.filter((item) => item.id !== course.id));
+      if (selectedCourseId === course.id) setSelectedCourseId(courses.find((item) => item.id !== course.id)?.id ?? '');
+    } catch (err) { setError(errMsg(err)); }
   };
 
   const handleStartDateChange = (val: string) => {
@@ -225,10 +246,10 @@ export default function SingleCertificate() {
         course_id: Number(selectedCourseId) || undefined,
         student_name: studentDisplayName.trim() || 'Student Name',
         course_name: c?.name || '',
-        start_date: startDate || c?.start_date || '',
-        end_date: endDate || c?.end_date || '',
-        issue_date: issueDate || new Date().toISOString().slice(0, 10),
-        issuer_name: c?.issuer || 'OneSmarter, Inc.',
+        start_date: startDate,
+        end_date: endDate,
+        issue_date: issueDate,
+        issuer_name: c?.issuer || '',
         completion_description: descriptionOverride.trim() || undefined,
       });
       setPreviewUrl(res.preview_url);
@@ -275,14 +296,7 @@ export default function SingleCertificate() {
     }
     setStudentNameError(null);
 
-    const courseDefaults = courses.find((course) => course.id === Number(selectedCourseId));
-    const resolvedStartDate = startDate || courseDefaults?.start_date || '';
-    const resolvedEndDate = endDate || courseDefaults?.end_date || '';
-    if (!resolvedStartDate || !resolvedEndDate) {
-      setError('Course start and end dates are missing. Set them on the selected course or enter them here.');
-      return;
-    }
-    if (resolvedEndDate < resolvedStartDate) {
+    if (startDate && endDate && endDate < startDate) {
       setDateError('End date cannot be earlier than start date.');
       setError('End date cannot be earlier than start date.');
       return;
@@ -299,9 +313,9 @@ export default function SingleCertificate() {
         user_id: selectedStudent ? selectedStudent.id : undefined,
         student_email: emailToUse,
         student_name: trimmedName,
-        start_date: resolvedStartDate,
-        end_date: resolvedEndDate,
-        issue_date: issueDate || new Date().toISOString().slice(0, 10),
+        start_date: startDate,
+        end_date: endDate,
+        issue_date: issueDate,
         completion_description: descriptionOverride.trim() || undefined,
       });
       setCreatedCert(cert);
@@ -325,7 +339,7 @@ export default function SingleCertificate() {
   const selectedTemplate = templates.find((t) => t.id === Number(selectedTemplateId));
 
   return (
-    <div className="space-y-8 max-w-4xl mx-auto">
+    <div className="space-y-5 max-w-5xl mx-auto">
       {/* Header Banner */}
       <div className="bg-gradient-to-r from-slate-900 via-indigo-950 to-slate-900 rounded-2xl p-6 sm:p-8 text-white shadow-md border border-slate-800 flex flex-col md:flex-row md:items-center justify-between gap-6">
         <div>
@@ -435,8 +449,8 @@ export default function SingleCertificate() {
 
       {/* Form Card */}
       {!createdCert && (
-        <form onSubmit={handleGenerate} className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl p-6 sm:p-8 shadow-sm space-y-6">
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-6 text-xs">
+        <form onSubmit={handleGenerate} className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl p-5 sm:p-6 shadow-sm space-y-4">
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs">
             {/* 1. Course Selection */}
             <div className="space-y-2">
               <label className="block font-semibold text-slate-700 dark:text-slate-300">
@@ -459,6 +473,17 @@ export default function SingleCertificate() {
                   Certificate Title: {selectedCourse.title}
                 </p>
               )}
+              <div className="flex flex-wrap gap-2">
+                <button type="button" onClick={() => { setEditingCourseId(null); setCourseForm({ name: '', title: '', issuer: '', start_date: '', end_date: '' }); setCourseFormOpen(v => !v); }} className="inline-flex items-center gap-1 rounded-lg border border-teal-200 px-2.5 py-1.5 text-[11px] font-semibold text-teal-700 dark:border-teal-800 dark:text-teal-300"><Plus className="h-3 w-3"/>New course</button>
+                {selectedCourse && <>
+                  <button type="button" onClick={() => { setEditingCourseId(selectedCourse.id); setCourseForm({ name: selectedCourse.name, title: selectedCourse.title, issuer: selectedCourse.issuer, start_date: selectedCourse.start_date, end_date: selectedCourse.end_date }); setCourseFormOpen(true); }} className="inline-flex items-center gap-1 rounded-lg border border-slate-200 px-2.5 py-1.5 text-[11px] font-semibold text-slate-700 dark:border-slate-700 dark:text-slate-300"><Pencil className="h-3 w-3"/>Edit</button>
+                  <button type="button" onClick={() => void removeCourse(selectedCourse)} className="inline-flex items-center gap-1 rounded-lg border border-rose-200 px-2.5 py-1.5 text-[11px] font-semibold text-rose-700 dark:border-rose-900 dark:text-rose-300"><Trash2 className="h-3 w-3"/>Delete</button>
+                </>}
+              </div>
+              {courseFormOpen && <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 rounded-xl border border-slate-200 p-3 dark:border-slate-700">
+                {(['name', 'title', 'issuer', 'start_date', 'end_date'] as const).map(key => <label key={key} className="text-[11px] font-medium capitalize text-slate-600 dark:text-slate-300">{key.replace('_', ' ')}{key === 'name' || key.endsWith('date') ? ' *' : ''}<input required={key === 'name' || key.endsWith('date')} type={key.endsWith('date') ? 'date' : 'text'} value={courseForm[key]} onChange={e => setCourseForm(v => ({ ...v, [key]: e.target.value }))} className="mt-1 w-full rounded-lg border border-slate-300 bg-white px-2.5 py-2 text-slate-900 dark:border-slate-700 dark:bg-slate-800 dark:text-white" /></label>)}
+                <div className="flex items-end gap-2"><button className="rounded-lg bg-teal-600 px-3 py-2 font-semibold text-white" type="button" onClick={() => void saveCourse()}>Save course</button><button type="button" onClick={() => setCourseFormOpen(false)} className="rounded-lg border px-3 py-2 dark:border-slate-700">Cancel</button></div>
+              </div>}
             </div>
 
             {/* 2. Certificate Template: Select Existing OR Upload New */}
@@ -527,6 +552,7 @@ export default function SingleCertificate() {
                       </div>
                     </div>
                   )}
+                  {selectedTemplate && <button type="button" onClick={() => setEditingTemplate(selectedTemplate)} className="rounded-lg border border-teal-200 px-3 py-1.5 text-[11px] font-semibold text-teal-700 dark:border-teal-800 dark:text-teal-300">Edit saved template layout</button>}
                 </div>
               ) : (
                 <div className="space-y-3 p-3 bg-slate-50 dark:bg-slate-800/60 rounded-xl border border-dashed border-teal-500/50">
@@ -599,7 +625,7 @@ export default function SingleCertificate() {
             </div>
 
             {/* 3. Search and select registered student OR enter direct email */}
-            <div className="space-y-3 relative md:col-span-2">
+            <div className="space-y-2 relative md:col-span-2">
               <label className="block font-semibold text-slate-700 dark:text-slate-300">
                 3. Recipient Student (Search Registered User OR Enter Email Directly) *
               </label>
@@ -611,7 +637,7 @@ export default function SingleCertificate() {
                   placeholder="Search registered user by name or email (optional)..."
                   value={studentSearch}
                   onChange={(e) => handleSearchStudents(e.target.value)}
-                  className="w-full pl-9 pr-4 py-2 bg-slate-50 dark:bg-slate-800 border border-slate-300 dark:border-slate-700 rounded-xl text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-teal-500 text-xs"
+                  className="w-full md:w-[calc((100%-1rem)/2)] pl-9 pr-4 py-2 bg-slate-50 dark:bg-slate-800 border border-slate-300 dark:border-slate-700 rounded-xl text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-teal-500 text-xs"
                 />
                 <Search className="w-4 h-4 text-slate-400 absolute left-3 top-2.5" />
                 {searchingStudents && (
@@ -678,7 +704,7 @@ export default function SingleCertificate() {
                     setRecipientEmail(e.target.value);
                     setRecipientEmailError(null);
                   }}
-                  className={`w-full px-3.5 py-2.5 bg-slate-50 dark:bg-slate-800 border rounded-xl text-slate-900 dark:text-white focus:outline-none focus:ring-2 ${
+                  className={`w-full md:w-[calc((100%-1rem)/2)] px-3.5 py-2.5 bg-slate-50 dark:bg-slate-800 border rounded-xl text-slate-900 dark:text-white focus:outline-none focus:ring-2 ${
                     recipientEmailError
                       ? 'border-rose-400 focus:ring-rose-500'
                       : 'border-slate-300 dark:border-slate-700 focus:ring-teal-500'
@@ -696,7 +722,7 @@ export default function SingleCertificate() {
             </div>
 
             {/* 4. Student Name as it will appear */}
-            <div className="space-y-2 md:col-span-2">
+            <div className="space-y-2">
               <div className="flex items-center justify-between">
                 <label className="block font-semibold text-slate-700 dark:text-slate-300">
                   4. Recipient Name (As printed on certificate) *
@@ -720,7 +746,7 @@ export default function SingleCertificate() {
                     setStudentNameError(null);
                   }
                 }}
-                className={`w-full px-3.5 py-2.5 bg-slate-50 dark:bg-slate-800 border rounded-xl text-slate-900 dark:text-white focus:outline-none focus:ring-2 ${
+                className={`w-full max-w-xl px-3.5 py-2.5 bg-slate-50 dark:bg-slate-800 border rounded-xl text-slate-900 dark:text-white focus:outline-none focus:ring-2 ${
                   studentNameError
                     ? 'border-rose-400 focus:ring-rose-500'
                     : 'border-slate-300 dark:border-slate-700 focus:ring-teal-500'
@@ -734,7 +760,8 @@ export default function SingleCertificate() {
             </div>
 
             {/* 5. Dates */}
-            <div className="space-y-2">
+            <div className="md:col-span-2 grid grid-cols-1 lg:grid-cols-3 gap-4">
+            <div className="space-y-2 min-w-0">
               <label className="block font-semibold text-slate-700 dark:text-slate-300">
                 5. Course Start Date (optional override; defaults to selected course)
               </label>
@@ -742,11 +769,11 @@ export default function SingleCertificate() {
                 type="date"
                 value={startDate}
                 onChange={(e) => handleStartDateChange(e.target.value)}
-                className="w-full px-3.5 py-2.5 bg-slate-50 dark:bg-slate-800 border border-slate-300 dark:border-slate-700 rounded-xl text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-teal-500"
+                className="w-full min-w-0 px-3.5 py-2.5 bg-slate-50 dark:bg-slate-800 border border-slate-300 dark:border-slate-700 rounded-xl text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-teal-500"
               />
             </div>
 
-            <div className="space-y-2">
+            <div className="space-y-2 min-w-0">
               <label className="block font-semibold text-slate-700 dark:text-slate-300">
                 6. Course End Date (optional override; defaults to selected course)
               </label>
@@ -755,7 +782,7 @@ export default function SingleCertificate() {
                 min={startDate || undefined}
                 value={endDate}
                 onChange={(e) => handleEndDateChange(e.target.value)}
-                className={`w-full px-3.5 py-2.5 bg-slate-50 dark:bg-slate-800 border rounded-xl text-slate-900 dark:text-white focus:outline-none focus:ring-2 ${
+                className={`w-full min-w-0 px-3.5 py-2.5 bg-slate-50 dark:bg-slate-800 border rounded-xl text-slate-900 dark:text-white focus:outline-none focus:ring-2 ${
                   dateError
                     ? 'border-rose-400 focus:ring-rose-500'
                     : 'border-slate-300 dark:border-slate-700 focus:ring-teal-500'
@@ -768,7 +795,7 @@ export default function SingleCertificate() {
               )}
             </div>
 
-            <div className="space-y-2">
+            <div className="space-y-2 min-w-0">
               <label className="block font-semibold text-slate-700 dark:text-slate-300">
                 7. Certificate Issue Date (optional; defaults to today)
               </label>
@@ -776,8 +803,9 @@ export default function SingleCertificate() {
                 type="date"
                 value={issueDate}
                 onChange={(e) => setIssueDate(e.target.value)}
-                className="w-full px-3.5 py-2.5 bg-slate-50 dark:bg-slate-800 border border-slate-300 dark:border-slate-700 rounded-xl text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-teal-500"
+                className="w-full min-w-0 px-3.5 py-2.5 bg-slate-50 dark:bg-slate-800 border border-slate-300 dark:border-slate-700 rounded-xl text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-teal-500"
               />
+            </div>
             </div>
 
             {/* 8. Optional Completion Description */}
@@ -794,11 +822,8 @@ export default function SingleCertificate() {
                 }
                 value={descriptionOverride}
                 onChange={(e) => setDescriptionOverride(e.target.value)}
-                className="w-full px-3.5 py-2 bg-slate-50 dark:bg-slate-800 border border-slate-300 dark:border-slate-700 rounded-xl text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-teal-500 text-xs"
+                className="w-full max-w-3xl px-3.5 py-2 bg-slate-50 dark:bg-slate-800 border border-slate-300 dark:border-slate-700 rounded-xl text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-teal-500 text-xs"
               />
-              <p className="text-[11px] text-slate-500">
-                Supports placeholders: <code className="font-mono text-teal-600 dark:text-teal-400">{'{{student_name}}'}</code>, <code className="font-mono text-teal-600 dark:text-teal-400">{'{{course_name}}'}</code>, <code className="font-mono text-teal-600 dark:text-teal-400">{'{{issue_date}}'}</code>. Leave empty if your template already has a pre-printed description.
-              </p>
             </div>
           </div>
 
@@ -834,6 +859,7 @@ export default function SingleCertificate() {
           </div>
         </form>
       )}
+      {editingTemplate && <TemplateLayoutEditor template={editingTemplate} onClose={() => setEditingTemplate(null)} onSaved={(saved) => { setTemplates(items => items.map(item => item.id === saved.id ? saved : item)); setEditingTemplate(null); }} />}
 
       {/* Preview Modal */}
       {previewUrl && (

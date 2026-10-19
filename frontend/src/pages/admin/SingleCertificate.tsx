@@ -35,7 +35,7 @@ export default function SingleCertificate() {
   // Form inputs
   const [selectedCourseId, setSelectedCourseId] = useState<number | ''>('');
   const [selectedTemplateId, setSelectedTemplateId] = useState<number | ''>('');
-  
+
   // Template selection / upload mode
   const [templateMode, setTemplateMode] = useState<'existing' | 'upload'>('existing');
   const [uploadFile, setUploadFile] = useState<File | null>(null);
@@ -343,15 +343,12 @@ export default function SingleCertificate() {
       {/* Header Banner */}
       <div className="bg-gradient-to-r from-slate-900 via-indigo-950 to-slate-900 rounded-2xl p-6 sm:p-8 text-white shadow-md border border-slate-800 flex flex-col md:flex-row md:items-center justify-between gap-6">
         <div>
-          <span className="text-teal-400 font-semibold text-xs tracking-wider uppercase bg-teal-950/60 border border-teal-800/80 px-2.5 py-1 rounded-full">
-            On-Demand Issuance
-          </span>
           <h2 className="text-2xl font-bold tracking-tight mt-2.5 flex items-center gap-3">
             <Sparkles className="w-7 h-7 text-teal-400" />
             <span>Generate Single Certificate</span>
           </h2>
           <p className="text-slate-300 text-sm mt-1 max-w-xl">
-            Issue a personalized certificate directly for a registered student without uploading a CSV. The certificate is stored in PostgreSQL and sent via email notification.
+            Issue personalized certificates instantly and notify recipients by email—no CSV upload required.
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-3">
@@ -468,16 +465,12 @@ export default function SingleCertificate() {
                   </option>
                 ))}
               </select>
-              {selectedCourse && (
-                <p className="text-[11px] text-slate-500">
-                  Certificate Title: {selectedCourse.title}
-                </p>
-              )}
+
               <div className="flex flex-wrap gap-2">
-                <button type="button" onClick={() => { setEditingCourseId(null); setCourseForm({ name: '', title: '', issuer: '', start_date: '', end_date: '' }); setCourseFormOpen(v => !v); }} className="inline-flex items-center gap-1 rounded-lg border border-teal-200 px-2.5 py-1.5 text-[11px] font-semibold text-teal-700 dark:border-teal-800 dark:text-teal-300"><Plus className="h-3 w-3"/>New course</button>
+                <button type="button" onClick={() => { setEditingCourseId(null); setCourseForm({ name: '', title: '', issuer: '', start_date: '', end_date: '' }); setCourseFormOpen(v => !v); }} className="inline-flex items-center gap-1 rounded-lg border border-teal-200 px-2.5 py-1.5 text-[11px] font-semibold text-teal-700 dark:border-teal-800 dark:text-teal-300"><Plus className="h-3 w-3" />New course</button>
                 {selectedCourse && <>
-                  <button type="button" onClick={() => { setEditingCourseId(selectedCourse.id); setCourseForm({ name: selectedCourse.name, title: selectedCourse.title, issuer: selectedCourse.issuer, start_date: selectedCourse.start_date, end_date: selectedCourse.end_date }); setCourseFormOpen(true); }} className="inline-flex items-center gap-1 rounded-lg border border-slate-200 px-2.5 py-1.5 text-[11px] font-semibold text-slate-700 dark:border-slate-700 dark:text-slate-300"><Pencil className="h-3 w-3"/>Edit</button>
-                  <button type="button" onClick={() => void removeCourse(selectedCourse)} className="inline-flex items-center gap-1 rounded-lg border border-rose-200 px-2.5 py-1.5 text-[11px] font-semibold text-rose-700 dark:border-rose-900 dark:text-rose-300"><Trash2 className="h-3 w-3"/>Delete</button>
+                  <button type="button" onClick={() => { setEditingCourseId(selectedCourse.id); setCourseForm({ name: selectedCourse.name, title: selectedCourse.title, issuer: selectedCourse.issuer, start_date: selectedCourse.start_date, end_date: selectedCourse.end_date }); setCourseFormOpen(true); }} className="inline-flex items-center gap-1 rounded-lg border border-slate-200 px-2.5 py-1.5 text-[11px] font-semibold text-slate-700 dark:border-slate-700 dark:text-slate-300"><Pencil className="h-3 w-3" />Edit</button>
+                  <button type="button" onClick={() => void removeCourse(selectedCourse)} className="inline-flex items-center gap-1 rounded-lg border border-rose-200 px-2.5 py-1.5 text-[11px] font-semibold text-rose-700 dark:border-rose-900 dark:text-rose-300"><Trash2 className="h-3 w-3" />Delete</button>
                 </>}
               </div>
               {courseFormOpen && <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 rounded-xl border border-slate-200 p-3 dark:border-slate-700">
@@ -496,22 +489,20 @@ export default function SingleCertificate() {
                   <button
                     type="button"
                     onClick={() => setTemplateMode('existing')}
-                    className={`px-2.5 py-1 rounded-md transition ${
-                      templateMode === 'existing'
-                        ? 'bg-white dark:bg-slate-700 text-teal-600 dark:text-teal-400 font-semibold shadow-xs'
-                        : 'text-slate-500 hover:text-slate-800 dark:hover:text-slate-200'
-                    }`}
+                    className={`px-2.5 py-1 rounded-md transition ${templateMode === 'existing'
+                      ? 'bg-white dark:bg-slate-700 text-teal-600 dark:text-teal-400 font-semibold shadow-xs'
+                      : 'text-slate-500 hover:text-slate-800 dark:hover:text-slate-200'
+                      }`}
                   >
                     Select Saved
                   </button>
                   <button
                     type="button"
                     onClick={() => setTemplateMode('upload')}
-                    className={`px-2.5 py-1 rounded-md transition flex items-center gap-1 ${
-                      templateMode === 'upload'
-                        ? 'bg-white dark:bg-slate-700 text-teal-600 dark:text-teal-400 font-semibold shadow-xs'
-                        : 'text-slate-500 hover:text-slate-800 dark:hover:text-slate-200'
-                    }`}
+                    className={`px-2.5 py-1 rounded-md transition flex items-center gap-1 ${templateMode === 'upload'
+                      ? 'bg-white dark:bg-slate-700 text-teal-600 dark:text-teal-400 font-semibold shadow-xs'
+                      : 'text-slate-500 hover:text-slate-800 dark:hover:text-slate-200'
+                      }`}
                   >
                     <Upload className="w-3 h-3" />
                     <span>Upload New</span>
@@ -624,188 +615,183 @@ export default function SingleCertificate() {
               )}
             </div>
 
-            {/* 3. Search and select registered student OR enter direct email */}
-            <div className="space-y-2 relative md:col-span-2">
-              <label className="block font-semibold text-slate-700 dark:text-slate-300">
-                3. Recipient Student (Search Registered User OR Enter Email Directly) *
-              </label>
+            {/* Recipient fields */}
+            <div className="md:col-span-2 grid grid-cols-1 lg:grid-cols-3 gap-4 items-start">
+              {/* 3. Search and select registered student OR enter direct email */}
+              <div className="relative grid min-w-0 grid-rows-[4rem_2.5rem] gap-y-2">
+                <label className="block min-w-0 font-semibold text-slate-700 dark:text-slate-300">
+                  3. Recipient Student (Search Registered User OR Enter Email Directly) *
+                </label>
 
-              {/* Autocomplete search bar */}
-              <div className="relative">
-                <input
-                  type="text"
-                  placeholder="Search registered user by name or email (optional)..."
-                  value={studentSearch}
-                  onChange={(e) => handleSearchStudents(e.target.value)}
-                  className="w-full md:w-[calc((100%-1rem)/2)] pl-9 pr-4 py-2 bg-slate-50 dark:bg-slate-800 border border-slate-300 dark:border-slate-700 rounded-xl text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-teal-500 text-xs"
-                />
-                <Search className="w-4 h-4 text-slate-400 absolute left-3 top-2.5" />
-                {searchingStudents && (
-                  <RefreshCw className="w-4 h-4 text-teal-600 animate-spin absolute right-3 top-2.5" />
+                {/* Autocomplete search bar */}
+                <div className="relative">
+                  <input
+                    type="text"
+                    value={studentSearch}
+                    onChange={(e) => handleSearchStudents(e.target.value)}
+                    className="box-border h-10 w-full min-w-0 pl-9 pr-4 bg-slate-50 dark:bg-slate-800 border border-slate-300 dark:border-slate-700 rounded-xl text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-teal-500 text-xs"
+                  />
+                  <Search className="w-4 h-4 text-slate-400 absolute left-3 top-2.5" />
+                  {searchingStudents && (
+                    <RefreshCw className="w-4 h-4 text-teal-600 animate-spin absolute right-3 top-2.5" />
+                  )}
+                </div>
+
+                {/* Autocomplete dropdown */}
+                {searchResults.length > 0 && (
+                  <div className="absolute z-20 top-[7rem] left-0 right-0 bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl shadow-lg max-h-48 overflow-y-auto divide-y divide-slate-100 dark:divide-slate-700">
+                    {searchResults.map((u) => (
+                      <button
+                        key={u.id}
+                        type="button"
+                        onClick={() => handleSelectStudent(u)}
+                        className="w-full px-4 py-2.5 text-left hover:bg-slate-50 dark:hover:bg-slate-700 flex items-center justify-between text-xs"
+                      >
+                        <div>
+                          <p className="font-semibold text-slate-900 dark:text-white">
+                            {u.first_name} {u.last_name} ({u.username})
+                          </p>
+                          <p className="text-slate-500 font-mono text-[11px]">{u.email}</p>
+                        </div>
+                        <span className="px-2 py-0.5 rounded text-[10px] font-semibold bg-teal-100 text-teal-800 dark:bg-teal-900/60 dark:text-teal-300">
+                          Select
+                        </span>
+                      </button>
+                    ))}
+                  </div>
                 )}
+
+                {selectedStudent ? (
+                  <div className="p-3 bg-teal-50 dark:bg-teal-950/40 border border-teal-200 dark:border-teal-800 rounded-xl text-xs flex items-center justify-between">
+                    <div className="flex items-center gap-3">
+                      <UserCheck className="w-5 h-5 text-teal-600 flex-shrink-0" />
+                      <div>
+                        <span className="font-semibold text-teal-900 dark:text-teal-200">
+                          Linked to Registered Account:
+                        </span>{' '}
+                        <span className="text-slate-700 dark:text-slate-300">{selectedStudent.first_name} {selectedStudent.last_name} ({selectedStudent.email})</span>
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={handleClearSelectedStudent}
+                      className="text-xs text-rose-600 hover:text-rose-700 dark:text-rose-400 font-medium underline ml-2"
+                    >
+                      Clear / Enter Unregistered
+                    </button>
+                  </div>
+                ) : null}
+
               </div>
 
-              {/* Autocomplete dropdown */}
-              {searchResults.length > 0 && (
-                <div className="absolute z-20 top-16 left-0 right-0 bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl shadow-lg max-h-48 overflow-y-auto divide-y divide-slate-100 dark:divide-slate-700">
-                  {searchResults.map((u) => (
-                    <button
-                      key={u.id}
-                      type="button"
-                      onClick={() => handleSelectStudent(u)}
-                      className="w-full px-4 py-2.5 text-left hover:bg-slate-50 dark:hover:bg-slate-700 flex items-center justify-between text-xs"
-                    >
-                      <div>
-                        <p className="font-semibold text-slate-900 dark:text-white">
-                          {u.first_name} {u.last_name} ({u.username})
-                        </p>
-                        <p className="text-slate-500 font-mono text-[11px]">{u.email}</p>
-                      </div>
-                      <span className="px-2 py-0.5 rounded text-[10px] font-semibold bg-teal-100 text-teal-800 dark:bg-teal-900/60 dark:text-teal-300">
-                        Select
-                      </span>
-                    </button>
-                  ))}
-                </div>
-              )}
-
-              {selectedStudent ? (
-                <div className="p-3 bg-teal-50 dark:bg-teal-950/40 border border-teal-200 dark:border-teal-800 rounded-xl text-xs flex items-center justify-between">
-                  <div className="flex items-center gap-3">
-                    <UserCheck className="w-5 h-5 text-teal-600 flex-shrink-0" />
-                    <div>
-                      <span className="font-semibold text-teal-900 dark:text-teal-200">
-                        Linked to Registered Account:
-                      </span>{' '}
-                      <span className="text-slate-700 dark:text-slate-300">{selectedStudent.first_name} {selectedStudent.last_name} ({selectedStudent.email})</span>
-                    </div>
-                  </div>
-                  <button
-                    type="button"
-                    onClick={handleClearSelectedStudent}
-                    className="text-xs text-rose-600 hover:text-rose-700 dark:text-rose-400 font-medium underline ml-2"
-                  >
-                    Clear / Enter Unregistered
-                  </button>
-                </div>
-              ) : null}
-
               {/* Recipient Email Input */}
-              <div className="space-y-1 pt-1">
-                <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300">
-                  Recipient Email Address *
+              <div className="grid min-w-0 grid-rows-[4rem_2.5rem] gap-y-2">
+                <label className="block min-w-0 text-xs font-semibold text-slate-700 dark:text-slate-300">
+                  Recipient Email Address(Enter the Email Unregistered User)*
                 </label>
                 <input
                   type="email"
                   required
-                  placeholder="e.g. kartik@example.com"
                   value={recipientEmail}
                   onChange={(e) => {
                     setRecipientEmail(e.target.value);
                     setRecipientEmailError(null);
                   }}
-                  className={`w-full md:w-[calc((100%-1rem)/2)] px-3.5 py-2.5 bg-slate-50 dark:bg-slate-800 border rounded-xl text-slate-900 dark:text-white focus:outline-none focus:ring-2 ${
-                    recipientEmailError
-                      ? 'border-rose-400 focus:ring-rose-500'
-                      : 'border-slate-300 dark:border-slate-700 focus:ring-teal-500'
-                  }`}
+                  className={`box-border h-10 w-full min-w-0 px-3.5 bg-slate-50 dark:bg-slate-800 border rounded-xl text-slate-900 dark:text-white focus:outline-none focus:ring-2 ${recipientEmailError
+                    ? 'border-rose-400 focus:ring-rose-500'
+                    : 'border-slate-300 dark:border-slate-700 focus:ring-teal-500'
+                    }`}
                 />
                 {recipientEmailError && (
                   <p className="text-xs text-rose-600 dark:text-rose-400 font-medium mt-1">
                     {recipientEmailError}
                   </p>
                 )}
-                <p className="text-[11px] text-slate-500 dark:text-slate-400">
-                  Recipients without an account will receive their certificate PDF via email and can verify it publicly. When they register with this email later, the certificate will automatically link to their account.
-                </p>
-              </div>
-            </div>
 
-            {/* 4. Student Name as it will appear */}
-            <div className="space-y-2">
-              <div className="flex items-center justify-between">
-                <label className="block font-semibold text-slate-700 dark:text-slate-300">
-                  4. Recipient Name (As printed on certificate) *
-                </label>
-                <span className={`text-[11px] font-medium ${studentDisplayName.trim().length >= 30 ? 'text-rose-500 font-bold' : 'text-slate-400'}`}>
-                  {studentDisplayName.trim().length} / 29 characters max
-                </span>
               </div>
-              <input
-                type="text"
-                required
-                placeholder="e.g. Kartik Hande (1–29 characters)"
-                value={studentDisplayName}
-                onChange={(e) => {
-                  const val = e.target.value;
-                  setStudentDisplayName(val);
-                  const trimmed = val.trim();
-                  if (trimmed.length >= 30) {
-                    setStudentNameError(`Student name must be 1–29 characters (currently ${trimmed.length} characters).`);
-                  } else {
-                    setStudentNameError(null);
-                  }
-                }}
-                className={`w-full max-w-xl px-3.5 py-2.5 bg-slate-50 dark:bg-slate-800 border rounded-xl text-slate-900 dark:text-white focus:outline-none focus:ring-2 ${
-                  studentNameError
+              {/* 4. Student Name as it will appear */}
+              <div className="grid min-w-0 grid-rows-[4rem_2.5rem] gap-y-2">
+                <div className="flex min-w-0 items-start justify-between gap-2">
+                  <label className="block min-w-0 flex-1 font-semibold text-slate-700 dark:text-slate-300">
+                    4. Recipient Name (As printed on certificate) *
+                  </label>
+                  <span className={`shrink-0 whitespace-nowrap text-[11px] font-medium ${studentDisplayName.trim().length >= 30 ? 'text-rose-500 font-bold' : 'text-slate-400'}`}>
+                    {studentDisplayName.trim().length} / 29 characters max
+                  </span>
+                </div>
+                <input
+                  type="text"
+                  required
+                  value={studentDisplayName}
+                  onChange={(e) => {
+                    const val = e.target.value;
+                    setStudentDisplayName(val);
+                    const trimmed = val.trim();
+                    if (trimmed.length >= 30) {
+                      setStudentNameError(`Student name must be 1–29 characters (currently ${trimmed.length} characters).`);
+                    } else {
+                      setStudentNameError(null);
+                    }
+                  }}
+                  className={`box-border h-10 w-full min-w-0 px-3.5 bg-slate-50 dark:bg-slate-800 border rounded-xl text-slate-900 dark:text-white focus:outline-none focus:ring-2 ${studentNameError
                     ? 'border-rose-400 focus:ring-rose-500'
                     : 'border-slate-300 dark:border-slate-700 focus:ring-teal-500'
-                }`}
-              />
-              {studentNameError && (
-                <p className="text-xs text-rose-600 dark:text-rose-400 font-medium mt-1">
-                  {studentNameError}
-                </p>
-              )}
+                    }`}
+                />
+                {studentNameError && (
+                  <p className="text-xs text-rose-600 dark:text-rose-400 font-medium mt-1">
+                    {studentNameError}
+                  </p>
+                )}
+              </div>
             </div>
 
             {/* 5. Dates */}
             <div className="md:col-span-2 grid grid-cols-1 lg:grid-cols-3 gap-4">
-            <div className="space-y-2 min-w-0">
-              <label className="block font-semibold text-slate-700 dark:text-slate-300">
-                5. Course Start Date (optional override; defaults to selected course)
-              </label>
-              <input
-                type="date"
-                value={startDate}
-                onChange={(e) => handleStartDateChange(e.target.value)}
-                className="w-full min-w-0 px-3.5 py-2.5 bg-slate-50 dark:bg-slate-800 border border-slate-300 dark:border-slate-700 rounded-xl text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-teal-500"
-              />
-            </div>
+              <div className="space-y-2 min-w-0">
+                <label className="block font-semibold text-slate-700 dark:text-slate-300">
+                  5. Course Start Date(optional)
+                </label>
+                <input
+                  type="date"
+                  value={startDate}
+                  onChange={(e) => handleStartDateChange(e.target.value)}
+                  className="w-full min-w-0 px-3.5 py-2.5 bg-slate-50 dark:bg-slate-800 border border-slate-300 dark:border-slate-700 rounded-xl text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-teal-500"
+                />
+              </div>
 
-            <div className="space-y-2 min-w-0">
-              <label className="block font-semibold text-slate-700 dark:text-slate-300">
-                6. Course End Date (optional override; defaults to selected course)
-              </label>
-              <input
-                type="date"
-                min={startDate || undefined}
-                value={endDate}
-                onChange={(e) => handleEndDateChange(e.target.value)}
-                className={`w-full min-w-0 px-3.5 py-2.5 bg-slate-50 dark:bg-slate-800 border rounded-xl text-slate-900 dark:text-white focus:outline-none focus:ring-2 ${
-                  dateError
+              <div className="space-y-2 min-w-0">
+                <label className="block font-semibold text-slate-700 dark:text-slate-300">
+                  6. Course End Date (optional)
+                </label>
+                <input
+                  type="date"
+                  min={startDate || undefined}
+                  value={endDate}
+                  onChange={(e) => handleEndDateChange(e.target.value)}
+                  className={`w-full min-w-0 px-3.5 py-2.5 bg-slate-50 dark:bg-slate-800 border rounded-xl text-slate-900 dark:text-white focus:outline-none focus:ring-2 ${dateError
                     ? 'border-rose-400 focus:ring-rose-500'
                     : 'border-slate-300 dark:border-slate-700 focus:ring-teal-500'
-                }`}
-              />
-              {dateError && (
-                <p className="text-xs text-rose-600 dark:text-rose-400 font-medium mt-1">
-                  {dateError}
-                </p>
-              )}
-            </div>
+                    }`}
+                />
+                {dateError && (
+                  <p className="text-xs text-rose-600 dark:text-rose-400 font-medium mt-1">
+                    {dateError}
+                  </p>
+                )}
+              </div>
 
-            <div className="space-y-2 min-w-0">
-              <label className="block font-semibold text-slate-700 dark:text-slate-300">
-                7. Certificate Issue Date (optional; defaults to today)
-              </label>
-              <input
-                type="date"
-                value={issueDate}
-                onChange={(e) => setIssueDate(e.target.value)}
-                className="w-full min-w-0 px-3.5 py-2.5 bg-slate-50 dark:bg-slate-800 border border-slate-300 dark:border-slate-700 rounded-xl text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-teal-500"
-              />
-            </div>
+              <div className="space-y-2 min-w-0">
+                <label className="block font-semibold text-slate-700 dark:text-slate-300">
+                  7. Certificate Issue Date (optional)
+                </label>
+                <input
+                  type="date"
+                  value={issueDate}
+                  onChange={(e) => setIssueDate(e.target.value)}
+                  className="w-full min-w-0 px-3.5 py-2.5 bg-slate-50 dark:bg-slate-800 border border-slate-300 dark:border-slate-700 rounded-xl text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-teal-500"
+                />
+              </div>
             </div>
 
             {/* 8. Optional Completion Description */}

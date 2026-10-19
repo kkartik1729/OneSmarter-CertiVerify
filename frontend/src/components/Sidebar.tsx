@@ -1,4 +1,4 @@
-import type { ComponentType } from 'react';
+import { useEffect, type ComponentType } from 'react';
 import { NavLink, useNavigate } from 'react-router-dom';
 import {
   LayoutDashboard,
@@ -60,9 +60,25 @@ export default function Sidebar({
 }: SidebarProps) {
   const { user, logout } = useAuth();
   const navigate = useNavigate();
-  const isCollapsed = collapsed && !hoverExpanded;
+  const isCollapsed = !mobileOpen && collapsed && !hoverExpanded;
   const expandOnHover = () => { if (collapsed) onHoverExpandedChange?.(true); };
   const collapseAfterHover = () => onHoverExpandedChange?.(false);
+
+  useEffect(() => {
+    if (!mobileOpen) return;
+
+    const previousOverflow = document.body.style.overflow;
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') onCloseMobile();
+    };
+
+    document.body.style.overflow = 'hidden';
+    window.addEventListener('keydown', handleKeyDown);
+    return () => {
+      document.body.style.overflow = previousOverflow;
+      window.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [mobileOpen, onCloseMobile]);
 
   const handleLogout = () => {
     logout();
@@ -80,7 +96,9 @@ export default function Sidebar({
     <>
       {/* Mobile backdrop */}
       {mobileOpen && (
-        <div
+        <button
+          type="button"
+          aria-label="Close sidebar"
           className="fixed inset-0 z-40 bg-slate-900/60 backdrop-blur-sm lg:hidden"
           onClick={onCloseMobile}
         />
@@ -94,8 +112,9 @@ export default function Sidebar({
         onBlurCapture={(event) => {
           if (!event.currentTarget.contains(event.relatedTarget as Node | null)) collapseAfterHover();
         }}
-        className={`fixed top-0 bottom-0 left-0 z-50 flex flex-col bg-[#0b1329] text-slate-300 border-r border-[#1e293b] transition-all duration-300 ease-in-out ${
-          isCollapsed ? 'w-20' : 'w-64'
+        aria-label="Dashboard navigation"
+        className={`fixed inset-y-0 left-0 z-50 flex w-64 flex-col bg-[#0b1329] text-slate-300 border-r border-[#1e293b] transition-all duration-300 ease-in-out ${
+          isCollapsed ? 'lg:w-20' : 'lg:w-64'
         } ${
           mobileOpen ? 'translate-x-0' : '-translate-x-full lg:translate-x-0'
         }`}
@@ -160,7 +179,7 @@ export default function Sidebar({
         </div>
 
         {/* User Card & Logout */}
-        <div className="p-3 border-t border-[#1e293b] space-y-2">
+        <div className="shrink-0 p-3 border-t border-[#1e293b] space-y-2 pb-[calc(0.75rem+env(safe-area-inset-bottom))]">
           {!isCollapsed && user && (
             <div className="px-3 py-2 rounded-xl bg-slate-900/60 border border-slate-800 flex items-center gap-3">
               <div className="w-8 h-8 rounded-full bg-teal-600/30 text-teal-300 border border-teal-500/30 flex items-center justify-center font-bold text-xs uppercase flex-shrink-0">

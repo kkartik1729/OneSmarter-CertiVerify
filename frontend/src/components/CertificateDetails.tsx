@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState } from 'react';
 import {
   X,
   Award,
@@ -20,25 +20,19 @@ import { getCredentialUrlInfo } from '../lib/credentialUrl';
 interface CertificateDetailsProps {
   cert: Cert | null;
   onClose: () => void;
-  initialLinkedInOpen?: boolean;
+  userDashboard?: boolean;
 }
 
 export default function CertificateDetails({
   cert,
   onClose,
-  initialLinkedInOpen = false,
+  userDashboard = false,
 }: CertificateDetailsProps) {
   const [imgFailed, setImgFailed] = useState(false);
   const [copied, setCopied] = useState(false);
-  const [showLinkedIn, setShowLinkedIn] = useState(initialLinkedInOpen);
+  const [showLinkedIn, setShowLinkedIn] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
   const [expandedImage, setExpandedImage] = useState(false);
-
-  useEffect(() => {
-    if (initialLinkedInOpen) {
-      setShowLinkedIn(true);
-    }
-  }, [initialLinkedInOpen]);
 
   if (!cert) return null;
 
@@ -202,7 +196,7 @@ export default function CertificateDetails({
         )}
 
         {/* SHA and verification codes */}
-        {(cert.sha || cert.code) && (
+        {!userDashboard && (cert.sha || cert.code) && (
           <div className="p-3.5 rounded-xl bg-slate-100/70 dark:bg-slate-800/80 border border-slate-200 dark:border-slate-700 space-y-2 text-xs">
             {cert.sha && (
               <div>
@@ -228,7 +222,7 @@ export default function CertificateDetails({
         )}
 
         {/* Document link if uploaded or stored in DB */}
-        {hasPdf ? (
+        {!userDashboard && (hasPdf ? (
           <div className="flex items-center justify-between p-3 rounded-xl bg-teal-50 dark:bg-teal-950/40 border border-teal-200 dark:border-teal-800 text-xs">
             <div className="flex items-center gap-2 text-teal-800 dark:text-teal-300 font-medium">
               <FileText className="w-4 h-4 text-teal-600" />
@@ -258,7 +252,7 @@ export default function CertificateDetails({
               <ExternalLink className="w-3 h-3" />
             </button>
           </div>
-        ) : null}
+        ) : null)}
         {actionError && <p role="alert" className="text-xs text-rose-700 dark:text-rose-300">{actionError}</p>}
         {expandedImage && (
           <div className="fixed inset-0 z-[60] flex items-center justify-center bg-slate-950/90 p-4" role="dialog" aria-modal="true" aria-label="Certificate image preview" onClick={() => setExpandedImage(false)}>
@@ -268,7 +262,7 @@ export default function CertificateDetails({
         )}
 
         {/* ── Credential URL / LinkedIn Actions ── */}
-        <div className="space-y-3">
+        {!userDashboard && <div className="space-y-3">
           {/* Credential URL display or Configuration Warning */}
           {isPublic && credentialUrl ? (
             <div className="space-y-1.5">
@@ -293,12 +287,6 @@ export default function CertificateDetails({
               <div className="flex items-start gap-2.5">
                 <AlertTriangle className="w-4 h-4 text-amber-600 dark:text-amber-400 flex-shrink-0 mt-0.5" />
                 <div className="space-y-1.5">
-                  <p className="font-semibold text-amber-900 dark:text-amber-200 text-xs">
-                    Public HTTPS Domain Required for LinkedIn
-                  </p>
-                  <p className="text-amber-800 dark:text-amber-300/90 leading-relaxed text-[11px]">
-                    LinkedIn requires a publicly accessible HTTPS website domain. Development addresses (localhost) cannot be used for LinkedIn certification.
-                  </p>
                   {devFallbackUrl && (
                     <div className="pt-1 text-[11px] text-slate-600 dark:text-slate-400">
                       <span className="text-slate-500 block mb-0.5 font-medium">Local development link (browser only):</span>
@@ -327,13 +315,12 @@ export default function CertificateDetails({
                   ? 'Copy Credential URL'
                   : 'Copying disabled: LinkedIn requires a public HTTPS URL. Localhost cannot be used for LinkedIn.'
               }
-              className={`inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold rounded-xl border transition ${
-                !isPublic
+              className={`inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold rounded-xl border transition ${!isPublic
                   ? 'opacity-60 cursor-not-allowed bg-slate-100 dark:bg-slate-800 border-slate-200 dark:border-slate-700 text-slate-400 dark:text-slate-500'
                   : copied
-                  ? 'bg-teal-50 border-teal-200 text-teal-700 dark:bg-teal-950/40 dark:border-teal-800 dark:text-teal-300'
-                  : 'bg-white dark:bg-slate-800 border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-700'
-              }`}
+                    ? 'bg-teal-50 border-teal-200 text-teal-700 dark:bg-teal-950/40 dark:border-teal-800 dark:text-teal-300'
+                    : 'bg-white dark:bg-slate-800 border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-700'
+                }`}
             >
               {copied ? (
                 <CheckCheck className="w-3.5 h-3.5" />
@@ -344,8 +331,8 @@ export default function CertificateDetails({
                 {copied
                   ? 'Copied!'
                   : isPublic
-                  ? 'Copy Credential URL'
-                  : 'Copy Credential URL (HTTPS Required)'}
+                    ? 'Copy Credential URL'
+                    : 'Copy Credential URL (HTTPS Required)'}
               </span>
             </button>
 
@@ -356,7 +343,7 @@ export default function CertificateDetails({
               className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold rounded-xl border bg-[#0077B5] hover:bg-[#005f94] border-[#0077B5] text-white transition"
             >
               {/* LinkedIn SVG icon */}
-              <svg viewBox="0 0 24 24" className="w-3.5 h-3.5 fill-current" aria-hidden="true"><path d="M20.447 20.452h-3.554v-5.569c0-1.328-.027-3.037-1.852-3.037-1.853 0-2.136 1.445-2.136 2.939v5.667H9.351V9h3.414v1.561h.046c.477-.9 1.637-1.85 3.37-1.85 3.601 0 4.267 2.37 4.267 5.455v6.286zM5.337 7.433a2.062 2.062 0 0 1-2.063-2.065 2.064 2.064 0 1 1 2.063 2.065zm1.782 13.019H3.555V9h3.564v11.452zM22.225 0H1.771C.792 0 0 .774 0 1.729v20.542C0 23.227.792 24 1.771 24h20.451C23.2 24 24 23.227 24 22.271V1.729C24 .774 23.2 0 22.222 0h.003z"/></svg>
+              <svg viewBox="0 0 24 24" className="w-3.5 h-3.5 fill-current" aria-hidden="true"><path d="M20.447 20.452h-3.554v-5.569c0-1.328-.027-3.037-1.852-3.037-1.853 0-2.136 1.445-2.136 2.939v5.667H9.351V9h3.414v1.561h.046c.477-.9 1.637-1.85 3.37-1.85 3.601 0 4.267 2.37 4.267 5.455v6.286zM5.337 7.433a2.062 2.062 0 0 1-2.063-2.065 2.064 2.064 0 1 1 2.063 2.065zm1.782 13.019H3.555V9h3.564v11.452zM22.225 0H1.771C.792 0 0 .774 0 1.729v20.542C0 23.227.792 24 1.771 24h20.451C23.2 24 24 23.227 24 22.271V1.729C24 .774 23.2 0 22.222 0h.003z" /></svg>
               <span>{showLinkedIn ? 'Hide LinkedIn Details' : 'Add to LinkedIn'}</span>
             </button>
           </div>
@@ -365,7 +352,7 @@ export default function CertificateDetails({
           {showLinkedIn && (
             <div className="border border-[#0077B5]/30 bg-blue-50/30 dark:bg-blue-950/20 rounded-xl p-4 space-y-4 text-xs">
               <div className="flex items-center gap-2 text-[#0077B5] dark:text-blue-400 font-semibold">
-                <svg viewBox="0 0 24 24" className="w-4 h-4 fill-current flex-shrink-0" aria-hidden="true"><path d="M20.447 20.452h-3.554v-5.569c0-1.328-.027-3.037-1.852-3.037-1.853 0-2.136 1.445-2.136 2.939v5.667H9.351V9h3.414v1.561h.046c.477-.9 1.637-1.85 3.37-1.85 3.601 0 4.267 2.37 4.267 5.455v6.286zM5.337 7.433a2.062 2.062 0 0 1-2.063-2.065 2.064 2.064 0 1 1 2.063 2.065zm1.782 13.019H3.555V9h3.564v11.452zM22.225 0H1.771C.792 0 0 .774 0 1.729v20.542C0 23.227.792 24 1.771 24h20.451C23.2 24 24 23.227 24 22.271V1.729C24 .774 23.2 0 22.222 0h.003z"/></svg>
+                <svg viewBox="0 0 24 24" className="w-4 h-4 fill-current flex-shrink-0" aria-hidden="true"><path d="M20.447 20.452h-3.554v-5.569c0-1.328-.027-3.037-1.852-3.037-1.853 0-2.136 1.445-2.136 2.939v5.667H9.351V9h3.414v1.561h.046c.477-.9 1.637-1.85 3.37-1.85 3.601 0 4.267 2.37 4.267 5.455v6.286zM5.337 7.433a2.062 2.062 0 0 1-2.063-2.065 2.064 2.064 0 1 1 2.063 2.065zm1.782 13.019H3.555V9h3.564v11.452zM22.225 0H1.771C.792 0 0 .774 0 1.729v20.542C0 23.227.792 24 1.771 24h20.451C23.2 24 24 23.227 24 22.271V1.729C24 .774 23.2 0 22.222 0h.003z" /></svg>
                 <span>LinkedIn Licenses &amp; Certifications — Field Values</span>
               </div>
 
@@ -431,7 +418,7 @@ export default function CertificateDetails({
               </div>
             </div>
           )}
-        </div>
+        </div>}
 
         <div className="flex justify-end pt-2">
           <button

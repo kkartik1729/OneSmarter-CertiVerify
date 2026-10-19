@@ -39,9 +39,6 @@ export default function VerifyCertificate() {
         <h2 className="text-xl font-bold text-slate-900 dark:text-white">
           Verify Certificate Authenticity
         </h2>
-        <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">
-          Query the PostgreSQL repository to validate certificate authenticity in real time.
-        </p>
       </div>
 
       {/* Verification Query Form */}
@@ -78,9 +75,6 @@ export default function VerifyCertificate() {
             </p>
           )}
 
-          <p className="text-[11px] text-slate-400 pt-1">
-            Tip: Verification is case-insensitive. Every search query is recorded to your persistent verification audit history.
-          </p>
         </form>
       </div>
 

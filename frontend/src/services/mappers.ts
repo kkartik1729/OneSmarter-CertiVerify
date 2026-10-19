@@ -37,10 +37,8 @@ export function mapUser(x: unknown): User {
   };
 }
 
-const STATUSES: CertStatus[] = ['PENDING', 'VERIFIED', 'REJECTED'];
 const statusOf = (v: unknown): CertStatus => {
-  const t = s(v).toUpperCase() as CertStatus;
-  return STATUSES.includes(t) ? t : 'PENDING';
+  return s(v).trim().toUpperCase() || 'PENDING';
 };
 
 /** One certificate from /certificates/. */

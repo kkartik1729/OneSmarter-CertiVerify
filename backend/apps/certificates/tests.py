@@ -101,6 +101,8 @@ class CertificateAPITests(TestCase):
             response.data["message"],
             "This certificate has been verified against the OneSmarter-CertiVerify registry.",
         )
+        self.assertEqual(response["Cache-Control"], "no-store, no-cache, must-revalidate, max-age=0")
+        self.assertIsNone(response.data["preview_url"])
 
     def test_verification_is_case_insensitive(self):
         response = self.client.get(
@@ -144,6 +146,32 @@ class CertificateAPITests(TestCase):
             response.data["verification_result"],
             "REJECTED",
         )
+        self.assertNotIn("recipient_name", response.data)
+        self.assertNotIn("title", response.data)
+
+    def test_unrecognized_status_is_not_verified_or_disclosed(self):
+        self.certificate.status = "REVOKED"
+        self.certificate.save(update_fields=["status"])
+
+        response = self.client.get("/api/certificates/verify/CERT-API-001/")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["status"], "REVOKED")
+        self.assertEqual(response.data["verification_result"], "NOT_VERIFIED")
+        self.assertNotIn("recipient_name", response.data)
+        self.assertNotIn("title", response.data)
+
+    def test_public_verification_fetches_current_status(self):
+        verified = self.client.get("/api/certificates/verify/CERT-API-001/")
+        self.assertEqual(verified.data["verification_result"], "VERIFIED")
+
+        self.certificate.status = Certificate.Status.REJECTED
+        self.certificate.save(update_fields=["status"])
+        rejected = self.client.get("/api/certificates/verify/CERT-API-001/")
+
+        self.assertEqual(rejected.data["verification_result"], "REJECTED")
+        self.assertEqual(rejected["Cache-Control"], "no-store, no-cache, must-revalidate, max-age=0")
+        self.assertNotIn("recipient_name", rejected.data)
 
     def test_public_preview_is_limited_to_verified_record(self):
         from django.core.files.base import ContentFile
@@ -160,6 +188,18 @@ class CertificateAPITests(TestCase):
             self.certificate.save(update_fields=["status"])
             hidden_response = self.client.get("/api/certificates/verify/CERT-API-001/preview/")
             self.assertEqual(hidden_response.status_code, 404)
+
+    def test_public_preview_can_render_database_stored_pdf(self):
+        pdf_bytes = io.BytesIO()
+        Image.new("RGB", (8, 8), "teal").save(pdf_bytes, format="PDF")
+        CertificatePDF.store(self.certificate, pdf_bytes.getvalue(), "certificate.pdf")
+
+        verify_response = self.client.get("/api/certificates/verify/CERT-API-001/")
+        self.assertTrue(verify_response.data["preview_url"])
+
+        preview_response = self.client.get("/api/certificates/verify/CERT-API-001/preview/")
+        self.assertEqual(preview_response.status_code, 200)
+        self.assertEqual(preview_response["Content-Type"], "image/png")
 
     def test_unknown_certificate_returns_not_verified(self):
         response = self.client.get(

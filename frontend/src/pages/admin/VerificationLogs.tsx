@@ -56,9 +56,6 @@ export default function VerificationLogs() {
           <h2 className="text-xl font-bold text-slate-900 dark:text-white">
             Verification Records & Audit Trail
           </h2>
-          <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">
-            Persistent log of every certificate lookup executed through the system.
-          </p>
         </div>
         <button
           type="button"
@@ -130,11 +127,10 @@ export default function VerificationLogs() {
                       </td>
                       <td className="py-3.5 px-4">
                         <span
-                          className={`inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full font-semibold text-[11px] ${
-                            isFound
+                          className={`inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full font-semibold text-[11px] ${isFound
                               ? 'bg-teal-100 text-teal-800 dark:bg-teal-900/60 dark:text-teal-300'
                               : 'bg-rose-100 text-rose-800 dark:bg-rose-900/60 dark:text-rose-300'
-                          }`}
+                            }`}
                         >
                           {isFound ? (
                             <>

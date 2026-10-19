@@ -170,14 +170,11 @@ export default function UserDashboard() {
       {/* Welcome Banner */}
       <div className="bg-gradient-to-r from-slate-900 via-teal-950 to-slate-900 rounded-2xl p-6 sm:p-8 text-white shadow-md border border-slate-800 flex flex-col md:flex-row md:items-center justify-between gap-6">
         <div>
-          <span className="text-teal-400 font-semibold text-xs tracking-wider uppercase bg-teal-950/60 border border-teal-800/80 px-2.5 py-1 rounded-full">
-            Credential Portal
-          </span>
           <h2 className="text-2xl font-bold tracking-tight mt-2.5">
             Welcome, {user?.name || user?.username}
           </h2>
           <p className="text-slate-300 text-sm mt-1 max-w-xl">
-            Access your authenticated certificate records, inspect verification validity, or look up credentials in the registry.
+            Verify certificates, access authenticated records, and validate credentials instantly.
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-3">
@@ -202,21 +199,18 @@ export default function UserDashboard() {
         <StatCard
           title="My Certificates"
           value={certs.length}
-          subtitle="Accessible to your account"
           icon={Award}
           color="teal"
         />
         <StatCard
           title="Verified Records"
           value={verifiedCount}
-          subtitle="Distinct credentials verified by your searches"
           icon={ShieldCheck}
           color="emerald"
         />
         <StatCard
           title="Verification Searches"
           value={verifications.length}
-          subtitle="Lookup queries performed by you"
           icon={History}
           color="indigo"
         />
@@ -231,9 +225,6 @@ export default function UserDashboard() {
               <h3 className="text-base font-bold text-slate-900 dark:text-white">
                 Recent Certificates
               </h3>
-              <p className="text-xs text-slate-500 dark:text-slate-400">
-                Credentials issued and assigned to your profile
-              </p>
             </div>
             <Link
               to="/user/dashboard/certificates"
@@ -301,9 +292,6 @@ export default function UserDashboard() {
               <h3 className="text-base font-bold text-slate-900 dark:text-white">
                 Recent Verification Searches
               </h3>
-              <p className="text-xs text-slate-500 dark:text-slate-400">
-                Certificate lookups executed by your account
-              </p>
             </div>
             <Link
               to="/user/dashboard/history"
@@ -331,11 +319,10 @@ export default function UserDashboard() {
                       </p>
                     </div>
                     <span
-                      className={`px-2 py-0.5 rounded-full font-semibold text-[11px] flex-shrink-0 ${
-                        isFound
-                          ? 'bg-teal-100 text-teal-800 dark:bg-teal-900/60 dark:text-teal-300'
-                          : 'bg-rose-100 text-rose-800 dark:bg-rose-900/60 dark:text-rose-300'
-                      }`}
+                      className={`px-2 py-0.5 rounded-full font-semibold text-[11px] flex-shrink-0 ${isFound
+                        ? 'bg-teal-100 text-teal-800 dark:bg-teal-900/60 dark:text-teal-300'
+                        : 'bg-rose-100 text-rose-800 dark:bg-rose-900/60 dark:text-rose-300'
+                        }`}
                     >
                       {isFound ? 'Found' : 'Not Found'}
                     </span>
@@ -351,6 +338,7 @@ export default function UserDashboard() {
       <CertificateDetails
         cert={selectedCert}
         onClose={() => setSelectedCert(null)}
+        userDashboard
       />
     </div>
   );

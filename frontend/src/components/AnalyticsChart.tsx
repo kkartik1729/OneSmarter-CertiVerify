@@ -48,9 +48,6 @@ export default function AnalyticsChart({
           <h3 className="text-base font-bold text-slate-900 dark:text-white">
             Daily Verification Attempts (Past 30 Days)
           </h3>
-          <p className="text-xs text-slate-500 dark:text-slate-400">
-            Real lookup activity recorded in database: Successful matches vs Unsuccessful lookups.
-          </p>
         </div>
 
         {verifyTrends.length === 0 ? (
@@ -89,9 +86,6 @@ export default function AnalyticsChart({
             <h3 className="text-base font-bold text-slate-900 dark:text-white">
               Certificate Registration Volume
             </h3>
-            <p className="text-xs text-slate-500 dark:text-slate-400">
-              New authentic certificates committed to database.
-            </p>
           </div>
 
           {certTrends.length === 0 ? (
@@ -134,9 +128,6 @@ export default function AnalyticsChart({
             <h3 className="text-base font-bold text-slate-900 dark:text-white">
               Certificates by Issuing Organization
             </h3>
-            <p className="text-xs text-slate-500 dark:text-slate-400">
-              Breakdown of top certificate authorities in PostgreSQL.
-            </p>
           </div>
 
           {issuerBreakdown.length === 0 ? (

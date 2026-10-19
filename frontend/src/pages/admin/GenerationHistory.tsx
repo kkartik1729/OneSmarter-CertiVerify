@@ -65,15 +65,12 @@ export default function GenerationHistory() {
       {/* Header Banner */}
       <div className="bg-gradient-to-r from-slate-900 via-indigo-950 to-slate-900 rounded-2xl p-6 sm:p-8 text-white shadow-md border border-slate-800 flex flex-col md:flex-row md:items-center justify-between gap-6">
         <div>
-          <span className="text-teal-400 font-semibold text-xs tracking-wider uppercase bg-teal-950/60 border border-teal-800/80 px-2.5 py-1 rounded-full">
-            Batch Audit Records
-          </span>
           <h2 className="text-2xl font-bold tracking-tight mt-2.5 flex items-center gap-3">
             <History className="w-7 h-7 text-indigo-400" />
             <span>Generation History & Batches</span>
           </h2>
           <p className="text-slate-300 text-sm mt-1 max-w-xl">
-            Audit history of all bulk certificate issuance jobs. Inspect error reports, skipped duplicates, and email notification delivery status.
+            Track certificate issuance, review errors and duplicates, and monitor email delivery status.
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-3">
@@ -157,13 +154,12 @@ export default function GenerationHistory() {
                     </td>
                     <td className="py-3.5 px-4">
                       <span
-                        className={`px-2 py-0.5 rounded-full text-[11px] font-semibold inline-flex items-center gap-1 ${
-                          b.status === 'COMPLETED'
-                            ? 'bg-teal-100 text-teal-800 dark:bg-teal-900/60 dark:text-teal-300'
-                            : b.status === 'PROCESSING'
+                        className={`px-2 py-0.5 rounded-full text-[11px] font-semibold inline-flex items-center gap-1 ${b.status === 'COMPLETED'
+                          ? 'bg-teal-100 text-teal-800 dark:bg-teal-900/60 dark:text-teal-300'
+                          : b.status === 'PROCESSING'
                             ? 'bg-indigo-100 text-indigo-800 dark:bg-indigo-900/60 dark:text-indigo-300 animate-pulse'
                             : 'bg-rose-100 text-rose-800 dark:bg-rose-900/60 dark:text-rose-300'
-                        }`}
+                          }`}
                       >
                         {b.status}
                       </span>

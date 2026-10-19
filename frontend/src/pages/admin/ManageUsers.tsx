@@ -61,9 +61,6 @@ export default function ManageUsers() {
           <h2 className="text-xl font-bold text-slate-900 dark:text-white">
             User Accounts Management
           </h2>
-          <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">
-            Registered system accounts, security profiles, and access levels in PostgreSQL.
-          </p>
         </div>
         <button
           type="button"
@@ -144,11 +141,10 @@ export default function ManageUsers() {
                       </td>
                       <td className="py-3.5 px-4">
                         <span
-                          className={`inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full font-semibold text-[11px] ${
-                            u.role === 'ADMIN'
+                          className={`inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full font-semibold text-[11px] ${u.role === 'ADMIN'
                               ? 'bg-purple-100 text-purple-700 dark:bg-purple-950/60 dark:text-purple-300'
                               : 'bg-teal-100 text-teal-700 dark:bg-teal-950/60 dark:text-teal-300'
-                          }`}
+                            }`}
                         >
                           <Shield className="w-3 h-3" />
                           <span>{u.role}</span>
@@ -156,11 +152,10 @@ export default function ManageUsers() {
                       </td>
                       <td className="py-3.5 px-4">
                         <span
-                          className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] font-medium ${
-                            u.mfa_enabled
+                          className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] font-medium ${u.mfa_enabled
                               ? 'bg-emerald-50 text-emerald-700 dark:bg-emerald-950/50 dark:text-emerald-300'
                               : 'bg-slate-100 text-slate-500 dark:bg-slate-800 dark:text-slate-400'
-                          }`}
+                            }`}
                         >
                           <ShieldCheck className="w-3 h-3" />
                           <span>{u.mfa_enabled ? 'Enrolled' : 'Disabled'}</span>

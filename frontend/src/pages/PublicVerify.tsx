@@ -52,7 +52,7 @@ interface PublicCertRecord {
 type VerifyState =
   | { kind: 'idle' }
   | { kind: 'loading'; number: string }
-  | { kind: 'verified'; data: PublicCertRecord }
+  | { kind: 'found'; data: PublicCertRecord }
   | { kind: 'not_found'; number: string }
   | { kind: 'error'; message: string; number: string };
 
@@ -101,7 +101,7 @@ export default function PublicVerify() {
         false, // no auth token required
       );
       if (data.found) {
-        setState({ kind: 'verified', data });
+        setState({ kind: 'found', data });
       } else {
         setState({ kind: 'not_found', number: normalized });
       }
@@ -241,7 +241,7 @@ export default function PublicVerify() {
         )}
 
         {/* ── VERIFIED ── */}
-        {state.kind === 'verified' && (
+        {state.kind === 'found' && (
           <VerifiedCard data={state.data} onReset={handleReset} />
         )}
 
@@ -308,7 +308,7 @@ function VerifiedCard({
           <div>
             <div className="flex items-center gap-2 flex-wrap">
               <h2 className="text-lg font-bold text-slate-900 dark:text-white">
-                {isVerified ? 'Verified Certificate' : 'Certificate Not Verified'}
+                {isVerified ? 'Verified / Authentic Certificate' : 'Certificate Not Verified'}
               </h2>
               <span className={`text-[11px] font-semibold px-2 py-0.5 rounded-full ${isVerified ? 'bg-teal-100 text-teal-800 dark:bg-teal-900/60 dark:text-teal-300' : 'bg-amber-100 text-amber-900 dark:bg-amber-900/50 dark:text-amber-200'}`}>
                 {data.verification_result || data.status || 'NOT_VERIFIED'}
@@ -324,7 +324,7 @@ function VerifiedCard({
         </span>
       </div>
 
-      {data.verification_result === 'VERIFIED' && data.preview_url && (
+      {isVerified && data.preview_url ? (
         <div className="overflow-hidden rounded-xl border border-slate-200 dark:border-slate-700 bg-white">
           <img
             src={`${API_BASE.replace(/\/+$/, '')}${data.preview_url}`}
@@ -332,12 +332,24 @@ function VerifiedCard({
             className="block h-auto w-full object-contain"
             loading="lazy"
             referrerPolicy="no-referrer"
+            onError={(event) => {
+              event.currentTarget.style.display = 'none';
+              const notice = event.currentTarget.nextElementSibling;
+              if (notice instanceof HTMLElement) notice.hidden = false;
+            }}
           />
+          <p hidden className="p-4 text-center text-sm text-slate-600 dark:text-slate-400">
+            The certificate is verified, but its preview is unavailable.
+          </p>
         </div>
-      )}
+      ) : isVerified ? (
+        <p className="rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-600 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-400">
+          The certificate is verified, but its preview is unavailable.
+        </p>
+      ) : null}
 
       {/* Fields grid */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+      {isVerified && <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
         <Field icon={Award} label="Certificate Title" value={data.title || ''} />
         <Field icon={Building} label="Issuing Organization" value={data.issuer || ''} />
         <Field icon={Hash} label="Credential ID" value={data.certificate_number} />
@@ -354,7 +366,7 @@ function VerifiedCard({
         {data.end_date && (
           <Field icon={Calendar} label="Course End Date" value={formatDate(data.end_date)} />
         )}
-      </div>
+      </div>}
 
       {/* Disclaimer */}
       <div className="text-[11px] text-slate-500 dark:text-slate-400 bg-white dark:bg-slate-900/60 border border-slate-200 dark:border-slate-700 rounded-xl px-4 py-3 leading-relaxed">
@@ -393,7 +405,7 @@ function NotFoundCard({ number, onReset }: { number: string; onReset: () => void
         <div>
           <div className="flex items-center gap-2">
             <h2 className="text-lg font-bold text-slate-900 dark:text-white">
-              Certificate Not Verified
+              Certificate Not Found — Not Verified
             </h2>
             <span className="text-[11px] font-semibold px-2 py-0.5 rounded-full bg-rose-100 text-rose-800 dark:bg-rose-900/60 dark:text-rose-300">
               NOT_FOUND

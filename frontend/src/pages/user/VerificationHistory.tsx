@@ -42,9 +42,6 @@ export default function VerificationHistory() {
           <h2 className="text-xl font-bold text-slate-900 dark:text-white">
             My Verification History
           </h2>
-          <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">
-            Audit history of certificate searches executed by your account.
-          </p>
         </div>
         <button
           type="button"
@@ -108,11 +105,10 @@ export default function VerificationHistory() {
                       </td>
                       <td className="py-3.5 px-4">
                         <span
-                          className={`inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full font-semibold text-[11px] ${
-                            isFound
+                          className={`inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full font-semibold text-[11px] ${isFound
                               ? 'bg-teal-100 text-teal-800 dark:bg-teal-900/60 dark:text-teal-300'
                               : 'bg-rose-100 text-rose-800 dark:bg-rose-900/60 dark:text-rose-300'
-                          }`}
+                            }`}
                         >
                           {isFound ? (
                             <>

@@ -1,5 +1,5 @@
 export type Role = 'user' | 'admin';
-export type CertStatus = 'PENDING' | 'VERIFIED' | 'REJECTED';
+export type CertStatus = 'PENDING' | 'VERIFIED' | 'REJECTED' | 'REVOKED' | (string & {});
 export type Kind = 'ok' | 'wn' | 'er' | 'in' | 'mu';
 
 export interface User {

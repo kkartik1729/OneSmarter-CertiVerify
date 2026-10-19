@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Award, Eye, RefreshCw, Download } from 'lucide-react';
+import { Award, Eye, RefreshCw, Download, ExternalLink } from 'lucide-react';
 import { certificateService, errMsg } from '../../services';
 import type { Cert } from '../../types';
 import StatusBadge from '../../components/StatusBadge';
@@ -10,6 +10,8 @@ import EmptyState from '../../components/EmptyState';
 import ErrorMessage from '../../components/ErrorMessage';
 import AuthenticatedCertificateImage from '../../components/AuthenticatedCertificateImage';
 import { downloadBlob } from '../../lib/download';
+import LinkedInCredentialDialog, { LINKEDIN_ADD_CERTIFICATION_URL } from '../../components/LinkedInCredentialDialog';
+import { getCredentialUrlInfo } from '../../lib/credentialUrl';
 
 export default function MyCertificates() {
   const [certs, setCerts] = useState<Cert[]>([]);
@@ -19,7 +21,7 @@ export default function MyCertificates() {
 
   const [search, setSearch] = useState('');
   const [selectedCert, setSelectedCert] = useState<Cert | null>(null);
-  const [openLinkedIn, setOpenLinkedIn] = useState(false);
+  const [linkedInCert, setLinkedInCert] = useState<Cert | null>(null);
 
   const loadData = async () => {
     setLoading(true);
@@ -56,9 +58,6 @@ export default function MyCertificates() {
           <h2 className="text-xl font-bold text-slate-900 dark:text-white">
             My Certificates
           </h2>
-          <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">
-            Certificates associated with your account in PostgreSQL.
-          </p>
         </div>
         <button
           type="button"
@@ -97,7 +96,17 @@ export default function MyCertificates() {
       ) : (
         <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl overflow-hidden shadow-sm">
           <div className="overflow-x-auto">
-            <table className="w-full text-left text-xs">
+            <table className="w-full min-w-[1100px] table-fixed text-left text-xs xl:min-w-0">
+              <colgroup>
+                <col className="w-[8%]" />
+                <col className="w-[11%]" />
+                <col className="w-[15%]" />
+                <col className="w-[10%]" />
+                <col className="w-[14%]" />
+                <col className="w-[10%]" />
+                <col className="w-[8%]" />
+                <col className="w-[24%]" />
+              </colgroup>
               <thead className="bg-slate-50 dark:bg-slate-800/60 border-b border-slate-200 dark:border-slate-800 text-slate-500 dark:text-slate-400 font-semibold uppercase tracking-wider text-[11px]">
                 <tr>
                   <th className="py-3.5 px-4">Thumbnail</th>
@@ -115,6 +124,8 @@ export default function MyCertificates() {
                   const rawThumb = c.imageUrl || (c.file && !c.isPdf ? c.file : null);
                   const rawDownload = c.downloadUrl || (c.hasPdf && c.pdfDownloadUrl ? c.pdfDownloadUrl : c.imageUrl || c.file);
                   const isImageFailed = failedImages[c.key] === true;
+                  const canAddToLinkedIn = c.status === 'VERIFIED';
+                  const credentialUrlInfo = canAddToLinkedIn ? getCredentialUrlInfo(c) : null;
 
                   return (
                     <tr
@@ -143,10 +154,10 @@ export default function MyCertificates() {
                           </div>
                         )}
                       </td>
-                      <td className="py-3.5 px-4 font-mono font-medium text-slate-900 dark:text-white">
+                      <td className="py-3.5 px-3 font-mono font-medium text-slate-900 dark:text-white break-all">
                         {c.number}
                       </td>
-                      <td className="py-3.5 px-4 max-w-xs">
+                      <td className="py-3.5 px-3 min-w-0">
                         <p className="font-semibold text-slate-800 dark:text-slate-200 truncate">
                           {c.title}
                         </p>
@@ -154,43 +165,49 @@ export default function MyCertificates() {
                           {c.courseName || c.issuer}
                         </p>
                       </td>
-                      <td className="py-3.5 px-4 text-slate-600 dark:text-slate-400">
+                      <td className="py-3.5 px-3 text-slate-600 dark:text-slate-400 break-words">
                         {c.recipient}
                       </td>
-                      <td className="py-3.5 px-4 text-slate-500 dark:text-slate-400 whitespace-nowrap text-[11px]">
+                      <td className="py-3.5 px-3 text-slate-500 dark:text-slate-400 text-[11px] break-words">
                         {c.startDate && c.endDate ? `${c.startDate} → ${c.endDate}` : '—'}
                       </td>
-                      <td className="py-3.5 px-4 text-slate-500 dark:text-slate-400 whitespace-nowrap text-[11px]">
+                      <td className="py-3.5 px-3 text-slate-500 dark:text-slate-400 text-[11px] whitespace-nowrap">
                         {c.issued}
                       </td>
                       <td className="py-3.5 px-4">
                         <StatusBadge status={c.status} />
                       </td>
-                      <td className="py-3.5 px-4 text-right whitespace-nowrap">
-                        <div className="inline-flex items-center gap-1.5 justify-end">
+                      <td className="py-3.5 px-2 whitespace-nowrap">
+                        <div className="flex flex-nowrap items-center justify-end gap-1">
                           <button
                             type="button"
-                            onClick={() => {
-                              setSelectedCert(c);
-                              setOpenLinkedIn(false);
-                            }}
-                            className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-semibold text-teal-600 hover:text-teal-700 bg-teal-50 dark:bg-teal-950/60 dark:text-teal-400 rounded-lg transition"
+                            onClick={() => setSelectedCert(c)}
+                            className="inline-flex shrink-0 items-center gap-1 px-2 py-1 text-[11px] font-semibold text-teal-600 hover:text-teal-700 bg-teal-50 dark:bg-teal-950/60 dark:text-teal-400 rounded-lg transition"
                           >
                             <Eye className="w-3.5 h-3.5" />
                             <span>View</span>
                           </button>
-                          <button
-                            type="button"
-                            onClick={() => {
-                              setSelectedCert(c);
-                              setOpenLinkedIn(true);
-                            }}
-                            className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-semibold text-[#0077B5] hover:text-[#005f94] bg-blue-50 hover:bg-blue-100/80 dark:bg-blue-950/60 dark:hover:bg-blue-900/60 dark:text-blue-300 rounded-lg transition"
-                            title="LinkedIn Credential Details & Verification Link"
-                          >
-                            <svg viewBox="0 0 24 24" className="w-3 h-3 fill-current" aria-hidden="true"><path d="M20.447 20.452h-3.554v-5.569c0-1.328-.027-3.037-1.852-3.037-1.853 0-2.136 1.445-2.136 2.939v5.667H9.351V9h3.414v1.561h.046c.477-.9 1.637-1.85 3.37-1.85 3.601 0 4.267 2.37 4.267 5.455v6.286zM5.337 7.433a2.062 2.062 0 0 1-2.063-2.065 2.064 2.064 0 1 1 2.063 2.065zm1.782 13.019H3.555V9h3.564v11.452zM22.225 0H1.771C.792 0 0 .774 0 1.729v20.542C0 23.227.792 24 1.771 24h20.451C23.2 24 24 23.227 24 22.271V1.729C24 .774 23.2 0 22.222 0h.003z"/></svg>
-                            <span>LinkedIn</span>
-                          </button>
+                          {canAddToLinkedIn ? (
+                            <button
+                              type="button"
+                              onClick={() => {
+                                const certForLinkedIn = {
+                                  ...c,
+                                  credentialUrl: credentialUrlInfo?.url ?? null,
+                                  isCredentialUrlPublic: credentialUrlInfo?.isPublic ?? false,
+                                };
+                                if (credentialUrlInfo?.isPublic) {
+                                  window.open(LINKEDIN_ADD_CERTIFICATION_URL, '_blank', 'noopener,noreferrer');
+                                }
+                                setLinkedInCert(certForLinkedIn);
+                              }}
+                              className="inline-flex min-h-9 shrink-0 items-center gap-1 px-2 py-1 text-[11px] font-semibold text-white bg-[#0A66C2] hover:bg-[#004182] rounded-lg transition"
+                              aria-label={`Add ${c.title} to LinkedIn`}
+                            >
+                              <ExternalLink className="w-3.5 h-3.5" />
+                              <span>Add to LinkedIn</span>
+                            </button>
+                          ) : null}
                           {rawDownload && !isImageFailed && (
                             <button
                               type="button"
@@ -202,7 +219,7 @@ export default function MyCertificates() {
                                   setFailedImages(prev => ({ ...prev, [c.key]: true }));
                                 }
                               }}
-                              className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-semibold text-slate-700 dark:text-slate-300 hover:text-slate-900 bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 rounded-lg transition"
+                              className="inline-flex shrink-0 items-center gap-1 px-2 py-1 text-[11px] font-semibold text-slate-700 dark:text-slate-300 hover:text-slate-900 bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 rounded-lg transition"
                               title="Download Certificate"
                             >
                               <Download className="w-3.5 h-3.5 text-teal-600" />
@@ -227,11 +244,12 @@ export default function MyCertificates() {
 
       <CertificateDetails
         cert={selectedCert}
-        onClose={() => {
-          setSelectedCert(null);
-          setOpenLinkedIn(false);
-        }}
-        initialLinkedInOpen={openLinkedIn}
+        onClose={() => setSelectedCert(null)}
+        userDashboard
+      />
+      <LinkedInCredentialDialog
+        cert={linkedInCert}
+        onClose={() => setLinkedInCert(null)}
       />
     </div>
   );

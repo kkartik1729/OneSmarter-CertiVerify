@@ -60,9 +60,6 @@ export default function Analytics() {
           <h2 className="text-xl font-bold text-slate-900 dark:text-white">
             System Analytics & Reports
           </h2>
-          <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">
-            Aggregated audit telemetry and lookup trends computed directly from PostgreSQL.
-          </p>
         </div>
         <button
           type="button"
@@ -79,14 +76,12 @@ export default function Analytics() {
         <StatCard
           title="Total Certificates"
           value={adminStats?.total_certificates ?? data?.statistics.total ?? 0}
-          subtitle="Persistent certificate records"
           icon={Award}
           color="teal"
         />
         <StatCard
           title="Registered Users"
           value={adminStats?.total_users ?? 0}
-          subtitle="Authorized accounts"
           icon={Users}
           color="navy"
         />
@@ -100,7 +95,6 @@ export default function Analytics() {
         <StatCard
           title="Verification Success Rate"
           value={`${successRate}%`}
-          subtitle="Proportion of queries matched"
           icon={TrendingUp}
           trend={`${successRate}%`}
           trendUp={successRate >= 50}

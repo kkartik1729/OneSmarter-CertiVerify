@@ -450,15 +450,12 @@ export default function GenerateCertificates() {
       {/* Header Banner */}
       <div className="bg-gradient-to-r from-slate-900 via-indigo-950 to-slate-900 rounded-2xl p-6 sm:p-8 text-white shadow-md border border-slate-800 flex flex-col md:flex-row md:items-center justify-between gap-6">
         <div>
-          <span className="text-teal-400 font-semibold text-xs tracking-wider uppercase bg-teal-950/60 border border-teal-800/80 px-2.5 py-1 rounded-full">
-            Issuance & Distribution Engine
-          </span>
           <h2 className="text-2xl font-bold tracking-tight mt-2.5 flex items-center gap-3">
             <FileStack className="w-7 h-7 text-teal-400" />
             <span>Generate Certificates in Bulk</span>
           </h2>
           <p className="text-slate-300 text-sm mt-1 max-w-2xl">
-            Upload student rosters via CSV, render authentic OneSmarter certificates using Pillow graphics rendering, persist records in PostgreSQL, and dispatch email notifications.
+            Generate authentic certificates in bulk, manage records, and automate email delivery with ease.
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-3">
@@ -512,11 +509,10 @@ export default function GenerateCertificates() {
           <button
             type="button"
             onClick={() => setStep(1)}
-            className={`p-2.5 rounded-xl font-semibold transition flex flex-col sm:flex-row items-center justify-center gap-2 ${
-              step === 1
-                ? 'bg-teal-50 text-teal-700 border border-teal-300 dark:bg-teal-950/60 dark:text-teal-300 dark:border-teal-700'
-                : 'text-slate-500 hover:bg-slate-50 dark:hover:bg-slate-800'
-            }`}
+            className={`p-2.5 rounded-xl font-semibold transition flex flex-col sm:flex-row items-center justify-center gap-2 ${step === 1
+              ? 'bg-teal-50 text-teal-700 border border-teal-300 dark:bg-teal-950/60 dark:text-teal-300 dark:border-teal-700'
+              : 'text-slate-500 hover:bg-slate-50 dark:hover:bg-slate-800'
+              }`}
           >
             <span className="w-5 h-5 rounded-full bg-teal-600 text-white inline-flex items-center justify-center text-[10px]">
               1
@@ -530,11 +526,10 @@ export default function GenerateCertificates() {
               if (selectedCourseId && selectedTemplateId) setStep(2);
             }}
             disabled={!selectedCourseId || !selectedTemplateId}
-            className={`p-2.5 rounded-xl font-semibold transition flex flex-col sm:flex-row items-center justify-center gap-2 ${
-              step === 2
-                ? 'bg-teal-50 text-teal-700 border border-teal-300 dark:bg-teal-950/60 dark:text-teal-300 dark:border-teal-700'
-                : 'text-slate-500 hover:bg-slate-50 dark:hover:bg-slate-800 disabled:opacity-50'
-            }`}
+            className={`p-2.5 rounded-xl font-semibold transition flex flex-col sm:flex-row items-center justify-center gap-2 ${step === 2
+              ? 'bg-teal-50 text-teal-700 border border-teal-300 dark:bg-teal-950/60 dark:text-teal-300 dark:border-teal-700'
+              : 'text-slate-500 hover:bg-slate-50 dark:hover:bg-slate-800 disabled:opacity-50'
+              }`}
           >
             <span className="w-5 h-5 rounded-full bg-teal-600 text-white inline-flex items-center justify-center text-[10px]">
               2
@@ -548,11 +543,10 @@ export default function GenerateCertificates() {
               if (validationResult) setStep(3);
             }}
             disabled={!validationResult}
-            className={`p-2.5 rounded-xl font-semibold transition flex flex-col sm:flex-row items-center justify-center gap-2 ${
-              step === 3
-                ? 'bg-teal-50 text-teal-700 border border-teal-300 dark:bg-teal-950/60 dark:text-teal-300 dark:border-teal-700'
-                : 'text-slate-500 hover:bg-slate-50 dark:hover:bg-slate-800 disabled:opacity-50'
-            }`}
+            className={`p-2.5 rounded-xl font-semibold transition flex flex-col sm:flex-row items-center justify-center gap-2 ${step === 3
+              ? 'bg-teal-50 text-teal-700 border border-teal-300 dark:bg-teal-950/60 dark:text-teal-300 dark:border-teal-700'
+              : 'text-slate-500 hover:bg-slate-50 dark:hover:bg-slate-800 disabled:opacity-50'
+              }`}
           >
             <span className="w-5 h-5 rounded-full bg-teal-600 text-white inline-flex items-center justify-center text-[10px]">
               3
@@ -563,11 +557,10 @@ export default function GenerateCertificates() {
           <button
             type="button"
             disabled={!batchResult}
-            className={`p-2.5 rounded-xl font-semibold transition flex flex-col sm:flex-row items-center justify-center gap-2 ${
-              step === 4
-                ? 'bg-teal-50 text-teal-700 border border-teal-300 dark:bg-teal-950/60 dark:text-teal-300 dark:border-teal-700'
-                : 'text-slate-500 opacity-50'
-            }`}
+            className={`p-2.5 rounded-xl font-semibold transition flex flex-col sm:flex-row items-center justify-center gap-2 ${step === 4
+              ? 'bg-teal-50 text-teal-700 border border-teal-300 dark:bg-teal-950/60 dark:text-teal-300 dark:border-teal-700'
+              : 'text-slate-500 opacity-50'
+              }`}
           >
             <span className="w-5 h-5 rounded-full bg-teal-600 text-white inline-flex items-center justify-center text-[10px]">
               4
@@ -587,9 +580,6 @@ export default function GenerateCertificates() {
                 <h3 className="text-base font-bold text-slate-900 dark:text-white">
                   Step 1A: Select Course
                 </h3>
-                <p className="text-xs text-slate-500 dark:text-slate-400">
-                  Select existing program or register a new course
-                </p>
               </div>
               <button
                 type="button"
@@ -740,9 +730,6 @@ export default function GenerateCertificates() {
                 <h3 className="text-base font-bold text-slate-900 dark:text-white">
                   Step 1B: Certificate Template
                 </h3>
-                <p className="text-xs text-slate-500 dark:text-slate-400">
-                  OneSmarter certificate template background image
-                </p>
               </div>
               <button
                 type="button"
@@ -899,9 +886,6 @@ export default function GenerateCertificates() {
                 <h4 className="text-sm font-bold text-slate-900 dark:text-white">
                   Batch Certificate Fields Configuration
                 </h4>
-                <p className="text-xs text-slate-500 dark:text-slate-400">
-                  Configure common values for this batch. The uploaded CSV only requires 2 columns (<code>student_name,student_email</code>).
-                </p>
               </div>
               <span className="px-2.5 py-1 bg-teal-100 text-teal-800 dark:bg-teal-900/60 dark:text-teal-300 rounded-full text-[11px] font-semibold">
                 Batch Defaults
@@ -918,33 +902,30 @@ export default function GenerateCertificates() {
                   value={batchCourseName}
                   onChange={(e) => setBatchCourseName(e.target.value)}
                   className="w-full max-w-md px-3 py-2 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 rounded-lg text-slate-900 dark:text-white font-medium"
-                  placeholder="e.g. Full Stack Web Development"
                 />
               </div>
 
               <div>
                 <label className="block min-h-8 text-slate-600 dark:text-slate-300 mb-1 font-medium">
-                  Certificate Title
+                  Certificate Title (optional)
                 </label>
                 <input
                   type="text"
                   value={batchCertificateTitle}
                   onChange={(e) => setBatchCertificateTitle(e.target.value)}
                   className="w-full max-w-sm px-3 py-2 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 rounded-lg text-slate-900 dark:text-white"
-                  placeholder="Certificate of Completion"
                 />
               </div>
 
               <div>
                 <label className="block min-h-8 text-slate-600 dark:text-slate-300 mb-1 font-medium">
-                  Issuing Authority
+                  Issuing Authority (optional)
                 </label>
                 <input
                   type="text"
                   value={batchIssuer}
                   onChange={(e) => setBatchIssuer(e.target.value)}
                   className="w-full max-w-sm px-3 py-2 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 rounded-lg text-slate-900 dark:text-white"
-                  placeholder="OneSmarter, Inc."
                 />
               </div>
 
@@ -984,17 +965,16 @@ export default function GenerateCertificates() {
                   min={batchStartDate || undefined}
                   value={batchEndDate}
                   onChange={(e) => setBatchEndDate(e.target.value)}
-                  className={`w-full max-w-[16rem] px-3 py-2 bg-white dark:bg-slate-900 border rounded-lg text-slate-900 dark:text-white ${
-                    batchStartDate && batchEndDate && batchEndDate < batchStartDate
-                      ? 'border-rose-400 focus:ring-rose-500'
-                      : 'border-slate-300 dark:border-slate-700'
-                  }`}
+                  className={`w-full max-w-[16rem] px-3 py-2 bg-white dark:bg-slate-900 border rounded-lg text-slate-900 dark:text-white ${batchStartDate && batchEndDate && batchEndDate < batchStartDate
+                    ? 'border-rose-400 focus:ring-rose-500'
+                    : 'border-slate-300 dark:border-slate-700'
+                    }`}
                 />
               </div>
 
               <div>
                 <label className="block min-h-8 text-slate-600 dark:text-slate-300 mb-1 font-medium">
-                  Issue Date Override (optional; defaults to today)
+                  Issue Date Override (optional)
                 </label>
                 <input
                   type="date"
@@ -1006,14 +986,13 @@ export default function GenerateCertificates() {
 
               <div>
                 <label className="block min-h-8 text-slate-600 dark:text-slate-300 mb-1 font-medium">
-                  Completion Description
+                  Completion Description (optional)
                 </label>
                 <input
                   type="text"
                   value={batchCompletionDescription}
                   onChange={(e) => setBatchCompletionDescription(e.target.value)}
                   className="w-full max-w-md px-3 py-2 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 rounded-lg text-slate-900 dark:text-white"
-                  placeholder="e.g. has successfully completed..."
                 />
               </div>
             </div>
@@ -1033,9 +1012,6 @@ export default function GenerateCertificates() {
               <code className="block mt-1 font-mono text-[11px] text-teal-800 dark:text-teal-300">
                 student_name,student_email
               </code>
-              <p className="text-[11px] text-teal-700/80 dark:text-teal-400/80 mt-1">
-                Course name, start date, and end date are populated once from the batch settings above.
-              </p>
             </div>
             <a
               href={generationService.downloadCsvTemplateUrl()}
@@ -1141,9 +1117,6 @@ export default function GenerateCertificates() {
                 <h3 className="text-base font-bold text-slate-900 dark:text-white">
                   Validated Student Roster
                 </h3>
-                <p className="text-xs text-slate-500 dark:text-slate-400">
-                  Review and customize each student's certificate fields before triggering generation. Click Edit on any row to override details.
-                </p>
               </div>
               <button
                 type="button"

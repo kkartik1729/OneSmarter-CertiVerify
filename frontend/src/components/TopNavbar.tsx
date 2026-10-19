@@ -16,22 +16,22 @@ export default function TopNavbar({
   const { user } = useAuth();
 
   return (
-    <header className="sticky top-0 z-30 h-16 bg-white dark:bg-slate-900 border-b border-slate-200 dark:border-slate-800 px-4 sm:px-6 flex items-center justify-between gap-4 shadow-sm">
-      <div className="flex items-center gap-3">
+    <header className="sticky top-0 z-30 h-16 bg-white dark:bg-slate-900 border-b border-slate-200 dark:border-slate-800 px-3 sm:px-6 flex items-center justify-between gap-2 sm:gap-4 shadow-sm">
+      <div className="flex min-w-0 flex-1 items-center gap-2 sm:gap-3">
         <button
           type="button"
           onClick={onOpenMobileSidebar}
-          className="lg:hidden p-2 text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 rounded-lg transition"
+          className="lg:hidden shrink-0 p-2 text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 rounded-lg transition"
           aria-label="Open sidebar"
         >
           <Menu className="w-5 h-5" />
         </button>
-        <h1 className="text-lg font-bold text-slate-900 dark:text-white tracking-tight">
+        <h1 className="min-w-0 truncate text-base sm:text-lg font-bold text-slate-900 dark:text-white tracking-tight">
           {title}
         </h1>
       </div>
 
-      <div className="flex items-center gap-3">
+      <div className="flex shrink-0 items-center gap-2 sm:gap-3">
         {/* Role badge */}
         <span
           className={`hidden sm:inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold uppercase tracking-wider ${

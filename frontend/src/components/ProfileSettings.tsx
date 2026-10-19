@@ -191,7 +191,7 @@ export default function ProfileSettings() {
                 type="text"
                 value={organization}
                 onChange={e => setOrganization(e.target.value)}
-                placeholder="e.g. Acme Corporation"
+                placeholder="OneSmarter, Inc."
                 className="w-full px-3.5 py-2.5 text-sm bg-white dark:bg-slate-800/60 border border-slate-300 dark:border-slate-700 rounded-xl text-slate-900 dark:text-white placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-teal-500/20 focus:border-teal-600"
               />
             </div>

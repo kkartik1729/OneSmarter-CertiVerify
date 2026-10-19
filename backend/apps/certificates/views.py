@@ -293,9 +293,8 @@ class CertificateVerifyView(APIView):
     """
     Public verification endpoint.
 
-    A certificate number found in the database returns VERIFIED.
-    A certificate number not found returns NOT_VERIFIED.
-    The stored status and admin approval do not affect this result.
+    Only a certificate with the current VERIFIED status returns verified details.
+    Other statuses return a public status summary without recipient or course data.
     """
 
     permission_classes = [AllowAny]
@@ -305,7 +304,7 @@ class CertificateVerifyView(APIView):
         normalized_number = (certificate_number or "").strip().upper()
 
         if not normalized_number:
-            return Response(
+            response = Response(
                 {
                     "certificate_number": "",
                     "found": False,
@@ -314,6 +313,8 @@ class CertificateVerifyView(APIView):
                 },
                 status=status.HTTP_400_BAD_REQUEST,
             )
+            response["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+            return response
 
         certificate = Certificate.objects.filter(
             certificate_number=normalized_number
@@ -334,7 +335,7 @@ class CertificateVerifyView(APIView):
             )
 
         if certificate is None:
-            return Response(
+            response = Response(
                 {
                     "certificate_number": normalized_number,
                     "found": False,
@@ -343,6 +344,8 @@ class CertificateVerifyView(APIView):
                 },
                 status=status.HTTP_404_NOT_FOUND,
             )
+            response["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+            return response
 
         certificate_status = certificate.status
         is_verified = certificate_status == Certificate.Status.VERIFIED
@@ -357,31 +360,48 @@ class CertificateVerifyView(APIView):
             message = "This certificate has been verified against the OneSmarter-CertiVerify registry."
         else:
             verification_result = "NOT_VERIFIED"
-            message = "This certificate does not have a verified status."
+            message = "This certificate is not currently verified."
 
-        return Response(
-            {
-                "certificate_number": certificate.certificate_number,
-                "found": True,
-                "verification_result": verification_result,
-                "status": certificate_status,
-                "message": message,
+        data = {
+            "certificate_number": certificate.certificate_number,
+            "found": True,
+            "verification_result": verification_result,
+            "status": certificate_status,
+            "message": message,
+        }
+        if is_verified:
+            data.update({
                 "title": certificate.title,
                 "issuer": certificate.issuer,
                 "issue_date": certificate.issue_date,
-                # Safe public fields — never expose email, password, or internal IDs
+                # Public credential fields only. Never expose email, internal IDs, or secrets.
                 "recipient_name": certificate.recipient_name,
                 "course_name": certificate.course_name or "",
                 "start_date": certificate.start_date,
                 "end_date": certificate.end_date,
                 "preview_url": (
                     f"/certificates/verify/{certificate.certificate_number}/preview/"
-                    if is_verified and certificate.file
+                    if _has_public_preview_source(certificate)
                     else None
                 ),
-            },
-            status=status.HTTP_200_OK,
-        )
+            })
+
+        response = Response(data, status=status.HTTP_200_OK)
+        response["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        return response
+
+
+def _has_public_preview_source(certificate):
+    if certificate.file:
+        try:
+            if certificate.file.storage.exists(certificate.file.name):
+                return True
+        except Exception:
+            pass
+    try:
+        return bool(certificate.pdf_document.content)
+    except CertificatePDF.DoesNotExist:
+        return False
 
 
 class PublicCertificatePreviewView(APIView):
@@ -393,19 +413,45 @@ class PublicCertificatePreviewView(APIView):
         certificate = get_object_or_404(
             Certificate, certificate_number=(certificate_number or "").strip().upper()
         )
-        if certificate.status != Certificate.Status.VERIFIED or not certificate.file:
+        if certificate.status != Certificate.Status.VERIFIED or not _has_public_preview_source(certificate):
             return Response({"detail": "No public certificate preview is available."}, status=status.HTTP_404_NOT_FOUND)
         try:
-            if not certificate.file.storage.exists(certificate.file.name):
-                return Response({"detail": "No public certificate preview is available."}, status=status.HTTP_404_NOT_FOUND)
-            with certificate.file.open("rb") as source:
-                image = Image.open(source).convert("RGB")
-                preview = io.BytesIO()
-                image.save(preview, format="PNG")
-                raw_bytes = preview.getvalue()
+            sources = []
+            if certificate.file:
+                try:
+                    if certificate.file.storage.exists(certificate.file.name):
+                        with certificate.file.open("rb") as source:
+                            sources.append(source.read())
+                except Exception:
+                    logger.info("Legacy certificate file unavailable for %s", certificate.certificate_number)
+            try:
+                sources.append(bytes(certificate.pdf_document.content))
+            except CertificatePDF.DoesNotExist:
+                pass
+
+            raw_bytes = None
+            for source_bytes in sources:
+                try:
+                    try:
+                        image = Image.open(io.BytesIO(source_bytes)).convert("RGB")
+                    except Exception:
+                        import pypdfium2 as pdfium
+                        pdf = pdfium.PdfDocument(source_bytes)
+                        if len(pdf) < 1:
+                            continue
+                        image = pdf[0].render(scale=1.5).to_pil().convert("RGB")
+                    preview = io.BytesIO()
+                    image.save(preview, format="PNG")
+                    raw_bytes = preview.getvalue()
+                    break
+                except Exception:
+                    logger.info("Certificate preview source could not be rendered for %s", certificate.certificate_number)
+
+            if raw_bytes is None:
+                return Response({"detail": "Certificate preview is unavailable."}, status=status.HTTP_404_NOT_FOUND)
             response = HttpResponse(raw_bytes, content_type="image/png")
             response["X-Content-Type-Options"] = "nosniff"
-            response["Cache-Control"] = "public, max-age=300"
+            response["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
             return response
         except Exception:
             logger.exception("Unable to serve public preview for certificate %s", certificate.certificate_number)

@@ -64,9 +64,6 @@ export default function ReviewCertificates() {
           <h2 className="text-xl font-bold text-slate-900 dark:text-white">
             Manage Certificate Records
           </h2>
-          <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">
-            Browse, inspect, and verify certificates stored in PostgreSQL.
-          </p>
         </div>
         <button
           type="button"

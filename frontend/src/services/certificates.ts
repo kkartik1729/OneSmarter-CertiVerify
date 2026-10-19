@@ -213,7 +213,8 @@ export const verificationService = {
       const record = mapPublicRecord(await http<unknown>('GET', EP.verify(number), undefined, false));
       if (record.status === 'VERIFIED') return { kind: 'ok', title: 'Verified record', detail: `A record for ${number} exists and has been approved.`, record };
       if (record.status === 'REJECTED') return { kind: 'er', title: 'Record rejected', detail: `A record for ${number} exists but was rejected on review.`, record };
-      return { kind: 'wn', title: 'Record found, pending review', detail: `A record for ${number} exists but has not been verified yet.`, record };
+      if (record.status === 'PENDING') return { kind: 'wn', title: 'Record found, pending review', detail: `A record for ${number} exists but has not been verified yet.`, record };
+      return { kind: 'er', title: 'Record not verified', detail: `A record for ${number} exists but its status is ${record.status}.`, record };
     } catch (e) {
       if (e instanceof ApiError && e.status === 404) {
         return { kind: 'wn', title: 'ID not found', detail: 'No matching record was found. This does not by itself mean the certificate is fake.' };

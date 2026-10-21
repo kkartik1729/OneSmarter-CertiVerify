@@ -1,6 +1,4 @@
 from django.urls import path
-from rest_framework_simplejwt.views import TokenRefreshView
-
 from .views import (
     CurrentUserView,
     RegisterView,
@@ -20,6 +18,12 @@ from .views import (
     GoogleAuthView,
     SetManualPasswordView,
 )
+from .serializers import ExistingUserTokenRefreshSerializer
+from rest_framework_simplejwt.views import TokenRefreshView
+
+
+class ExistingUserTokenRefreshView(TokenRefreshView):
+    serializer_class = ExistingUserTokenRefreshSerializer
 from .admin_views import AdminUserListView, AdminUserDetailView
 
 urlpatterns = [
@@ -30,7 +34,7 @@ urlpatterns = [
     path("set-password/", SetManualPasswordView.as_view(), name="set_password"),
     path("google-login/", GoogleAuthView.as_view(), name="google_login"),
     path("google/", GoogleAuthView.as_view(), name="google_auth"),
-    path("token/refresh/", TokenRefreshView.as_view(), name="token_refresh"),
+    path("token/refresh/", ExistingUserTokenRefreshView.as_view(), name="token_refresh"),
     path("me/", CurrentUserView.as_view(), name="current_user"),
     path("mfa/setup/", MFASetupView.as_view(), name="mfa_setup"),
     path("mfa/confirm/", MFAConfirmView.as_view(), name="mfa_confirm"),

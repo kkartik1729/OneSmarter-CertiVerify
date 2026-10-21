@@ -1,12 +1,44 @@
 
 from django.contrib.auth import get_user_model
 from django.contrib.auth.password_validation import validate_password
+from django.db import transaction
 import re
 from rest_framework import serializers
+from rest_framework_simplejwt.exceptions import InvalidToken, TokenError
+from rest_framework_simplejwt.serializers import TokenRefreshSerializer
+from rest_framework_simplejwt.settings import api_settings
+from rest_framework_simplejwt.tokens import RefreshToken
 
 from .models import UserProfile
 
 User = get_user_model()
+
+
+class ExistingUserTokenRefreshSerializer(TokenRefreshSerializer):
+    """Apply normal SimpleJWT checks and reject refresh tokens for deleted users."""
+
+    def validate(self, attrs):
+        try:
+            # Parse first so signature, token type, expiry, and blacklist checks
+            # remain enforced before looking up the referenced account.
+            refresh = RefreshToken(attrs["refresh"])
+            user_id = refresh.get(api_settings.USER_ID_CLAIM)
+            if user_id is None:
+                raise InvalidToken("Refresh token does not identify an account.")
+
+            # Lock the row through token issuance so a concurrent delete cannot
+            # leave a newly refreshed session for an account that disappeared.
+            with transaction.atomic():
+                user = User.objects.select_for_update().get(
+                    **{api_settings.USER_ID_FIELD: user_id}
+                )
+                if not user.is_active:
+                    raise InvalidToken("Session expired. Please log in again.")
+                return super().validate(attrs)
+        except User.DoesNotExist as exc:
+            raise InvalidToken("Session expired. Please log in again.") from exc
+        except TokenError as exc:
+            raise InvalidToken("Token is invalid or expired. Please log in again.") from exc
 
 
 class RegisterSerializer(serializers.ModelSerializer):

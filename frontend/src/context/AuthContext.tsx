@@ -1,4 +1,5 @@
 import { createContext, useCallback, useContext, useEffect, useRef, useState, type ReactNode } from 'react';
+import { useNavigate } from 'react-router-dom';
 import type { User } from '../types';
 import { ApiError, authService, mfaService, errMsg, profileService, type LoginResult } from '../services';
 import { toast } from '../lib/ui';
@@ -34,6 +35,7 @@ export const useAuth = (): AuthValue => {
 
 /** The ONE place that holds the session: tokens live in services/tokens.ts, the profile lives here. */
 export function AuthProvider({ children }: { children: ReactNode }) {
+  const navigate = useNavigate();
   const [user, setUserState] = useState<User | null>(null);
   const [loading, setLoading] = useState(true);
   const [bootError, setBootError] = useState<string | null>(null);
@@ -68,13 +70,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   // The API client fires this when the refresh token no longer works.
   useEffect(() => {
     const onExpired = () => {
-      if (!userRef.current) return;
       setUser(null);
-      toast('Your session expired. Please sign in again.', 'er');
+      const message = 'Your session has expired. Please sign in again.';
+      toast(message, 'er');
+      navigate('/login', { replace: true, state: { message } });
     };
     window.addEventListener('auth:expired', onExpired);
     return () => window.removeEventListener('auth:expired', onExpired);
-  }, [setUser]);
+  }, [navigate, setUser]);
 
   const value: AuthValue = {
     user,

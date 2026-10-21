@@ -73,6 +73,8 @@ async function request(method: Method, path: string, body: unknown, withAuth: bo
 
 /** Clears the session and tells the app (AuthContext) to send the user to /login. */
 function expireSession() {
+  // Clearing first makes concurrent failed requests emit only one expiry event.
+  if (!tokens.has()) return;
   tokens.clear();
   window.dispatchEvent(new Event('auth:expired'));
 }

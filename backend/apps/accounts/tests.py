@@ -196,6 +196,42 @@ class AccountsAuthAndMFATestCase(TestCase):
         })
         self.assertEqual(res.status_code, status.HTTP_401_UNAUTHORIZED)
 
+    def test_me_rejects_missing_or_invalid_access_token(self):
+        response = self.client.get("/api/accounts/me/")
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+
+        self.client.credentials(HTTP_AUTHORIZATION="Bearer invalid-access-token")
+        response = self.client.get("/api/accounts/me/")
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_refresh_returns_access_token_for_existing_user(self):
+        refresh = RefreshToken.for_user(self.user)
+        response = self.client.post("/api/accounts/token/refresh/", {"refresh": str(refresh)}, format="json")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertTrue(response.data.get("access"))
+
+    def test_refresh_for_deleted_user_returns_controlled_unauthorized(self):
+        refresh = str(RefreshToken.for_user(self.user))
+        self.user.delete()
+
+        response = self.client.post("/api/accounts/token/refresh/", {"refresh": refresh}, format="json")
+
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+        self.assertEqual(response.data["detail"], "Session expired. Please log in again.")
+
+    def test_refresh_rejects_invalid_and_expired_tokens(self):
+        invalid = self.client.post("/api/accounts/token/refresh/", {"refresh": "not-a-jwt"}, format="json")
+        self.assertEqual(invalid.status_code, status.HTTP_401_UNAUTHORIZED)
+
+        refresh = RefreshToken.for_user(self.user)
+        refresh.set_exp(lifetime=timedelta(seconds=-1))
+        expired = self.client.post(
+            "/api/accounts/token/refresh/",
+            {"refresh": str(refresh)},
+            format="json",
+        )
+        self.assertEqual(expired.status_code, status.HTTP_401_UNAUTHORIZED)
+
     @override_settings(EMAIL_BACKEND="django.core.mail.backends.locmem.EmailBackend")
     def test_registration_creates_user_with_user_role(self):
         """Users without an issued certificate can register and sign in without OTP email."""

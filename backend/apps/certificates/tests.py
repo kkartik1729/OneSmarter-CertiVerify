@@ -2,6 +2,7 @@ from datetime import date
 import io
 import os
 import tempfile
+import unittest
 from unittest import mock
 
 from django.contrib.auth import get_user_model
@@ -18,6 +19,58 @@ from apps.certificates.generator import generate_certificate_image
 from PIL import Image, ImageDraw
 
 User = get_user_model()
+
+
+class TemplateRasterSafetyTests(unittest.TestCase):
+    def test_large_jpeg_is_drafted_before_pixel_decode_and_layout_scale_is_preserved(self):
+        from apps.certificates import generator
+
+        source = mock.Mock()
+        source.format = "JPEG"
+        source.size = (12_795, 19_200)
+        source.info = {}
+        source.convert.return_value = Image.new("RGBA", (3_199, 4_800))
+        original_limit = Image.MAX_IMAGE_PIXELS
+
+        with mock.patch.object(generator.Image, "open", return_value=source), mock.patch.object(
+            generator.ImageOps, "exif_transpose", side_effect=lambda image: image
+        ):
+            image = generator._safe_open_raster("large-template.jpg")
+
+        self.assertEqual(source.draft.call_count, 1)
+        self.assertEqual(source.load.call_count, 1)
+        self.assertEqual(image.info["_certify_source_dimensions"], (12_795, 19_200))
+        self.assertAlmostEqual(image.info["_certify_source_scale"], 0.25, places=2)
+        self.assertEqual(Image.MAX_IMAGE_PIXELS, original_limit)
+
+        layout = {"elements": [{"fontSize": 120, "x": 300, "y": 0.5}]}
+        scaled = generator._scale_layout_to_working_image(layout, image.info["_certify_source_scale"])
+        self.assertEqual(layout["elements"][0]["fontSize"], 120)
+        self.assertEqual(scaled["elements"][0]["fontSize"], 30)
+        self.assertEqual(scaled["elements"][0]["x"], 75)
+        self.assertEqual(scaled["elements"][0]["y"], 0.5)
+        image.close()
+
+    def test_oversized_png_is_rejected_before_decode(self):
+        from apps.certificates import generator
+
+        source = mock.Mock()
+        source.format = "PNG"
+        source.size = (18_681, 10_800)
+        original_limit = Image.MAX_IMAGE_PIXELS
+        with mock.patch.object(generator.Image, "open", return_value=source):
+            with self.assertRaises(generator.TemplateImageError):
+                generator._safe_open_raster("oversized.png")
+        source.load.assert_not_called()
+        self.assertEqual(Image.MAX_IMAGE_PIXELS, original_limit)
+
+    def test_pdf_raster_scale_respects_working_pixel_budget(self):
+        from apps.certificates.generator import pdf_template_render_scale
+
+        width, height = 6_725, 3_888
+        scale = pdf_template_render_scale(width, height)
+        self.assertLess(scale, 200 / 72)
+        self.assertLessEqual(width * height * scale * scale, 16_000_000)
 
 
 class CertificateModelTests(TestCase):
@@ -310,6 +363,91 @@ class CertificateAPITests(TestCase):
 
 
 class TemplateRenderingRegressionTests(TestCase):
+    def test_font_fallback_preserves_requested_font_sizes(self):
+        from apps.certificates import generator
+
+        original_load_font = generator._try_load_font
+
+        def bundled_font_only(candidates, size):
+            if any(str(candidate).startswith(str(generator._BUNDLED_FONT_DIR)) for candidate in candidates):
+                return original_load_font(candidates, size)
+            return None
+
+        image_draw = ImageDraw.Draw(Image.new("RGB", (400, 200), "white"))
+        with mock.patch.object(generator, "_try_load_font", side_effect=bundled_font_only):
+            heights = [
+                generator._text_height(image_draw, "Certificate", generator._get_font(size, family="Arial"))
+                for size in (12, 24, 48, 72, 120)
+            ]
+
+        self.assertEqual(heights, sorted(heights))
+        self.assertGreater(heights[-1], heights[0] * 5)
+
+    def test_each_template_layer_uses_its_saved_font_size(self):
+        from apps.certificates import generator
+
+        fields = [
+            ("{{ recipient_name }}", "Alex Chen"),
+            ("{{ certificate_id }}", "OSCV-2026-TEST0001"),
+            ("{{ course_name }}", "Course"),
+            ("{{ course_description }}", "Done"),
+            ("{{ start_date }}", "01/07/2026"),
+            ("{{ end_date }}", "01/10/2026"),
+            ("{{ issue_date }}", "16/10/2026"),
+            ("Manual text", "Manual text"),
+        ]
+
+        for element_text, expected_text in fields:
+            for size in (12, 24, 48, 72, 120, 300):
+                with self.subTest(element=element_text, font_size=size):
+                    original_draw = ImageDraw.Draw
+                    drawn = []
+
+                    class DrawSpy:
+                        def __init__(self, image):
+                            self.inner = original_draw(image)
+
+                        def text(self, xy, text, *args, **kwargs):
+                            font = kwargs.get("font")
+                            drawn.append((str(text), getattr(font, "size", None)))
+                            return self.inner.text(xy, text, *args, **kwargs)
+
+                        def __getattr__(self, name):
+                            return getattr(self.inner, name)
+
+                    layout = {"elements": [{
+                        "type": "text", "text": element_text, "x": .02,
+                        "y": .2, "width": .96, "fontSize": size,
+                    }]}
+                    with mock.patch.object(generator.ImageDraw, "Draw", side_effect=DrawSpy):
+                        output, _ = generate_certificate_image(
+                            template_path="unused.png",
+                            template_image=Image.new("RGB", (800, 600), "white"),
+                            student_name="Alex Chen",
+                            course_name="Course",
+                            start_date="01/07/2026",
+                            end_date="01/10/2026",
+                            issue_date="16/10/2026",
+                            certificate_number="OSCV-2026-TEST0001",
+                            completion_description="Done",
+                            layout_overrides=layout,
+                        )
+
+                    self.assertTrue(output.startswith(b"\x89PNG"))
+                    for fragment in expected_text.split():
+                        self.assertTrue(
+                            any(fragment in text and drawn_size == size for text, drawn_size in drawn),
+                            f"{element_text} fragment {fragment!r} was not rendered at {size}px",
+                        )
+
+    def test_template_font_size_is_not_silently_clamped(self):
+        from apps.certificates.generator import _template_font_size
+
+        self.assertEqual(_template_font_size({"fontSize": 120}, 800, 600), 120)
+        self.assertEqual(_template_font_size({"fontSize": 300}, 800, 600), 300)
+        self.assertEqual(_template_font_size({"fontSize": 900}, 800, 600), 900)
+        self.assertEqual(_template_font_size({"fontSize": "invalid"}, 800, 600), 18)
+
     def test_certificate_id_layout_token_resolves_once_without_literal_name(self):
         from apps.certificates import generator
 
@@ -467,6 +605,25 @@ class TemplateRenderingRegressionTests(TestCase):
 
 
 class CertificateEmailDeliveryTests(TestCase):
+    def test_pending_certificate_cannot_send_issuance_email(self):
+        from apps.certificates.emails import send_certificate_issued_email
+
+        cert = Certificate.objects.create(
+            owner=None,
+            recipient_email="recipient@example.com",
+            title="Test certificate",
+            issuer="OneSmarter",
+            certificate_number="OSCV-2026-INELIGIBLE01",
+            recipient_name="Alex Chen",
+            issue_date=date(2026, 10, 16),
+            status=Certificate.Status.PENDING,
+        )
+
+        success, error = send_certificate_issued_email(cert)
+
+        self.assertFalse(success)
+        self.assertIn("not eligible", error)
+
     @override_settings(
         EMAIL_BACKEND="django.core.mail.backends.smtp.EmailBackend",
         EMAIL_HOST="smtp.example.test",
@@ -533,6 +690,7 @@ class CertificateEmailDeliveryTests(TestCase):
             course=course,
             start_date=date(2026, 8, 1),
             end_date=date(2026, 8, 30),
+            status=Certificate.Status.VERIFIED,
         )
         pdf_bytes = b"%PDF-1.4\nmock-certificate-pdf"
         CertificatePDF.objects.create(
@@ -981,6 +1139,53 @@ class CertificateGenerationTests(TestCase):
         forbidden_res = self.client.get(f"/api/certificates/{cert.id}/image/")
         self.assertEqual(forbidden_res.status_code, 403)
 
+    def test_single_issuance_to_existing_verified_account_is_visible_without_reverification(self):
+        self.student.profile.email_verified = True
+        self.student.profile.save(update_fields=["email_verified", "updated_at"])
+        self.client.force_authenticate(user=self.admin)
+        with mock.patch("apps.certificates.views.send_certificate_issued_email", return_value=(True, "")):
+            response = self.client.post("/api/certificates/generate/single/", {
+                "course_id": self.course.id,
+                "template_id": self.template.id,
+                "student_email": "  KARTIK@EXAMPLE.COM  ",
+                "student_name": "Kartik Hande",
+            }, format="json")
+
+        self.assertEqual(response.status_code, 201)
+        certificate = Certificate.objects.get(certificate_number=response.data["certificate_number"])
+        self.assertEqual(certificate.owner, self.student)
+        self.assertTrue(certificate.email_sent)
+        self.client.force_authenticate(user=self.student)
+        listed = self.client.get("/api/certificates/")
+        self.assertEqual(listed.status_code, 200)
+        self.assertIn(certificate.certificate_number, [item["certificate_number"] for item in listed.data])
+
+    def test_bulk_issuance_to_existing_account_is_visible_without_reverification(self):
+        self.student.profile.email_verified = True
+        self.student.profile.save(update_fields=["email_verified", "updated_at"])
+        self.client.force_authenticate(user=self.admin)
+        with mock.patch("apps.certificates.views.send_certificate_issued_email", return_value=(True, "")):
+            response = self.client.post("/api/certificates/generate/bulk/", {
+                "course_id": self.course.id,
+                "template_id": self.template.id,
+                "rows": [{
+                    "row_number": 2,
+                    "student_name": "Kartik Hande",
+                    "student_email": " KARTIK@EXAMPLE.COM ",
+                    "course_name": self.course.name,
+                }],
+            }, format="json")
+
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.data["successful"], 1)
+        certificate = Certificate.objects.get(recipient_email="kartik@example.com", course_name=self.course.name)
+        self.assertEqual(certificate.owner, self.student)
+        self.assertTrue(certificate.email_sent)
+        self.client.force_authenticate(user=self.student)
+        listed = self.client.get("/api/certificates/")
+        self.assertEqual(listed.status_code, 200)
+        self.assertIn(certificate.certificate_number, [item["certificate_number"] for item in listed.data])
+
     def test_email_failure_does_not_turn_generated_certificate_into_http_error(self):
         self.client.force_authenticate(user=self.admin)
         with mock.patch(
@@ -1007,7 +1212,7 @@ class CertificateGenerationTests(TestCase):
         layout_config = {
             "elements": [{
                 "type": "text", "text": "{{ recipient_name }}", "x": .25, "y": .4,
-                "width": .5, "fontSize": 30, "fontFamily": "Serif", "bold": True,
+                "width": .5, "fontSize": 300, "fontFamily": "Serif", "bold": True,
                 "align": "center", "color": "#123456",
             }],
         }
@@ -1019,7 +1224,7 @@ class CertificateGenerationTests(TestCase):
         self.assertEqual(response.status_code, 200)
         reopened = self.client.get(f"/api/certificates/templates/{self.template.id}/")
         self.assertEqual(reopened.data["layout_config"], layout_config)
-        self.assertEqual(reopened.data["layout_config"]["elements"][0]["fontSize"], 30)
+        self.assertEqual(reopened.data["layout_config"]["elements"][0]["fontSize"], 300)
 
     def test_template_deletion_protection(self):
         from apps.certificates.models import GenerationBatch
@@ -1374,6 +1579,7 @@ class CertificateGenerationTests(TestCase):
             issue_date="2026-10-14",
             start_date="2026-07-01",
             end_date="2026-10-01",
+            status=Certificate.Status.VERIFIED,
         )
         self.assertFalse(cert.is_claimed)
 
@@ -1432,62 +1638,6 @@ class CertificateGenerationTests(TestCase):
 
 
 
-class PublicCredentialUrlTests(TestCase):
-    def test_url_validation_rejects_localhost_and_private_ips(self):
-        from apps.certificates.helpers import is_valid_public_https_url
-        self.assertFalse(is_valid_public_https_url('http://localhost:5173'))
-        self.assertFalse(is_valid_public_https_url('https://localhost:5173'))
-        self.assertFalse(is_valid_public_https_url('http://127.0.0.1:8000'))
-        self.assertFalse(is_valid_public_https_url('https://127.0.0.1'))
-        self.assertFalse(is_valid_public_https_url('https://192.168.1.100'))
-        self.assertFalse(is_valid_public_https_url('https://10.0.0.1'))
-        self.assertFalse(is_valid_public_https_url('http://onesmarter.com'))
-        self.assertFalse(is_valid_public_https_url('https://YOUR-DEPLOYED-DOMAIN'))
-        self.assertFalse(is_valid_public_https_url('https://example.com'))
-
-    def test_url_validation_accepts_valid_public_https(self):
-        from apps.certificates.helpers import is_valid_public_https_url
-        self.assertTrue(is_valid_public_https_url('https://certiverify.onesmarter.com'))
-        self.assertTrue(is_valid_public_https_url('https://onesmarter.com/'))
-
-    def test_build_public_credential_url_with_configured_domain(self):
-        from apps.certificates.helpers import build_public_credential_url
-        with self.settings(PUBLIC_FRONTEND_URL='https://certiverify.onesmarter.com'):
-            url, is_public = build_public_credential_url('OSCV-2026-36966FF4')
-            self.assertTrue(is_public)
-            self.assertEqual(url, 'https://certiverify.onesmarter.com/verify-certificate/OSCV-2026-36966FF4')
-
-    def test_build_public_credential_url_without_configured_domain(self):
-        from apps.certificates.helpers import build_public_credential_url
-        with self.settings(PUBLIC_FRONTEND_URL='', FRONTEND_URL='http://localhost:5173'):
-            url, is_public = build_public_credential_url('OSCV-2026-36966FF4')
-            self.assertFalse(is_public)
-            self.assertIsNone(url)
-
-    def test_serializer_outputs_credential_url_fields(self):
-        from apps.certificates.serializers import CertificateSerializer
-        user = get_user_model().objects.create_user(
-            username='cred_student',
-            email='cred_student@example.com',
-            password='StrongPassword@123',
-            )
-        cert = Certificate.objects.create(
-            owner=user,
-            title='Full Stack React Development',
-            issuer='OneSmarter, Inc.',
-            certificate_number='OSCV-2026-TESTURL1',
-            recipient_name='Test Student',
-            issue_date='2026-10-14',
-        )
-        with self.settings(PUBLIC_FRONTEND_URL='https://certiverify.onesmarter.com'):
-            serializer = CertificateSerializer(cert)
-            self.assertTrue(serializer.data['is_credential_url_public'])
-            self.assertEqual(
-                serializer.data['credential_url'],
-                'https://certiverify.onesmarter.com/verify-certificate/OSCV-2026-TESTURL1',
-            )
-
-
 class CertificateAccountLinkingTestSuite(TestCase):
     """
     Comprehensive automated tests covering:
@@ -1509,6 +1659,62 @@ class CertificateAccountLinkingTestSuite(TestCase):
             is_staff=True,
             is_superuser=True,
         )
+
+    def test_pending_certificate_is_not_claimed_after_registration(self):
+        from apps.certificates.services import claim_unclaimed_certificates_for_user
+
+        email = "pending.student@example.com"
+        cert = Certificate.objects.create(
+            owner=None,
+            recipient_email=email,
+            recipient_name="Pending Student",
+            title="Pending Course",
+            issuer="OneSmarter, Inc.",
+            certificate_number="OSCV-2026-PENDING01",
+            issue_date="2026-10-14",
+            status=Certificate.Status.PENDING,
+        )
+        user = User.objects.create_user(username="pendingstudent", email=email, password="Password@123")
+        user.profile.email_verified = True
+        user.profile.save()
+
+        self.assertEqual(claim_unclaimed_certificates_for_user(user), [])
+        cert.refresh_from_db()
+        self.assertIsNone(cert.owner)
+
+    def test_claim_retries_recorded_email_failure_without_creating_another_certificate(self):
+        from apps.certificates.services import claim_unclaimed_certificates_for_user
+
+        email = "retry.claim@example.com"
+        cert = Certificate.objects.create(
+            owner=None,
+            recipient_email=email,
+            recipient_name="Retry Student",
+            title="Issued Course",
+            issuer="OneSmarter, Inc.",
+            certificate_number="OSCV-2026-CLAIMRETRY1",
+            issue_date="2026-10-14",
+            status=Certificate.Status.VERIFIED,
+            email_error="SMTP unavailable",
+        )
+        user = User.objects.create_user(username="retryclaim", email=email, password="Password@123")
+        user.profile.email_verified = True
+        user.profile.save()
+
+        with mock.patch(
+            "apps.certificates.emails.send_certificate_issued_email",
+            return_value=(True, ""),
+        ) as send_email:
+            claimed = claim_unclaimed_certificates_for_user(user)
+
+        cert.refresh_from_db()
+        self.assertEqual([item.pk for item in claimed], [cert.pk])
+        self.assertEqual(Certificate.objects.filter(certificate_number=cert.certificate_number).count(), 1)
+        self.assertEqual(cert.owner, user)
+        self.assertTrue(cert.email_sent)
+        self.assertEqual(cert.email_error, "")
+        send_email.assert_called_once_with(cert)
+
 
     def test_1_anshumans_case_end_to_end_linking(self):
         """
@@ -1642,6 +1848,7 @@ class CertificateAccountLinkingTestSuite(TestCase):
             issue_date="2026-10-14",
             start_date="2026-07-01",
             end_date="2026-08-01",
+            status=Certificate.Status.VERIFIED,
         )
         c2 = Certificate.objects.create(
             owner=None,
@@ -1653,6 +1860,7 @@ class CertificateAccountLinkingTestSuite(TestCase):
             issue_date="2026-10-14",
             start_date="2026-08-01",
             end_date="2026-09-01",
+            status=Certificate.Status.VERIFIED,
         )
 
         user = User.objects.create_user(
@@ -1691,6 +1899,7 @@ class CertificateAccountLinkingTestSuite(TestCase):
             issue_date="2026-10-14",
             start_date="2026-07-01",
             end_date="2026-09-01",
+            status=Certificate.Status.VERIFIED,
         )
         user = User.objects.create_user(
             username="idempstudent",
@@ -1773,6 +1982,7 @@ class CertificateAccountLinkingTestSuite(TestCase):
             end_date="2026-09-01",
             file=dummy_png,
             file_sha256="fakehash123",
+            status=Certificate.Status.VERIFIED,
         )
         CertificatePDF.store(
             certificate=cert,

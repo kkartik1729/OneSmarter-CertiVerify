@@ -7,13 +7,13 @@ import pyotp
 from django.contrib.auth import get_user_model
 from django.core import mail
 from django.core.cache import cache
-from django.test import TestCase
+from django.test import TestCase, override_settings
 from django.utils import timezone
 from rest_framework import status
 from rest_framework.test import APIClient
 from rest_framework_simplejwt.tokens import RefreshToken
 
-from apps.accounts.models import MFARecoveryToken, PasswordResetRequest, PasswordResetToken, UserProfile
+from apps.accounts.models import EmailVerificationToken, MFARecoveryToken, PasswordResetRequest, PasswordResetToken, UserProfile
 from apps.certificates.models import Certificate
 
 User = get_user_model()
@@ -144,10 +144,12 @@ class AccountsAuthAndMFATestCase(TestCase):
 
     def test_login_valid_credentials_without_mfa_requires_enrollment(self):
         """Standard password login credentials without MFA must prompt for MFA setup enrollment without issuing tokens."""
-        res = self.client.post("/api/accounts/login/", {
-            "username": "normaluser",
-            "password": "Password@123",
-        })
+        with patch("apps.accounts.views.send_email_verification_otp_email") as send_verification:
+            res = self.client.post("/api/accounts/login/", {
+                "username": "normaluser",
+                "password": "Password@123",
+            })
+        send_verification.assert_not_called()
         self.assertEqual(res.status_code, status.HTTP_200_OK)
         self.assertTrue(res.data.get("mfa_required"))
         self.assertTrue(res.data.get("mfa_setup_required"))
@@ -194,21 +196,122 @@ class AccountsAuthAndMFATestCase(TestCase):
         })
         self.assertEqual(res.status_code, status.HTTP_401_UNAUTHORIZED)
 
+    @override_settings(EMAIL_BACKEND="django.core.mail.backends.locmem.EmailBackend")
     def test_registration_creates_user_with_user_role(self):
-        """New accounts registered through website always have USER role and cannot be staff."""
-        res = self.client.post("/api/accounts/register/", {
-            "username": "newbie",
-            "email": "newbie@example.com",
-            "first_name": "New",
-            "last_name": "Bie",
-            "password": "NewPassword@123",
-            "password_confirm": "NewPassword@123",
-        })
+        """Users without an issued certificate can register and sign in without OTP email."""
+        mail.outbox = []
+        with patch("apps.accounts.views.send_email_verification_otp_email") as verification_email, patch(
+            "apps.certificates.emails.send_certificate_issued_email"
+        ) as certificate_email:
+            res = self.client.post("/api/accounts/register/", {
+                "username": "newbie",
+                "email": "newbie@example.com",
+                "first_name": "New",
+                "last_name": "Bie",
+                "password": "NewPassword@123",
+                "password_confirm": "NewPassword@123",
+            })
         self.assertEqual(res.status_code, status.HTTP_201_CREATED)
+        certificate_email.assert_not_called()
+        verification_email.assert_not_called()
+        self.assertFalse(res.data["verification_email_sent"])
+        self.assertIn("No email verification is required", res.data["message"])
+        self.assertFalse(EmailVerificationToken.objects.filter(user__username="newbie").exists())
+        self.assertEqual(len(mail.outbox), 0)
+        resend = self.client.post("/api/accounts/resend-verification/", {"email": "newbie@example.com"})
+        self.assertEqual(resend.status_code, status.HTTP_200_OK)
+        self.assertIn("No email verification is required", resend.data["detail"])
+        verification_email.assert_not_called()
+        self.assertEqual(len(mail.outbox), 0)
         new_user = User.objects.get(username="newbie")
         self.assertFalse(new_user.is_staff)
         self.assertFalse(new_user.is_superuser)
         self.assertEqual(new_user.profile.role, "USER")
+
+        login = self.client.post("/api/accounts/login/", {
+            "username": "newbie@example.com",
+            "password": "NewPassword@123",
+        })
+        self.assertEqual(login.status_code, status.HTTP_200_OK)
+        self.assertTrue(login.data.get("mfa_required"))
+
+    @override_settings(EMAIL_BACKEND="django.core.mail.backends.locmem.EmailBackend")
+    def test_registration_verification_email_is_independent_of_existing_certificate(self):
+        """An eligible unclaimed certificate triggers the verification email used for claiming."""
+        mail.outbox = []
+        Certificate.objects.create(
+            owner=None,
+            recipient_email="claimed-later@example.com",
+            title="Existing credential",
+            issuer="OneSmarter",
+            certificate_number="OSCV-2026-REGEMAIL01",
+            recipient_name="New User",
+            issue_date=timezone.now().date(),
+            status=Certificate.Status.VERIFIED,
+        )
+
+        response = self.client.post("/api/accounts/register/", {
+            "username": "claimed-later@example.com",
+            "email": "claimed-later@example.com",
+            "first_name": "New",
+            "last_name": "User",
+            "password": "NewPassword@123",
+            "password_confirm": "NewPassword@123",
+        })
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertTrue(response.data["verification_email_sent"])
+        self.assertEqual(len(mail.outbox), 1)
+        self.assertEqual(mail.outbox[0].to, ["claimed-later@example.com"])
+        self.assertIn("Verify Your Email Address", mail.outbox[0].subject)
+
+    @override_settings(EMAIL_BACKEND="django.core.mail.backends.locmem.EmailBackend")
+    def test_registration_delivery_failure_is_reported_and_resend_can_retry_immediately(self):
+        mail.outbox = []
+        Certificate.objects.create(
+            owner=None,
+            recipient_email="retry-verification@example.com",
+            title="Issued credential",
+            issuer="OneSmarter",
+            certificate_number="OSCV-2026-REGRETRY01",
+            recipient_name="Retry User",
+            issue_date=timezone.now().date(),
+            status=Certificate.Status.VERIFIED,
+        )
+        with patch(
+            "apps.accounts.views.send_email_verification_otp_email",
+            side_effect=RuntimeError("mock SMTP failure"),
+        ):
+            response = self.client.post("/api/accounts/register/", {
+                "username": "retry-verification@example.com",
+                "email": "retry-verification@example.com",
+                "first_name": "Retry",
+                "last_name": "User",
+                "password": "NewPassword@123",
+                "password_confirm": "NewPassword@123",
+            })
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertFalse(response.data["verification_email_sent"])
+        self.assertIn("could not be sent", response.data["message"])
+        failed_token = EmailVerificationToken.objects.get(user__email="retry-verification@example.com")
+        self.assertTrue(failed_token.is_used)
+
+        with patch(
+            "apps.accounts.views.send_email_verification_otp_email",
+            return_value=True,
+        ) as resend:
+            retry_response = self.client.post("/api/accounts/resend-verification/", {
+                "email": "retry-verification@example.com",
+            })
+
+        self.assertEqual(retry_response.status_code, status.HTTP_200_OK)
+        resend.assert_called_once()
+        self.assertTrue(
+            EmailVerificationToken.objects.filter(
+                user__email="retry-verification@example.com", is_used=False
+            ).exists()
+        )
 
     def test_duplicate_email_registration_rejected(self):
         """Registration with an already registered email must be rejected."""
@@ -955,6 +1058,7 @@ class AccountsAuthAndMFATestCase(TestCase):
     # 6. GOOGLE AUTHENTICATION AND SET MANUAL PASSWORD TESTS
     # -------------------------------------------------------------------------
 
+    @override_settings(GOOGLE_OAUTH_CLIENT_ID="test-google-client-id")
     @patch("google.oauth2.id_token.verify_oauth2_token")
     def test_google_login_new_user_success_without_mfa(self, mock_verify):
         """New Google user authenticates and receives JWT tokens directly without TOTP challenge."""
@@ -982,7 +1086,9 @@ class AccountsAuthAndMFATestCase(TestCase):
         self.assertFalse(user.has_usable_password())
         self.assertTrue(user.profile.email_verified)
         self.assertEqual(user.profile.google_sub, "google-sub-12345")
+        self.assertEqual(mock_verify.call_args.kwargs["audience"], "test-google-client-id")
 
+    @override_settings(GOOGLE_OAUTH_CLIENT_ID="test-google-client-id")
     @patch("google.oauth2.id_token.verify_oauth2_token")
     def test_google_login_existing_user_linked(self, mock_verify):
         """Existing user already linked by google_sub logs in directly."""
@@ -1008,6 +1114,113 @@ class AccountsAuthAndMFATestCase(TestCase):
         self.assertEqual(res.status_code, status.HTTP_200_OK)
         self.assertEqual(res.data["user"]["username"], "existing_google")
 
+    @override_settings(GOOGLE_OAUTH_CLIENT_ID="test-google-client-id")
+    @patch("google.oauth2.id_token.verify_oauth2_token")
+    def test_google_login_links_existing_verified_password_account_without_duplicate(self, mock_verify):
+        """Verified manual account keeps its identity and data when linked to Google, including repeat login."""
+        user = User.objects.create_user(
+            username="verified_manual",
+            email="Verified.Manual@example.com",
+            password="Password@123",
+        )
+        user.profile.email_verified = True
+        user.profile.save(update_fields=["email_verified", "updated_at"])
+        certificate = Certificate.objects.create(
+            owner=user,
+            recipient_email=user.email,
+            title="Existing course",
+            issuer="OneSmarter",
+            certificate_number="OSCV-2026-GOOGLELINK01",
+            recipient_name="Verified Manual",
+            issue_date=timezone.now().date(),
+            status=Certificate.Status.VERIFIED,
+        )
+        original_user_id = user.pk
+        mock_verify.return_value = {
+            "iss": "https://accounts.google.com",
+            "sub": "google-sub-manual-verified",
+            "email": "verified.manual@example.com",
+            "email_verified": True,
+        }
+
+        for _ in range(2):
+            response = self.client.post("/api/accounts/google-login/", {"id_token": "verified-token"})
+            self.assertEqual(response.status_code, status.HTTP_200_OK)
+            self.assertEqual(response.data["user"]["id"], original_user_id)
+
+        user.refresh_from_db()
+        user.profile.refresh_from_db()
+        certificate.refresh_from_db()
+        self.assertEqual(User.objects.filter(email__iexact=user.email).count(), 1)
+        self.assertTrue(user.has_usable_password())
+        self.assertTrue(user.profile.email_verified)
+        self.assertEqual(user.profile.google_sub, "google-sub-manual-verified")
+        self.assertEqual(certificate.owner_id, original_user_id)
+        self.assertEqual(mock_verify.call_args.kwargs["audience"], "test-google-client-id")
+
+    @override_settings(GOOGLE_OAUTH_CLIENT_ID="test-google-client-id")
+    @patch("google.oauth2.id_token.verify_oauth2_token")
+    def test_google_verified_email_can_securely_link_unverified_no_certificate_registration(self, mock_verify):
+        registration = self.client.post("/api/accounts/register/", {
+            "username": "unverified.manual@example.com",
+            "email": "unverified.manual@example.com",
+            "first_name": "Unverified",
+            "last_name": "Manual",
+            "password": "Password@123",
+            "password_confirm": "Password@123",
+        }, format="json")
+        self.assertEqual(registration.status_code, status.HTTP_201_CREATED)
+        self.assertFalse(registration.data["verification_email_sent"])
+        user = User.objects.get(email="unverified.manual@example.com")
+        original_id = user.pk
+        mock_verify.return_value = {
+            "iss": "https://accounts.google.com",
+            "sub": "google-sub-unverified-manual",
+            "email": "unverified.manual@example.com",
+            "email_verified": True,
+        }
+
+        response = self.client.post("/api/accounts/google-login/", {"id_token": "verified-token"})
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["user"]["id"], original_id)
+        self.assertEqual(User.objects.filter(email__iexact=user.email).count(), 1)
+        user.refresh_from_db()
+        user.profile.refresh_from_db()
+        self.assertTrue(user.profile.email_verified)
+        self.assertEqual(user.profile.google_sub, "google-sub-unverified-manual")
+
+    @override_settings(GOOGLE_OAUTH_CLIENT_ID="test-google-client-id")
+    @patch("google.oauth2.id_token.verify_oauth2_token")
+    def test_google_login_rejects_unverified_google_email_claim(self, mock_verify):
+        user = User.objects.create_user(
+            username="unverified_google_email",
+            email="local.account@example.com",
+            password="Password@123",
+        )
+        mock_verify.return_value = {
+            "iss": "https://accounts.google.com",
+            "sub": "google-sub-unverified-email",
+            "email": "local.account@example.com",
+            "email_verified": False,
+        }
+
+        response = self.client.post("/api/accounts/google-login/", {"id_token": "unverified-token"})
+
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+        user.refresh_from_db()
+        user.profile.refresh_from_db()
+        self.assertFalse(user.profile.email_verified)
+        self.assertFalse(user.profile.google_sub)
+
+    @override_settings(GOOGLE_OAUTH_CLIENT_ID="test-google-client-id")
+    @patch("google.oauth2.id_token.verify_oauth2_token", side_effect=ValueError("expired"))
+    def test_google_login_rejects_invalid_or_expired_id_token(self, mock_verify):
+        response = self.client.post("/api/accounts/google-login/", {"id_token": "expired-token"})
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+        self.assertEqual(mock_verify.call_args.kwargs["audience"], "test-google-client-id")
+
+    @override_settings(GOOGLE_OAUTH_CLIENT_ID="test-google-client-id")
     @patch("google.oauth2.id_token.verify_oauth2_token")
     def test_google_login_invalid_issuer_rejected(self, mock_verify):
         """Invalid token issuer is rejected."""

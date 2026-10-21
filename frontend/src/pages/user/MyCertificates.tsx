@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Award, Eye, RefreshCw, Download, ExternalLink } from 'lucide-react';
+import { Award, Eye, RefreshCw, Download } from 'lucide-react';
 import { certificateService, errMsg } from '../../services';
 import type { Cert } from '../../types';
 import StatusBadge from '../../components/StatusBadge';
@@ -10,8 +10,6 @@ import EmptyState from '../../components/EmptyState';
 import ErrorMessage from '../../components/ErrorMessage';
 import AuthenticatedCertificateImage from '../../components/AuthenticatedCertificateImage';
 import { downloadBlob } from '../../lib/download';
-import LinkedInCredentialDialog, { LINKEDIN_ADD_CERTIFICATION_URL } from '../../components/LinkedInCredentialDialog';
-import { getCredentialUrlInfo } from '../../lib/credentialUrl';
 
 export default function MyCertificates() {
   const [certs, setCerts] = useState<Cert[]>([]);
@@ -21,7 +19,6 @@ export default function MyCertificates() {
 
   const [search, setSearch] = useState('');
   const [selectedCert, setSelectedCert] = useState<Cert | null>(null);
-  const [linkedInCert, setLinkedInCert] = useState<Cert | null>(null);
 
   const loadData = async () => {
     setLoading(true);
@@ -124,8 +121,6 @@ export default function MyCertificates() {
                   const rawThumb = c.imageUrl || (c.file && !c.isPdf ? c.file : null);
                   const rawDownload = c.downloadUrl || (c.hasPdf && c.pdfDownloadUrl ? c.pdfDownloadUrl : c.imageUrl || c.file);
                   const isImageFailed = failedImages[c.key] === true;
-                  const canAddToLinkedIn = c.status === 'VERIFIED';
-                  const credentialUrlInfo = canAddToLinkedIn ? getCredentialUrlInfo(c) : null;
 
                   return (
                     <tr
@@ -187,27 +182,6 @@ export default function MyCertificates() {
                             <Eye className="w-3.5 h-3.5" />
                             <span>View</span>
                           </button>
-                          {canAddToLinkedIn ? (
-                            <button
-                              type="button"
-                              onClick={() => {
-                                const certForLinkedIn = {
-                                  ...c,
-                                  credentialUrl: credentialUrlInfo?.url ?? null,
-                                  isCredentialUrlPublic: credentialUrlInfo?.isPublic ?? false,
-                                };
-                                if (credentialUrlInfo?.isPublic) {
-                                  window.open(LINKEDIN_ADD_CERTIFICATION_URL, '_blank', 'noopener,noreferrer');
-                                }
-                                setLinkedInCert(certForLinkedIn);
-                              }}
-                              className="inline-flex min-h-9 shrink-0 items-center gap-1 px-2 py-1 text-[11px] font-semibold text-white bg-[#0A66C2] hover:bg-[#004182] rounded-lg transition"
-                              aria-label={`Add ${c.title} to LinkedIn`}
-                            >
-                              <ExternalLink className="w-3.5 h-3.5" />
-                              <span>Add to LinkedIn</span>
-                            </button>
-                          ) : null}
                           {rawDownload && !isImageFailed && (
                             <button
                               type="button"
@@ -246,10 +220,6 @@ export default function MyCertificates() {
         cert={selectedCert}
         onClose={() => setSelectedCert(null)}
         userDashboard
-      />
-      <LinkedInCredentialDialog
-        cert={linkedInCert}
-        onClose={() => setLinkedInCert(null)}
       />
     </div>
   );

@@ -75,8 +75,6 @@ export function mapCert(x: unknown): Cert {
     pdfDownloadUrl: typeof r.pdf_download_url === 'string' ? r.pdf_download_url : undefined,
     code: s(r.verification_code),
     sha: s(r.file_sha256),
-    credentialUrl: typeof r.credential_url === 'string' ? r.credential_url : undefined,
-    isCredentialUrlPublic: r.is_credential_url_public === true,
     createdAt: s(r.created_at).slice(0, 10),
   };
 }

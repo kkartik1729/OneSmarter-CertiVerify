@@ -172,7 +172,7 @@ class MFAChallengeToken(Token):
 
 class RegisterView(generics.CreateAPIView):
 
-    """Register a standard user and send email verification OTP."""
+    """Register users; send verification only when an issued certificate must be claimed."""
 
 
 
@@ -192,59 +192,43 @@ class RegisterView(generics.CreateAPIView):
 
 
 
-        # Link any unclaimed certificates issued to this email address.
+        # A code is needed only to claim an eligible certificate issued before
+        # registration. Other new users can sign in without an OTP email.
+        from apps.certificates.models import Certificate
+        from django.db.models.functions import Lower, Trim
 
-        # Import inside the method to avoid circular imports during startup.
+        normalized_email = (user.email or "").strip().lower()
+        has_unclaimed_issued_certificate = Certificate.objects.annotate(
+            clean_recipient_email=Trim(Lower("recipient_email")),
+        ).filter(
+            owner__isnull=True,
+            status=Certificate.Status.VERIFIED,
+            clean_recipient_email=normalized_email,
+        ).exists()
 
-        try:
+        email_sent = False
+        if has_unclaimed_issued_certificate:
+            otp = f"{secrets.randbelow(1_000_000):06d}"
+            otp_hash = hashlib.sha256(otp.encode("utf-8")).hexdigest()
+            token = secrets.token_urlsafe(32)
+            token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
+            verification_record = EmailVerificationToken.objects.create(
+                user=user,
+                token_hash=token_hash,
+                otp_hash=otp_hash,
+                expires_at=timezone.now() + timedelta(hours=24),
+            )
 
-            from apps.certificates.services import claim_unclaimed_certificates_for_user
-
-            claim_unclaimed_certificates_for_user(user)
-
-        except ImportError:
-
-            # Preserve registration if the optional certificate service is unavailable.
-
-            logger.exception("Certificate auto-claim service could not be imported")
-
-
-
-        # Generate a six-digit OTP and a secure verification-link token.
-
-        otp = f"{secrets.randbelow(1_000_000):06d}"
-
-        otp_hash = hashlib.sha256(otp.encode("utf-8")).hexdigest()
-
-        token = secrets.token_urlsafe(32)
-
-        token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
-
-
-
-        EmailVerificationToken.objects.create(
-
-            user=user,
-
-            token_hash=token_hash,
-
-            otp_hash=otp_hash,
-
-            expires_at=timezone.now() + timedelta(hours=24),
-
-        )
-
-
-
-        try:
-
-            send_email_verification_otp_email(user, otp)
-
-        except Exception:
-
-            # Do not log OTPs, tokens, or credentials.
-
-            logger.exception("Failed to send verification email to %s", user.email)
+            try:
+                email_sent = bool(send_email_verification_otp_email(user, otp))
+            except Exception:
+                # Do not log OTPs, tokens, or credentials.
+                logger.exception("Failed to send verification email to %s", user.email)
+                email_sent = False
+            if not email_sent:
+                verification_record.is_used = True
+                verification_record.used_at = timezone.now()
+                verification_record.save(update_fields=["is_used", "used_at"])
 
 
 
@@ -255,12 +239,21 @@ class RegisterView(generics.CreateAPIView):
             {
 
                 "user": serializer.data,
+                "verification_email_sent": email_sent,
 
                 "message": (
 
-                    "Registration successful. Please verify your email using "
+                    "Registration successful. "
 
-                    "the verification code sent to your inbox."
+                    + (
+                        "Verification code sent to your inbox."
+                        if email_sent
+                        else (
+                            "Verification email could not be sent; please request a new code."
+                            if has_unclaimed_issued_certificate
+                            else "No email verification is required; you can sign in."
+                        )
+                    )
 
                 ),
 
@@ -2575,6 +2568,26 @@ class ResendVerificationEmailView(APIView):
 
             )
 
+        # Verification mail is only needed for claiming an eligible,
+        # previously issued certificate. Certificate mail for future issuance
+        # uses its normal independent notification workflow.
+        from apps.certificates.models import Certificate
+        from django.db.models.functions import Lower, Trim
+
+        normalized_email = (user.email or "").strip().lower()
+        has_unclaimed_issued_certificate = Certificate.objects.annotate(
+            clean_recipient_email=Trim(Lower("recipient_email")),
+        ).filter(
+            owner__isnull=True,
+            status=Certificate.Status.VERIFIED,
+            clean_recipient_email=normalized_email,
+        ).exists()
+        if not has_unclaimed_issued_certificate:
+            return Response(
+                {"detail": "No email verification is required for this account."},
+                status=status.HTTP_200_OK,
+            )
+
 
 
         # Rate limit: check if a token was created in the last 60 seconds
@@ -2582,6 +2595,8 @@ class ResendVerificationEmailView(APIView):
         recent_token = EmailVerificationToken.objects.filter(
 
             user=user,
+
+            is_used=False,
 
             created_at__gte=timezone.now() - timedelta(seconds=60),
 
@@ -2619,7 +2634,7 @@ class ResendVerificationEmailView(APIView):
 
 
 
-        EmailVerificationToken.objects.create(
+        verification_record = EmailVerificationToken.objects.create(
 
             user=user,
 
@@ -2635,11 +2650,30 @@ class ResendVerificationEmailView(APIView):
 
         try:
 
-            send_email_verification_otp_email(user, otp)
+            email_sent = bool(send_email_verification_otp_email(user, otp))
 
         except Exception as e:
 
             logger.warning("Failed to resend verification email to %s: %s", user.email, e)
+
+            email_sent = False
+
+
+        if not email_sent:
+
+            verification_record.is_used = True
+
+            verification_record.used_at = timezone.now()
+
+            verification_record.save(update_fields=["is_used", "used_at"])
+
+            return Response(
+
+                {"detail": "Verification email could not be sent. Please try again shortly."},
+
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+
+            )
 
 
 
@@ -2705,6 +2739,13 @@ class GoogleAuthView(APIView):
 
         client_id = getattr(settings, "GOOGLE_OAUTH_CLIENT_ID", "")
 
+        if not client_id:
+            logger.error("Google Sign-In requested without GOOGLE_OAUTH_CLIENT_ID")
+            return Response(
+                {"detail": "Google Sign-In is not configured on this server."},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+
 
 
         from google.oauth2 import id_token
@@ -2717,27 +2758,11 @@ class GoogleAuthView(APIView):
 
             request_adapter = google_requests.Request()
 
-            try:
-
-                id_info = id_token.verify_oauth2_token(
-
-                    token_str,
-
-                    request_adapter,
-
-                    audience=client_id if client_id else None,
-
-                )
-
-            except Exception:
-
-                id_info = id_token.verify_oauth2_token(
-
-                    token_str,
-
-                    request_adapter,
-
-                )
+            id_info = id_token.verify_oauth2_token(
+                token_str,
+                request_adapter,
+                audience=client_id,
+            )
 
 
 
@@ -2773,7 +2798,7 @@ class GoogleAuthView(APIView):
 
             email_verified = id_info.get("email_verified", False)
 
-            if not email_verified:
+            if email_verified is not True:
 
                 return Response(
 
@@ -2813,6 +2838,11 @@ class GoogleAuthView(APIView):
 
         # Token verified! Find or create local user account
         google_sub = str(id_info.get("sub") or "").strip()
+        if not google_sub:
+            return Response(
+                {"detail": "Google ID token does not contain a subject identifier."},
+                status=status.HTTP_401_UNAUTHORIZED,
+            )
 
         # Step 1: Look up by stable Google subject identifier first
         user = None
@@ -2820,31 +2850,51 @@ class GoogleAuthView(APIView):
             matched_profile = UserProfile.objects.filter(google_sub=google_sub).select_related("user").first()
             if matched_profile:
                 user = matched_profile.user
+                if (user.email or "").strip().lower() != email:
+                    return Response(
+                        {"detail": "The Google account email does not match the linked account."},
+                        status=status.HTTP_401_UNAUTHORIZED,
+                    )
 
         # Step 2: If not found by sub, check for existing user by verified Google email address
         if user is None:
-            existing_user = User.objects.filter(email__iexact=email).first()
+            from django.db.models.functions import Lower, Trim
+            existing_user = User.objects.annotate(
+                normalized_email=Lower(Trim("email")),
+            ).filter(normalized_email=email).first()
             if existing_user:
                 existing_profile = get_or_sync_profile(existing_user)
-                # If existing user was registered with a local password:
-                # Only link if the local account email was verified, to prevent unverified account hijacking.
-                if existing_user.has_usable_password() and not existing_profile.email_verified:
+                # The Google ID token was verified for the configured client
+                # and carries Google's verified-email claim. This proves
+                # control of this exact address without trusting a string match.
+                if existing_profile.google_sub and existing_profile.google_sub != google_sub:
                     return Response(
                         {
-                            "detail": (
-                                "An account with this email address already exists but its email is not yet verified. "
-                                "Please log in with your password to complete email verification before linking Google Sign-In."
-                            )
+                            "detail": "This account is already linked to a different Google identity."
                         },
-                        status=status.HTTP_400_BAD_REQUEST,
+                        status=status.HTTP_409_CONFLICT,
                     )
-                # Safe linking: associate google_sub with this verified user
+
+                # Link repeatably to the same account and preserve its user ID,
+                # password, role, permissions, and certificate relationships.
                 user = existing_user
-                if google_sub and existing_profile.google_sub != google_sub:
-                    existing_profile.google_sub = google_sub
-                    existing_profile.email_verified = True
-                    existing_profile.email_verified_at = existing_profile.email_verified_at or timezone.now()
-                    existing_profile.save(update_fields=["google_sub", "email_verified", "email_verified_at", "updated_at"])
+                with transaction.atomic():
+                    existing_profile = UserProfile.objects.select_for_update().get(pk=existing_profile.pk)
+                    if existing_profile.google_sub and existing_profile.google_sub != google_sub:
+                        return Response(
+                            {"detail": "This account is already linked to a different Google identity."},
+                            status=status.HTTP_409_CONFLICT,
+                        )
+                    fields_to_update = []
+                    if existing_profile.google_sub != google_sub:
+                        existing_profile.google_sub = google_sub
+                        fields_to_update.append("google_sub")
+                    if not existing_profile.email_verified:
+                        existing_profile.email_verified = True
+                        existing_profile.email_verified_at = timezone.now()
+                        fields_to_update.extend(["email_verified", "email_verified_at"])
+                    if fields_to_update:
+                        existing_profile.save(update_fields=[*fields_to_update, "updated_at"])
 
         # Step 3: Create new user if not found
         if user is None:

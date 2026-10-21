@@ -3,7 +3,7 @@ import type { CertificateTemplate } from '../types';
 import { templateService } from '../services/certificates';
 
 const FIELDS = ['recipient_name', 'certificate_id', 'course_name', 'course_description', 'start_date', 'end_date', 'issue_date'];
-type TextElement = { type: 'text'; text: string; x: number; y: number; width: number; fontSize: number; color: string; align: string; fontFamily?: string; bold?: boolean };
+type TextElement = { type: 'text'; text: string; x: number; y: number; width: number; fontSize?: number | string | null; color: string; align: string; fontFamily?: string; bold?: boolean };
 type Redaction = { x: number; y: number; width: number; height: number; color: string };
 
 const previewFontFamily = (family?: string) => ({
@@ -118,25 +118,35 @@ export default function TemplateLayoutEditor({ template, onClose, onSaved }: {
     finally { setSaving(false); }
   };
   const active = elements[selected];
-  return <div className="fixed inset-0 z-[80] bg-slate-950/35 p-3 sm:p-6 overflow-y-auto backdrop-blur-[1px]" role="dialog" aria-modal="true" aria-label={`Edit ${template.name} layout`}>
-    <div className="mx-auto max-w-6xl max-h-[calc(100vh-1.5rem)] sm:max-h-[calc(100vh-3rem)] rounded-2xl bg-white/90 dark:bg-slate-900/90 shadow-2xl backdrop-blur-md flex flex-col overflow-hidden">
-      <header className="flex items-center justify-between gap-3 p-4 border-b border-slate-200 dark:border-slate-700">
+  const previewFontSize = (item: TextElement) => {
+    const configuredSize = item.fontSize === null || item.fontSize === undefined || item.fontSize === ''
+      ? Number.NaN
+      : Number(item.fontSize);
+    const sourceSize = Number.isFinite(configuredSize)
+      ? Math.trunc(configuredSize)
+      : Math.max(14, Math.min(imageRef.current?.naturalWidth || 0, imageRef.current?.naturalHeight || 0) * .03);
+    // Keep the preview's source-image pixel size in step with the backend renderer.
+    return Math.trunc(sourceSize) * fontScale;
+  };
+  return <div className="fixed inset-0 z-[80] flex items-center justify-center overflow-hidden bg-slate-950/35 p-3 backdrop-blur-[1px] sm:p-6" role="dialog" aria-modal="true" aria-label={`Edit ${template.name} layout`}>
+    <div className="mx-auto flex h-[calc(100dvh-1.5rem)] w-full min-w-0 max-w-6xl flex-col overflow-hidden rounded-2xl bg-white/90 shadow-2xl backdrop-blur-md dark:bg-slate-900/90 sm:h-[calc(100dvh-3rem)]">
+      <header className="flex shrink-0 items-center justify-between gap-3 border-b border-slate-200 p-4 dark:border-slate-700">
         <div><h2 className="font-bold text-lg text-slate-900 dark:text-white">Template layout · {template.name}</h2><p className="text-xs text-slate-500 dark:text-slate-400">Drag text layers to position them. Changes are saved per template.</p></div>
         <button className="px-3 py-2 rounded-lg border border-slate-300 text-slate-800 hover:bg-slate-100 dark:border-slate-600 dark:text-slate-100 dark:hover:bg-slate-800" onClick={onClose}>Close</button>
       </header>
-      <div className="grid lg:grid-cols-[minmax(0,1fr)_280px] gap-4 p-4 min-h-0 overflow-y-auto lg:overflow-hidden">
-        <div className="lg:max-h-[calc(100vh-9rem)] overflow-auto bg-slate-100 dark:bg-slate-800 p-3 rounded-xl">
+      <div className="grid min-h-0 flex-1 gap-4 overflow-y-auto p-4 lg:grid-cols-[minmax(0,1fr)_280px] lg:overflow-hidden">
+        <div className="rounded-xl bg-slate-100 p-3 dark:bg-slate-800 lg:min-h-0 lg:overflow-auto">
           <div className={`relative mx-auto w-fit max-w-full select-none ${placementText ? 'cursor-crosshair' : ''}`} style={{ lineHeight: 0 }} onClick={place}>
-            <img ref={imageRef} src={template.image_url || template.image} alt={`${template.name} page preview`} onLoad={() => { const image = imageRef.current; if (image?.naturalWidth) setFontScale(image.getBoundingClientRect().width / image.naturalWidth); }} className="block max-h-[68vh] max-w-full object-contain" draggable={false} />
+            <img ref={imageRef} src={template.image_url || template.image} alt={`${template.name} page preview`} onLoad={() => { const image = imageRef.current; if (image?.naturalWidth) setFontScale(image.getBoundingClientRect().width / image.naturalWidth); }} className="block max-h-[45dvh] max-w-full object-contain lg:max-h-[calc(100dvh-12rem)]" draggable={false} />
             {redactions.map((cover, index) => <div key={`cover-${index}`} onPointerDown={(event) => beginDrag(event, 'redaction', index)} className={`absolute cursor-move border border-dashed ${selectedRedaction === index ? 'border-amber-600' : 'border-transparent hover:border-amber-400'}`} style={{ left: `${cover.x * 100}%`, top: `${cover.y * 100}%`, width: `${cover.width * 100}%`, height: `${cover.height * 100}%`, background: cover.color }} />)}
             {elements.map((item, index) => <div key={index} onPointerDown={(event) => beginDrag(event, 'text', index)}
-              className={`absolute cursor-move border border-dashed px-1 py-0.5 whitespace-nowrap ${selected === index ? 'border-blue-600 bg-blue-100/40' : 'border-transparent hover:border-blue-400'}`}
-              style={{ left: `${item.x * 100}%`, top: `${item.y * 100}%`, width: `${item.width * 100}%`, fontSize: `${Math.max(1, item.fontSize * fontScale)}px`, fontFamily: previewFontFamily(item.fontFamily), lineHeight: 1.15, color: item.color, fontWeight: item.bold ? 700 : 400, textAlign: item.align as CanvasTextAlign }}>
+              className={`absolute cursor-move border border-dashed whitespace-pre-wrap break-words ${selected === index ? 'border-blue-600 bg-blue-100/40' : 'border-transparent hover:border-blue-400'}`}
+              style={{ left: `${item.x * 100}%`, top: `${item.y * 100}%`, width: `${item.width * 100}%`, fontSize: `${previewFontSize(item)}px`, fontFamily: previewFontFamily(item.fontFamily), lineHeight: 1.15, color: item.color, fontWeight: item.bold ? 700 : 400, textAlign: item.align as CanvasTextAlign }}>
               {item.text.replace(/\{\{\s*([\w]+)\s*\}\}/g, (_, key) => ({ recipient_name: 'Alex Morgan', student_name: 'Alex Morgan', certificate_id: 'OSCV-YYYY-XXXXXXXX', certificate_number: 'OSCV-YYYY-XXXXXXXX', course_name: 'Sample Course', course_description: 'Completion description', start_date: '01/07/2026', end_date: '01/10/2026', issue_date: '16/10/2026' } as Record<string, string>)[key] || key)}
             </div>)}
           </div>
         </div>
-        <aside className="space-y-3 text-sm text-slate-800 dark:text-slate-100 lg:max-h-[calc(100vh-9rem)] overflow-y-auto pr-1">
+        <aside className="space-y-3 pr-1 text-sm text-slate-800 dark:text-slate-100 lg:min-h-0 lg:overflow-y-auto">
           <div className="font-semibold">Choose a field, then click its position</div>
           <p className="text-xs text-slate-500 dark:text-slate-400">Certificate ID preview: OSCV-YYYY-XXXXXXXX. The real unique ID and year are inserted when a certificate is generated.</p>
           <div className="flex flex-wrap gap-1">{FIELDS.map((field) => {
@@ -155,7 +165,7 @@ export default function TemplateLayoutEditor({ template, onClose, onSaved }: {
           </div>}
           {active && selectedRedaction === null && <div className="space-y-2 border-t pt-3 dark:border-slate-700">
             <label className="block">Text<input className="mt-1 w-full rounded border border-slate-300 bg-white p-2 text-slate-900 dark:border-slate-600 dark:bg-slate-800 dark:text-slate-100" value={active.text} onChange={(e) => setElements((items) => items.map((x, i) => i === selected ? { ...x, text: keepCertificateIdPlaceholder(x.text, e.target.value) } : x))} /></label>
-            <label className="block">Font size (template image px)<input type="number" min="8" max="120" className="mt-1 w-full rounded border border-slate-300 bg-white p-2 text-slate-900 dark:border-slate-600 dark:bg-slate-800 dark:text-slate-100" value={active.fontSize} onChange={(e) => setElements((items) => items.map((x, i) => i === selected ? { ...x, fontSize: Number(e.target.value) || 8 } : x))} /></label>
+            <label className="block">Font size (template image px)<input type="number" step="1" className="mt-1 w-full rounded border border-slate-300 bg-white p-2 text-slate-900 dark:border-slate-600 dark:bg-slate-800 dark:text-slate-100" value={active.fontSize ?? ''} onChange={(e) => setElements((items) => items.map((x, i) => i === selected ? { ...x, fontSize: Math.trunc(Number(e.target.value) || 8) } : x))} /></label>
             <label className="block">Font family<select className="mt-1 w-full rounded border border-slate-300 bg-white p-2 text-slate-900 dark:border-slate-600 dark:bg-slate-800 dark:text-slate-100" value={active.fontFamily || 'Arial'} onChange={(e) => setElements((items) => items.map((x, i) => i === selected ? { ...x, fontFamily: e.target.value } : x))}><option value="Arial">Arial</option><option value="DejaVu Sans">DejaVu Sans</option><option value="Serif">Serif</option><option value="Monospace">Monospace</option><option value="Caladea">Caladea (Certificate Serif)</option><option value="Amiri">Amiri (Elegant Serif)</option><option value="Lato">Lato</option><option value="Poppins">Poppins</option></select></label>
             <label className="block">Color<input type="color" className="ml-2 align-middle" value={active.color} onChange={(e) => setElements((items) => items.map((x, i) => i === selected ? { ...x, color: e.target.value } : x))} /></label>
             <label className="block">Width<input type="range" min=".15" max=".9" step=".01" className="w-full" value={active.width} onChange={(e) => setElements((items) => items.map((x, i) => i === selected ? { ...x, width: Number(e.target.value) } : x))} /></label>

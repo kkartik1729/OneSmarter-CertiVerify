@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { certificateService } from '../services';
+import ZoomableCertificateViewer from './ZoomableCertificateViewer';
 
 interface Props {
   certificateId: string | number;
@@ -7,10 +8,12 @@ interface Props {
   className?: string;
   onClick?: () => void;
   onError?: () => void;
+  zoomable?: boolean;
+  onClose?: () => void;
 }
 
 /** Loads a protected certificate image with the bearer token, never a tokenized URL. */
-export default function AuthenticatedCertificateImage({ certificateId, alt, className, onClick, onError }: Props) {
+export default function AuthenticatedCertificateImage({ certificateId, alt, className, onClick, onError, zoomable = false, onClose }: Props) {
   const [src, setSrc] = useState<string | null>(null);
   const onErrorRef = useRef(onError);
 
@@ -35,5 +38,7 @@ export default function AuthenticatedCertificateImage({ certificateId, alt, clas
     };
   }, [certificateId]);
 
-  return src ? <img src={src} alt={alt} className={className} onClick={onClick} /> : null;
+  if (!src) return null;
+  if (zoomable) return <ZoomableCertificateViewer src={src} alt={alt} onClose={onClose ?? (() => undefined)} />;
+  return <img src={src} alt={alt} className={className} onClick={onClick} />;
 }

@@ -11,7 +11,8 @@ from PIL import Image
 from django.contrib.auth import get_user_model
 from django.core.files.base import ContentFile
 from django.db import models, transaction
-from django.db.models import Q
+from django.db.models import Exists, OuterRef, Q
+from django.db.models.functions import Lower, Trim
 from django.http import FileResponse, HttpResponse
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
@@ -30,7 +31,12 @@ from apps.verification.authentication import OptionalJWTAuthentication
 from apps.verification.models import VerificationAttempt
 
 from .emails import send_certificate_issued_email
-from .generator import generate_certificate_image, load_template_image
+from .generator import (
+    TemplateImageError,
+    certificate_image_to_pdf,
+    generate_certificate_image,
+    load_template_image,
+)
 from .models import Certificate, CertificatePDF, CertificateTemplate, Course, GenerationBatch
 from .permissions import (
     IsCertiVerifyAdmin,
@@ -47,6 +53,16 @@ from .serializers import (
 User = get_user_model()
 
 logger = logging.getLogger(__name__)
+
+
+def _find_registered_user_by_email(email):
+    """Find an account using the normalized recipient email used at issuance."""
+    normalized_email = (email or "").strip().lower()
+    if not normalized_email:
+        return None
+    return User.objects.annotate(
+        _normalized_email=Lower(Trim("email")),
+    ).filter(_normalized_email=normalized_email).first()
 
 
 def _missing_template_fields(template, values, custom_values=None):
@@ -90,24 +106,9 @@ def _missing_template_fields(template, values, custom_values=None):
 
 def _send_and_record_certificate_email(certificate):
     """Keep email delivery outcome separate from the already-created certificate."""
-    try:
-        email_sent, email_error = send_certificate_issued_email(certificate)
-    except Exception:
-        logger.exception("Certificate email delivery raised unexpectedly for %s", certificate.certificate_number)
-        email_sent, email_error = False, "Email delivery failed. Use the existing retry action to try again."
+    from apps.certificates.services import send_certificate_email_once
 
-    certificate.email_sent = bool(email_sent)
-    certificate.email_error = (email_error or "")[:2000]
-    try:
-        certificate.save(update_fields=["email_sent", "email_error"])
-    except Exception:
-        logger.exception("Could not persist email status for generated certificate %s", certificate.certificate_number)
-        certificate.email_error = (
-            "Email was accepted, but its delivery status could not be saved."
-            if email_sent
-            else "Email delivery failed and its status could not be saved."
-        )
-    return bool(email_sent), certificate.email_error
+    return send_certificate_email_once(certificate, sender=send_certificate_issued_email)
 
 
 # ---------------------------------------------------------------------------
@@ -125,8 +126,9 @@ class CertificateListCreateView(generics.ListCreateAPIView):
     parser_classes = [MultiPartParser, FormParser, JSONParser]
 
     def get_queryset(self):
-        qs = Certificate.objects.select_related("owner").prefetch_related(
-            "pdf_document"
+        pdf_exists = CertificatePDF.objects.filter(certificate_id=OuterRef("pk"))
+        qs = Certificate.objects.select_related("owner").annotate(
+            _has_pdf=Exists(pdf_exists)
         )
         if is_certiverify_admin(self.request.user):
             return qs
@@ -139,9 +141,7 @@ class CertificateListCreateView(generics.ListCreateAPIView):
                 claim_unclaimed_certificates_for_user(user)
 
         # Re-evaluate queryset AFTER claiming so newly-claimed certs appear immediately
-        return Certificate.objects.select_related("owner").prefetch_related(
-            "pdf_document"
-        ).filter(owner=self.request.user)
+        return qs.filter(owner=self.request.user)
 
     def get_serializer_context(self):
         ctx = super().get_serializer_context()
@@ -222,8 +222,10 @@ class CertificateDetailView(generics.RetrieveUpdateAPIView):
 
     serializer_class = CertificateSerializer
     permission_classes = [IsAuthenticated, IsOwnerOrCertiVerifyAdmin]
-    queryset = Certificate.objects.select_related("owner").prefetch_related(
-        "pdf_document"
+    queryset = Certificate.objects.select_related("owner").annotate(
+        _has_pdf=Exists(
+            CertificatePDF.objects.filter(certificate_id=OuterRef("pk"))
+        )
     )
 
     def get_serializer_context(self):
@@ -589,12 +591,9 @@ class CertificatePDFDownloadView(APIView):
                 try:
                     with certificate.file.open("rb") as f:
                         img_bytes = f.read()
-                    pil_img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
-                    buf = io.BytesIO()
-                    pil_img.save(buf, format="PDF", resolution=150)
                     pdf_doc = CertificatePDF.store(
                         certificate=certificate,
-                        raw_bytes=buf.getvalue(),
+                        raw_bytes=certificate_image_to_pdf(img_bytes),
                         filename=f"{certificate.certificate_number}.pdf",
                     )
                 except Exception as exc:
@@ -1020,7 +1019,7 @@ class ValidateCSVView(APIView):
             elif "@" not in email or "." not in email.split("@")[-1]:
                 errors.append(f"Invalid email format: '{student_email_raw}'.")
             else:
-                user = User.objects.filter(email__iexact=email).first()
+                user = _find_registered_user_by_email(email)
                 if user:
                     user_id = user.id
                     has_account = True
@@ -1183,7 +1182,7 @@ class BulkGenerateView(APIView):
         # own copy, so recipient text cannot leak into another recipient's image.
         try:
             template_background = load_template_image(template.image.path)
-        except Exception:
+        except Exception as exc:
             logger.exception("Could not load template image for batch %s", batch.id)
             batch.status = GenerationBatch.Status.FAILED
             batch.failed = len(rows)
@@ -1191,11 +1190,15 @@ class BulkGenerateView(APIView):
                 "row_number": (row.get("row_number", index + 1) if isinstance(row, dict) else index + 1),
                 "student_name": (row.get("student_name", "") if isinstance(row, dict) else ""),
                 "student_email": (row.get("student_email", "") if isinstance(row, dict) else ""),
-                "error": "Template image could not be loaded; see the server log for details.",
+                "error": str(exc) if isinstance(exc, TemplateImageError) else "Template image could not be loaded safely; see the server log for details.",
             } for index, row in enumerate(rows)]
             batch.completed_at = timezone.now()
             batch.save(update_fields=["status", "failed", "error_report", "completed_at"])
-            return Response(GenerationBatchSerializer(batch).data, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+            response_data = GenerationBatchSerializer(batch).data
+            if isinstance(exc, TemplateImageError):
+                response_data["detail"] = str(exc)
+                return Response(response_data, status=status.HTTP_400_BAD_REQUEST)
+            return Response(response_data, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
         for r in rows:
             student_email = (r.get("student_email") or "").strip().lower()
@@ -1222,7 +1225,7 @@ class BulkGenerateView(APIView):
                 continue
 
             # Lookup student (optional for unregistered recipients)
-            user = User.objects.filter(email__iexact=student_email).first()
+            user = _find_registered_user_by_email(student_email)
 
             # Duplicate check
             dup_qs = Certificate.objects.filter(course_name__iexact=course_name)
@@ -1327,12 +1330,9 @@ class BulkGenerateView(APIView):
 
                     # Convert PNG bytes to PDF and store persistently in PostgreSQL
                     try:
-                        img_for_pdf = Image.open(io.BytesIO(png_bytes)).convert("RGB")
-                        pdf_buffer = io.BytesIO()
-                        img_for_pdf.save(pdf_buffer, format="PDF", resolution=150)
                         CertificatePDF.store(
                             certificate=cert,
-                            raw_bytes=pdf_buffer.getvalue(),
+                            raw_bytes=certificate_image_to_pdf(png_bytes),
                             filename=f"{cert_num}.pdf",
                         )
                     except Exception as pdf_err:
@@ -1371,6 +1371,8 @@ class BulkGenerateView(APIView):
                         else "Certificate rendering or storage failed; see the server log for details."
                     ),
                 })
+
+        template_background.close()
 
         # Finalize batch
         batch.successful = successful_count
@@ -1497,8 +1499,13 @@ class SingleGenerateView(APIView):
         user = None
         if user_id:
             user = User.objects.filter(pk=user_id).first()
-        if not user and student_email:
-            user = User.objects.filter(email__iexact=student_email).first()
+            if user is None:
+                return Response({"detail": "Selected recipient account was not found."}, status=status.HTTP_400_BAD_REQUEST)
+            matched_email_user = _find_registered_user_by_email(student_email) if student_email else None
+            if student_email and matched_email_user != user:
+                return Response({"detail": "Recipient email does not match the selected account."}, status=status.HTTP_400_BAD_REQUEST)
+        elif student_email:
+            user = _find_registered_user_by_email(student_email)
         if user and not student_email:
             student_email = user.email.lower()
 
@@ -1608,12 +1615,9 @@ class SingleGenerateView(APIView):
 
                 # Convert PNG bytes to PDF and store persistently in PostgreSQL
                 try:
-                    img_for_pdf = Image.open(io.BytesIO(png_bytes)).convert("RGB")
-                    pdf_buffer = io.BytesIO()
-                    img_for_pdf.save(pdf_buffer, format="PDF", resolution=150)
                     CertificatePDF.store(
                         certificate=cert,
-                        raw_bytes=pdf_buffer.getvalue(),
+                        raw_bytes=certificate_image_to_pdf(png_bytes),
                         filename=f"{cert_num}.pdf",
                     )
                 except Exception as pdf_err:
@@ -1664,6 +1668,8 @@ class SingleGenerateView(APIView):
 
         except Exception as exc:
             logger.exception("Failed to generate single certificate")
+            if isinstance(exc, TemplateImageError):
+                return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
             return Response({"detail": "Certificate generation failed. Check the server log for diagnostic details."}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
@@ -1785,6 +1791,8 @@ class PreviewCertificateView(APIView):
             })
         except Exception as exc:
             logger.exception("Failed generating preview certificate")
+            if isinstance(exc, TemplateImageError):
+                return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
             return Response({"detail": "Could not generate preview. Check the server log for details."}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 

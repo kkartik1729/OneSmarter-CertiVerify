@@ -123,9 +123,13 @@ class UserProfileSerializer(serializers.ModelSerializer):
             return False
         try:
             from apps.certificates.models import Certificate
-            return Certificate.objects.filter(
-                recipient_email__iexact=user.email.strip().lower(),
+            from django.db.models.functions import Lower, Trim
+            return Certificate.objects.annotate(
+                clean_recipient_email=Trim(Lower("recipient_email")),
+            ).filter(
+                clean_recipient_email=user.email.strip().lower(),
                 owner__isnull=True,
+                status=Certificate.Status.VERIFIED,
             ).exists()
         except Exception:
             return False

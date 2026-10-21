@@ -3,7 +3,7 @@
  */
 
 export interface SocialLink {
-  id: 'instagram' | 'linkedin' | 'facebook' | 'website';
+  id: 'instagram' | 'facebook' | 'website';
   name: string;
   url: string;
   ariaLabel: string;
@@ -18,12 +18,6 @@ export const SOCIAL_LINKS: SocialLink[] = [
     name: 'Instagram',
     url: 'https://www.instagram.com/onesmarter.inc/',
     ariaLabel: 'Visit OneSmarter on Instagram (opens in new tab)',
-  },
-  {
-    id: 'linkedin',
-    name: 'LinkedIn',
-    url: 'https://www.linkedin.com/company/onesmarter-inc/',
-    ariaLabel: 'Visit OneSmarter Inc. on LinkedIn (opens in new tab)',
   },
   {
     id: 'facebook',

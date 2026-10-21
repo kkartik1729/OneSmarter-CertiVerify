@@ -21,11 +21,119 @@ import hashlib
 import io
 import logging
 import re
+import threading
 from pathlib import Path
 
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageFont, ImageOps
 
 logger = logging.getLogger(__name__)
+
+# Certificate artwork needs far fewer pixels than a photographic master. Bound
+# decoded images to 16 MP (about 64 MiB RGBA) and their longest side to 6000px;
+# oversized JPEGs are reduced in the JPEG decoder before pixel data is loaded.
+MAX_TEMPLATE_PIXELS = 16_000_000
+MAX_TEMPLATE_DIMENSION = 6_000
+MAX_SAFE_PNG_SOURCE_PIXELS = 40_000_000
+MAX_SAFE_PNG_SOURCE_DIMENSION = 12_000
+MAX_JPEG_SOURCE_PIXELS = 300_000_000
+_PIL_HEADER_LOCK = threading.Lock()
+
+
+class TemplateImageError(ValueError):
+    """A template is invalid or exceeds the safe raster processing limits."""
+
+
+def bounded_template_size(width: int, height: int) -> tuple[int, int]:
+    """Return proportional working dimensions under the raster resource limits."""
+    if width < 1 or height < 1:
+        raise TemplateImageError("Template image has invalid dimensions.")
+    factor = min(
+        1.0,
+        (MAX_TEMPLATE_PIXELS / (width * height)) ** 0.5,
+        MAX_TEMPLATE_DIMENSION / max(width, height),
+    )
+    return max(1, int(width * factor)), max(1, int(height * factor))
+
+
+def pdf_template_render_scale(page_width: float, page_height: float, dpi: float = 200) -> float:
+    """Choose a PDF render scale bounded by the same pixel and dimension limits."""
+    if page_width <= 0 or page_height <= 0:
+        raise TemplateImageError("PDF template has invalid page dimensions.")
+    scale = dpi / 72.0
+    max_scale = min(
+        (MAX_TEMPLATE_PIXELS / (page_width * page_height)) ** 0.5,
+        MAX_TEMPLATE_DIMENSION / max(page_width, page_height),
+    )
+    # Leave a small margin for PDFium's integer rounding of raster dimensions.
+    return min(scale, max_scale * 0.99)
+
+
+def _safe_open_raster(path_or_file):
+    """Open and decode a raster safely, using JPEG native reduction when needed."""
+    # Pillow performs its bomb check in Image.open, before JPEG's draft() can
+    # lower its decode size. Permit only the validated JPEG source ceiling while
+    # reading its header, then restore the process setting before decoding.
+    with _PIL_HEADER_LOCK:
+        original_limit = Image.MAX_IMAGE_PIXELS
+        try:
+            Image.MAX_IMAGE_PIXELS = MAX_JPEG_SOURCE_PIXELS
+            source = Image.open(path_or_file)
+            fmt = source.format
+            width, height = source.size
+            if fmt == "JPEG" and width * height > MAX_TEMPLATE_PIXELS:
+                if width * height > MAX_JPEG_SOURCE_PIXELS:
+                    source.close()
+                    raise TemplateImageError(
+                        f"Template image resolution {width}x{height} exceeds the safe processing limit. "
+                        "Resize the image or upload a single-page PDF template."
+                    )
+                target_width, target_height = bounded_template_size(width, height)
+                # JPEG draft selects discrete 1/2, 1/4, or 1/8 decoder scales.
+                # Request slightly below the cap so boundary-sized 1/4 output
+                # does not cause Pillow to choose the much larger 1/2 raster.
+                source.draft("RGB", (max(1, int(target_width * 0.9)), max(1, int(target_height * 0.9))))
+            elif fmt != "JPEG" and (
+                width * height > MAX_SAFE_PNG_SOURCE_PIXELS
+                or max(width, height) > MAX_SAFE_PNG_SOURCE_DIMENSION
+            ):
+                source.close()
+                raise TemplateImageError(
+                    f"Template image resolution {width}x{height} exceeds the safe processing limit. "
+                    "Resize the image or upload a single-page PDF template."
+                )
+        except TemplateImageError:
+            raise
+        except Exception as exc:
+            raise TemplateImageError(f"Template image could not be opened: {exc}") from exc
+        finally:
+            Image.MAX_IMAGE_PIXELS = original_limit
+
+    try:
+        source.load()
+        oriented = ImageOps.exif_transpose(source)
+        try:
+            if oriented.width * oriented.height > MAX_TEMPLATE_PIXELS or max(oriented.size) > MAX_TEMPLATE_DIMENSION:
+                oriented.thumbnail(bounded_template_size(*oriented.size), Image.Resampling.LANCZOS)
+            image = oriented.convert("RGBA")
+        finally:
+            if oriented is not source:
+                oriented.close()
+        working_scale = (image.width * image.height / (width * height)) ** 0.5
+        image.info["_certify_source_scale"] = working_scale
+        image.info["_certify_source_dimensions"] = (width, height)
+        source_dpi = source.info.get("dpi", (150, 150))[0]
+        try:
+            image.info["_certify_pdf_resolution"] = max(1.0, float(source_dpi) * working_scale)
+        except (TypeError, ValueError):
+            image.info["_certify_pdf_resolution"] = 150.0 * working_scale
+        return image
+    except Exception as exc:
+        source.close()
+        if isinstance(exc, TemplateImageError):
+            raise
+        raise TemplateImageError(f"Template image could not be decoded safely: {exc}") from exc
+    finally:
+        source.close()
 
 # ---------------------------------------------------------------------------
 # Font helpers
@@ -67,7 +175,7 @@ def _try_load_font(candidates: list[str], size: int):
 
 
 def _get_font(size: int, bold: bool = False, family: str = "Arial"):
-    """Load the requested family; missing family files fall back to Arial candidates, then Pillow's built-in font."""
+    """Load a scalable font at the requested pixel size, preserving size on fallback."""
     bundled_families = {
         "Caladea": (_BUNDLED_FONT_DIR / "Caladea-Bold.ttf", _BUNDLED_FONT_DIR / "Caladea-Regular.ttf"),
         "Amiri": (_BUNDLED_FONT_DIR / "Amiri-Bold.ttf", _BUNDLED_FONT_DIR / "Amiri-Regular.ttf"),
@@ -94,7 +202,15 @@ def _get_font(size: int, bold: bool = False, family: str = "Arial"):
     font = _try_load_font(regular_candidates, size)
     if font:
         return font
-    return ImageFont.load_default()
+
+    # Pillow's default bitmap font is tiny regardless of the requested size.
+    # Use the bundled scalable Lato face instead so fields retain their chosen
+    # size on hosts that do not have Arial/DejaVu/Liberation fonts installed.
+    fallback = _BUNDLED_FONT_DIR / "Lato" / ("Lato-Bold.ttf" if bold else "Lato-Regular.ttf")
+    font = _try_load_font([str(fallback)], size)
+    if font:
+        return font
+    raise OSError(f"No scalable font is available for {family}.")
 
 
 # ---------------------------------------------------------------------------
@@ -109,6 +225,16 @@ def _text_width(draw: ImageDraw.ImageDraw, text: str, font) -> int:
 def _text_height(draw: ImageDraw.ImageDraw, text: str, font) -> int:
     bb = draw.textbbox((0, 0), text, font=font)
     return bb[3] - bb[1]
+
+
+def _template_font_size(element: dict, width: int, height: int) -> int:
+    """Resolve a saved layer size in source-template pixels without scaling it."""
+    default_size = max(14, int(min(width, height) * 0.03))
+    try:
+        size = int(element.get("fontSize", default_size))
+    except (TypeError, ValueError, OverflowError):
+        size = default_size
+    return size
 
 
 def _draw_centered(
@@ -161,22 +287,89 @@ def _fmt_date(d) -> str:
 
 def load_template_image(template_path: str) -> Image.Image:
     """Decode a template once so bulk generation can reuse its pristine background."""
-    from PIL import ImageFile
-    ImageFile.LOAD_TRUNCATED_IMAGES = True
     if str(template_path).lower().endswith(".pdf"):
         try:
             import pypdfium2 as pdfium
             pdf = pdfium.PdfDocument(template_path)
             try:
-                return pdf[0].render(scale=200 / 72.0).to_pil().convert("RGBA")
+                if len(pdf) < 1:
+                    raise TemplateImageError("PDF template must contain at least one page.")
+                page = pdf[0]
+                width, height = page.get_size()
+                scale = pdf_template_render_scale(width, height)
+                bitmap = page.render(scale=scale)
+                try:
+                    image = bitmap.to_pil().convert("RGBA")
+                finally:
+                    bitmap.close()
+                image.info["_certify_source_scale"] = 1.0
+                image.info["_certify_pdf_resolution"] = scale * 72.0
+                return image
             finally:
                 pdf.close()
         except Exception as exc:
-            logger.warning("pypdfium2 failed to render PDF template %s: %s", template_path, exc)
-            return Image.open(template_path).convert("RGBA")
-    with Image.open(template_path) as source:
-        source.load()
-        return source.convert("RGBA")
+            if isinstance(exc, TemplateImageError):
+                raise
+            logger.warning("Could not render PDF template %s: %s", template_path, exc)
+            raise TemplateImageError(f"PDF template could not be rendered safely: {exc}") from exc
+    return _safe_open_raster(template_path)
+
+
+def _scale_layout_to_working_image(layout: dict, scale: float) -> dict:
+    """Map saved source-pixel font sizes and absolute coordinates to a reduced raster."""
+    if scale >= 0.999999:
+        return layout
+
+    scaled = dict(layout)
+
+    def scale_absolute(value):
+        if isinstance(value, (int, float)) and abs(value) > 1:
+            return value * scale
+        return value
+
+    for key in ("left_margin", "right_margin"):
+        if key in scaled:
+            scaled[key] = scale_absolute(scaled[key])
+    for key in ("name_y", "para_top", "meta_top", "sig_top"):
+        if key in scaled:
+            scaled[key] = scale_absolute(scaled[key])
+    for key in ("name_font_size", "min_name_font_size", "para_font_size", "detail_font_size"):
+        if isinstance(scaled.get(key), (int, float)):
+            scaled[key] = max(1, round(scaled[key] * scale))
+    if isinstance(scaled.get("mask_rect"), (list, tuple)) and len(scaled["mask_rect"]) == 4:
+        scaled["mask_rect"] = [round(value * scale) for value in scaled["mask_rect"]]
+
+    elements = []
+    for element in layout.get("elements", []) or []:
+        if not isinstance(element, dict):
+            elements.append(element)
+            continue
+        item = dict(element)
+        for key in ("x", "width"):
+            if key in item:
+                item[key] = scale_absolute(item[key])
+        for key in ("y", "height"):
+            if key in item:
+                item[key] = scale_absolute(item[key])
+        if isinstance(item.get("fontSize"), (int, float)):
+            item["fontSize"] = max(1, round(item["fontSize"] * scale))
+        elements.append(item)
+    if "elements" in layout:
+        scaled["elements"] = elements
+
+    redactions = []
+    for cover in layout.get("redactions", []) or []:
+        if not isinstance(cover, dict):
+            redactions.append(cover)
+            continue
+        item = dict(cover)
+        for key in ("x", "width", "y", "height"):
+            if key in item:
+                item[key] = scale_absolute(item[key])
+        redactions.append(item)
+    if "redactions" in layout:
+        scaled["redactions"] = redactions
+    return scaled
 
 
 # ---------------------------------------------------------------------------
@@ -295,9 +488,6 @@ def generate_certificate_image(
     Returns:
         (file_bytes, sha256_hex) — the generated certificate in requested format and its hash.
     """
-    from PIL import ImageFile
-    ImageFile.LOAD_TRUNCATED_IMAGES = True
-
     # ------------------------------------------------------------------
     # 1. Load template (supports PNG, JPG/JPEG, and PDF)
     # ------------------------------------------------------------------
@@ -313,6 +503,11 @@ def generate_certificate_image(
 
     if layout_overrides and isinstance(layout_overrides, dict):
         layout.update(layout_overrides)
+    try:
+        working_scale = float(img.info.get("_certify_source_scale", 1.0))
+    except (TypeError, ValueError):
+        working_scale = 1.0
+    layout = _scale_layout_to_working_image(layout, working_scale)
 
     left_x         = layout.get("left_margin", int(w * 0.10))
     right_x        = layout.get("right_margin", int(w * 0.90))
@@ -457,7 +652,7 @@ def generate_certificate_image(
             return int(raw) if isinstance(raw, (int, float)) else fallback
         x, y = coord("x", int(w * .2)), coord("y", int(h * .5))
         box_w = max(1, coord("width", int(w * .6)))
-        size = max(6, min(300, int(element.get("fontSize", max(14, min(w, h) * .03)))))
+        size = _template_font_size(element, w, h)
         font = _get_font(size, bold=bool(element.get("bold", False)), family=element.get("fontFamily", "Arial"))
         color = element.get("color", "#202020")
         lines = []
@@ -616,23 +811,30 @@ def generate_certificate_image(
     # ------------------------------------------------------------------
     buffer = io.BytesIO()
     fmt = output_format.upper()
+    pdf_resolution = float(img.info.get("_certify_pdf_resolution", 150.0))
     if fmt == "PNG":
         # Preserve full alpha transparency and resolution
-        img.save(buffer, format="PNG", optimize=True)
+        img.save(buffer, format="PNG", optimize=True, dpi=(pdf_resolution, pdf_resolution))
     elif fmt in ("JPEG", "JPG"):
         output_img = Image.new("RGB", img.size, (255, 255, 255))
         if img.mode == "RGBA":
-            output_img.paste(img, mask=img.split()[3])
+            alpha = img.getchannel("A")
+            output_img.paste(img, mask=alpha)
+            alpha.close()
         else:
             output_img.paste(img)
         output_img.save(buffer, format="JPEG", quality=95)
+        output_img.close()
     elif fmt == "PDF":
         output_img = Image.new("RGB", img.size, (255, 255, 255))
         if img.mode == "RGBA":
-            output_img.paste(img, mask=img.split()[3])
+            alpha = img.getchannel("A")
+            output_img.paste(img, mask=alpha)
+            alpha.close()
         else:
             output_img.paste(img)
-        output_img.save(buffer, format="PDF", resolution=150)
+        output_img.save(buffer, format="PDF", resolution=pdf_resolution)
+        output_img.close()
     else:
         img.save(buffer, format="PNG", optimize=True)
 
@@ -648,6 +850,7 @@ def generate_certificate_image(
         sha256,
     )
 
+    img.close()
     return result_bytes, sha256
 
 
@@ -656,21 +859,34 @@ def convert_certificate_image_to_formats(png_bytes: bytes) -> dict[str, bytes]:
     Produce PNG, JPEG, and PDF bytes from the same generated certificate raster.
     Ensures 100% visual identity across all output formats.
     """
-    img = Image.open(io.BytesIO(png_bytes)).convert("RGB")
-
+    with Image.open(io.BytesIO(png_bytes)) as source:
+        img = source.convert("RGB")
     # JPEG
     jpg_buf = io.BytesIO()
     img.save(jpg_buf, format="JPEG", quality=95)
 
     # PDF
-    pdf_buf = io.BytesIO()
-    img.save(pdf_buf, format="PDF", resolution=150)
+    pdf_bytes = certificate_image_to_pdf(png_bytes)
+    img.close()
 
     return {
         "png": png_bytes,
         "jpeg": jpg_buf.getvalue(),
-        "pdf": pdf_buf.getvalue(),
+        "pdf": pdf_bytes,
     }
+
+
+def certificate_image_to_pdf(png_bytes: bytes) -> bytes:
+    """Convert a generated PNG to PDF while preserving its physical page size."""
+    with Image.open(io.BytesIO(png_bytes)) as source:
+        resolution = float(source.info.get("dpi", (150, 150))[0])
+        image = source.convert("RGB")
+    try:
+        pdf_buffer = io.BytesIO()
+        image.save(pdf_buffer, format="PDF", resolution=resolution)
+        return pdf_buffer.getvalue()
+    finally:
+        image.close()
 
 
 

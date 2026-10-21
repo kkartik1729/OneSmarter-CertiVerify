@@ -8,7 +8,6 @@ from django.contrib.auth import get_user_model
 from PIL import Image
 
 from apps.accounts.emails import send_account_email
-from apps.certificates.helpers import get_public_frontend_base_url
 from apps.certificates.models import CertificatePDF
 
 logger = logging.getLogger(__name__)
@@ -100,6 +99,11 @@ def send_certificate_issued_email(certificate) -> tuple[bool, str]:
     Returns (success: bool, error_message: str).
     Gracefully catches failures to prevent crashing generation batches.
     """
+    from apps.certificates.models import Certificate
+
+    if certificate.status != Certificate.Status.VERIFIED:
+        return False, "Certificate is not eligible for issuance email."
+
     owner = certificate.owner
     recipient_email = ""
     if owner and getattr(owner, "email", None):
@@ -114,7 +118,7 @@ def send_certificate_issued_email(certificate) -> tuple[bool, str]:
     has_account = (owner is not None) or User.objects.filter(email__iexact=recipient_email).exists()
 
     frontend_base = getattr(settings, "FRONTEND_URL", "http://localhost:5173").rstrip("/")
-    public_base = get_public_frontend_base_url()
+    public_base = getattr(settings, "PUBLIC_FRONTEND_URL", "").strip().rstrip("/")
     login_url = f"{frontend_base}/login"
     register_url = f"{frontend_base}/register"
     my_certificates_url = f"{frontend_base}/user/dashboard/certificates"

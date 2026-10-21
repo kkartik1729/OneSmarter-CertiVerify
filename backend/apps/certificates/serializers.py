@@ -3,7 +3,6 @@ from django.contrib.auth import get_user_model
 from rest_framework import serializers
 
 from apps.certificates.permissions import is_certiverify_admin
-from apps.certificates.helpers import build_public_credential_url
 from .models import Certificate, CertificatePDF, Course, CertificateTemplate, GenerationBatch
 
 User = get_user_model()
@@ -18,8 +17,6 @@ def _pdf_download_url(obj: Certificate, request) -> str | None:
     Return the absolute URL for downloading the DB-stored PDF,
     or None when no PDF is stored.
     """
-    if not hasattr(obj, "pdf_document") or obj.pdf_document is None:
-        return None
     if request is None:
         return f"/api/certificates/{obj.pk}/pdf/download/"
     return request.build_absolute_uri(f"/api/certificates/{obj.pk}/pdf/download/")
@@ -50,8 +47,6 @@ class CertificateSerializer(serializers.ModelSerializer):
     pdf_download_url = serializers.SerializerMethodField()
     image_url = serializers.SerializerMethodField()
     download_url = serializers.SerializerMethodField()
-    credential_url = serializers.SerializerMethodField()
-    is_credential_url_public = serializers.SerializerMethodField()
 
     class Meta:
         model = Certificate
@@ -81,8 +76,6 @@ class CertificateSerializer(serializers.ModelSerializer):
             "pdf_download_url",  # download URL when has_pdf is True
             "image_url",
             "download_url",
-            "credential_url",
-            "is_credential_url_public",
             "verification_code",
             "status",
             "rejection_reason",
@@ -98,8 +91,6 @@ class CertificateSerializer(serializers.ModelSerializer):
             "pdf_download_url",
             "image_url",
             "download_url",
-            "credential_url",
-            "is_credential_url_public",
             "verification_code",
             "status",
             "rejection_reason",
@@ -123,17 +114,15 @@ class CertificateSerializer(serializers.ModelSerializer):
         return ret
 
     def get_has_pdf(self, obj: Certificate) -> bool:
-        try:
-            return obj.pdf_document is not None
-        except CertificatePDF.DoesNotExist:
-            return False
+        # List/detail querysets annotate existence so serialization does not
+        # fetch the related PDF row and its potentially large binary content.
+        if hasattr(obj, "_has_pdf"):
+            return bool(obj._has_pdf)
+        return CertificatePDF.objects.filter(certificate_id=obj.pk).exists()
 
     def get_pdf_download_url(self, obj: Certificate) -> str | None:
         request = self.context.get("request")
-        try:
-            if obj.pdf_document is None:
-                return None
-        except CertificatePDF.DoesNotExist:
+        if not self.get_has_pdf(obj):
             return None
         return _pdf_download_url(obj, request)
 
@@ -152,14 +141,6 @@ class CertificateSerializer(serializers.ModelSerializer):
             path = f"/api/certificates/{obj.pk}/image/?download=true"
             return request.build_absolute_uri(path) if request else path
         return None
-
-    def get_credential_url(self, obj: Certificate) -> str | None:
-        url, _ = build_public_credential_url(obj.certificate_number)
-        return url
-
-    def get_is_credential_url_public(self, obj: Certificate) -> bool:
-        _, is_public = build_public_credential_url(obj.certificate_number)
-        return is_public
 
     def validate_recipient_name(self, value):
         trimmed = (value or "").strip()
@@ -420,11 +401,14 @@ class CertificateTemplateSerializer(serializers.ModelSerializer):
         import io
         import logging
         from django.core.files.base import ContentFile
-        from PIL import Image, ImageFile
+        from .generator import (
+            MAX_TEMPLATE_PIXELS,
+            TemplateImageError,
+            _safe_open_raster,
+            pdf_template_render_scale,
+        )
 
         logger = logging.getLogger(__name__)
-        ImageFile.LOAD_TRUNCATED_IMAGES = True
-        Image.MAX_IMAGE_PIXELS = 200_000_000
 
         # Support templates up to 25 MB
         if value.size > 25 * 1024 * 1024:
@@ -453,15 +437,25 @@ class CertificateTemplateSerializer(serializers.ModelSerializer):
             try:
                 import pypdfium2 as pdfium
                 pdf = pdfium.PdfDocument(io.BytesIO(content))
-                if len(pdf) < 1:
-                    raise serializers.ValidationError("PDF template must contain at least 1 page.")
-                page = pdf[0]
-                # Render at 200 dpi for sharp vector background reproduction
-                scale = 200 / 72.0
-                rendered_img = page.render(scale=scale).to_pil().convert("RGB")
-                buf = io.BytesIO()
-                rendered_img.save(buf, format="PNG")
-                png_bytes = buf.getvalue()
+                try:
+                    if len(pdf) < 1:
+                        raise serializers.ValidationError("PDF template must contain at least 1 page.")
+                    page = pdf[0]
+                    width, height = page.get_size()
+                    scale = pdf_template_render_scale(width, height)
+                    bitmap = page.render(scale=scale)
+                    try:
+                        rendered_img = bitmap.to_pil().convert("RGB")
+                    finally:
+                        bitmap.close()
+                    try:
+                        buf = io.BytesIO()
+                        rendered_img.save(buf, format="PNG", dpi=(scale * 72.0, scale * 72.0))
+                        png_bytes = buf.getvalue()
+                    finally:
+                        rendered_img.close()
+                finally:
+                    pdf.close()
 
                 converted_file = ContentFile(png_bytes, name=f"{safe_base}.png")
                 converted_file._template_format = "PDF"
@@ -477,17 +471,26 @@ class CertificateTemplateSerializer(serializers.ModelSerializer):
 
         # Validate PNG or JPEG image content with Pillow
         # Safely decode Figma PNGs (including transparency, alpha channels, and metadata chunks)
+        pil_img = None
         try:
-            pil_img = Image.open(io.BytesIO(content))
-            pil_img.load()  # Fully decode raster to verify image integrity without crashing on ancillary chunks
-            w, h = pil_img.size
+            pil_img = _safe_open_raster(io.BytesIO(content))
+            w, h = pil_img.info.get("_certify_source_dimensions", pil_img.size)
             if w < 300 or h < 300:
+                pil_img.close()
                 raise serializers.ValidationError(
                     f"Template image resolution is too low ({w}x{h}). Minimum required is 300x300."
                 )
 
+            if w * h > MAX_TEMPLATE_PIXELS:
+                # Keep the original uploaded source unchanged; validation and
+                # generation both apply the bounded working-raster policy.
+                pil_img.close()
+                value.seek(0)
+                return value
+
             supported_modes = {"RGB", "RGBA", "P", "PA", "L", "LA", "CMYK", "1"}
             if pil_img.mode not in supported_modes:
+                pil_img.close()
                 raise serializers.ValidationError(
                     f"Unsupported color mode '{pil_img.mode}'. Supported modes are RGB, RGBA, Grayscale, and Palette."
                 )
@@ -510,6 +513,9 @@ class CertificateTemplateSerializer(serializers.ModelSerializer):
                 clean_bytes = out_buf.getvalue()
                 saved_file = ContentFile(clean_bytes, name=f"{safe_base}.png")
                 saved_file._template_format = "PNG"
+                if pil_clean is not pil_img:
+                    pil_clean.close()
+                pil_img.close()
                 return saved_file
             else:
                 out_buf = io.BytesIO()
@@ -518,17 +524,24 @@ class CertificateTemplateSerializer(serializers.ModelSerializer):
                 clean_bytes = out_buf.getvalue()
                 saved_file = ContentFile(clean_bytes, name=f"{safe_base}.jpg")
                 saved_file._template_format = "JPEG"
+                if pil_clean is not pil_img:
+                    pil_clean.close()
+                pil_img.close()
                 return saved_file
 
         except serializers.ValidationError:
             raise
         except Exception as exc:
+            if pil_img is not None:
+                pil_img.close()
             logger.warning(
                 "Failed to decode uploaded image (size=%d bytes, format=%s): %s",
                 len(content),
                 "PNG" if is_png else "JPEG",
                 exc,
             )
+            if isinstance(exc, TemplateImageError):
+                raise serializers.ValidationError(str(exc))
             raise serializers.ValidationError(f"Invalid or unreadable template image: {exc}")
 
 

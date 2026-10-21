@@ -187,6 +187,12 @@ export default function SingleCertificate() {
   };
 
   const handleClearSelectedStudent = () => {
+    // Clear the email only when it is still the value copied from this selection.
+    // If the admin has edited it manually, preserve that input for an unregistered recipient.
+    if (selectedStudent && recipientEmail.trim().toLowerCase() === selectedStudent.email.trim().toLowerCase()) {
+      setRecipientEmail('');
+      setRecipientEmailError(null);
+    }
     setSelectedStudent(null);
     setStudentSearch('');
     setSearchResults([]);
@@ -268,10 +274,15 @@ export default function SingleCertificate() {
       return;
     }
 
-    const emailToUse = (selectedStudent ? selectedStudent.email : recipientEmail).trim().toLowerCase();
+    const emailToUse = recipientEmail.trim().toLowerCase();
     if (!emailToUse) {
       setRecipientEmailError('Recipient email address is required.');
       setError('Please enter a recipient email address or select a registered student.');
+      return;
+    }
+    if (selectedStudent && emailToUse !== selectedStudent.email.trim().toLowerCase()) {
+      setRecipientEmailError('The email must match the selected registered student. Clear the student selection to use a different email.');
+      setError('The recipient email does not match the selected registered student.');
       return;
     }
     const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;

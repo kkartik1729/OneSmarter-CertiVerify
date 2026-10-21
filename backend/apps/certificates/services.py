@@ -9,6 +9,43 @@ from django.utils import timezone
 logger = logging.getLogger(__name__)
 
 
+def send_certificate_email_once(certificate, sender=None) -> tuple[bool, str]:
+    """Send an eligible certificate email and persist its delivery outcome."""
+    from apps.certificates.models import Certificate
+    from apps.certificates.emails import send_certificate_issued_email
+
+    if certificate.email_sent:
+        return True, "Certificate email was already sent."
+    if certificate.status != Certificate.Status.VERIFIED:
+        return False, "Certificate is not eligible for issuance email."
+
+    send = sender or send_certificate_issued_email
+    try:
+        email_sent, email_error = send(certificate)
+    except Exception:
+        logger.exception(
+            "Certificate email delivery raised unexpectedly for %s",
+            certificate.certificate_number,
+        )
+        email_sent, email_error = False, "Email delivery failed. Use the existing retry action to try again."
+
+    certificate.email_sent = bool(email_sent)
+    certificate.email_error = (email_error or "")[:2000]
+    try:
+        certificate.save(update_fields=["email_sent", "email_error"])
+    except Exception:
+        logger.exception(
+            "Could not persist email status for certificate %s",
+            certificate.certificate_number,
+        )
+        certificate.email_error = (
+            "Email was accepted, but its delivery status could not be saved."
+            if email_sent
+            else "Email delivery failed and its status could not be saved."
+        )
+    return bool(email_sent), certificate.email_error
+
+
 def claim_unclaimed_certificates_for_user(user) -> list:
     """
     Safely find and claim all unclaimed certificates matching the verified user's email.
@@ -65,6 +102,7 @@ def claim_unclaimed_certificates_for_user(user) -> list:
         ).filter(
             owner__isnull=True,
             clean_recipient_email=normalized_email,
+            status=Certificate.Status.VERIFIED,
         )
         unclaimed = list(unclaimed_qs)
 
@@ -128,6 +166,14 @@ def claim_unclaimed_certificates_for_user(user) -> list:
                 )
 
     if claimed_certs:
+        # Issuance already attempted delivery before an unregistered recipient
+        # could claim the record. Reuse that same delivery path only for a
+        # recorded failure; successful deliveries are never duplicated.
+        for cert in claimed_certs:
+            if cert.email_sent or not cert.email_error:
+                continue
+            send_certificate_email_once(cert)
+
         logger.info(
             "Successfully claimed %d certificate(s) for user %s (%s)",
             len(claimed_certs),

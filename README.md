@@ -86,7 +86,6 @@ npm run dev
   - **Student / Recipient Dashboard (`/dashboard`):** View issued certificates, automatic claiming of certificates issued prior to registration, download PDF/PNG certificates, view verification links.
   - **Public Verification (`/verify`):** Instant verification by Certificate ID, QR code scan, or document upload with cryptographic tamper checking.
 - **Dynamic Template Renderer:** Supports custom high-resolution Figma PNGs, JPEG templates, custom coordinates, font scaling, and automated QR code embedding.
-- **LinkedIn Credential Sharing:** Direct one-click share to LinkedIn Certifications profile.
 - **Enterprise Security:** JWT tokens, email OTP verification, TOTP two-factor authentication, rate-limiting, and immutable audit logs.
 
 ---

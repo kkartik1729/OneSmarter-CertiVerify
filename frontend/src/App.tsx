@@ -1,3 +1,4 @@
+import { lazy, Suspense } from 'react';
 import { BrowserRouter, Route, Routes, Navigate } from 'react-router-dom';
 import { AuthProvider } from './context/AuthContext';
 import AppLayout from './components/AppLayout';
@@ -5,33 +6,35 @@ import RoleBasedRoute from './components/RoleBasedRoute';
 import AdminLayout from './components/AdminLayout';
 import UserLayout from './components/UserLayout';
 
-import Home from './pages/Home';
-import Login from './pages/Login';
-import Register from './pages/Register';
-import VerifyEmail from './pages/VerifyEmail';
-import NotFound from './pages/NotFound';
+import LoadingScreen from './components/LoadingScreen';
+
+const Home = lazy(() => import('./pages/Home'));
+const Login = lazy(() => import('./pages/Login'));
+const Register = lazy(() => import('./pages/Register'));
+const VerifyEmail = lazy(() => import('./pages/VerifyEmail'));
+const NotFound = lazy(() => import('./pages/NotFound'));
 
 // Admin Pages
-import AdminDashboard from './pages/admin/AdminDashboard';
-import ReviewCertificates from './pages/admin/ReviewCertificates';
-import ManageUsers from './pages/admin/ManageUsers';
-import Analytics from './pages/admin/Analytics';
-import VerificationLogs from './pages/admin/VerificationLogs';
-import AdminProfile from './pages/admin/AdminProfile';
-import GenerateCertificates from './pages/admin/GenerateCertificates';
-import SingleCertificate from './pages/admin/SingleCertificate';
-import GenerationHistory from './pages/admin/GenerationHistory';
+const AdminDashboard = lazy(() => import('./pages/admin/AdminDashboard'));
+const ReviewCertificates = lazy(() => import('./pages/admin/ReviewCertificates'));
+const ManageUsers = lazy(() => import('./pages/admin/ManageUsers'));
+const Analytics = lazy(() => import('./pages/admin/Analytics'));
+const VerificationLogs = lazy(() => import('./pages/admin/VerificationLogs'));
+const AdminProfile = lazy(() => import('./pages/admin/AdminProfile'));
+const GenerateCertificates = lazy(() => import('./pages/admin/GenerateCertificates'));
+const SingleCertificate = lazy(() => import('./pages/admin/SingleCertificate'));
+const GenerationHistory = lazy(() => import('./pages/admin/GenerationHistory'));
 
 // User Pages
-import UserDashboard from './pages/user/UserDashboard';
-import VerifyCertificate from './pages/user/VerifyCertificate';
-import MyCertificates from './pages/user/MyCertificates';
-import VerificationHistory from './pages/user/VerificationHistory';
-import UserProfile from './pages/user/UserProfile';
+const UserDashboard = lazy(() => import('./pages/user/UserDashboard'));
+const VerifyCertificate = lazy(() => import('./pages/user/VerifyCertificate'));
+const MyCertificates = lazy(() => import('./pages/user/MyCertificates'));
+const VerificationHistory = lazy(() => import('./pages/user/VerificationHistory'));
+const UserProfile = lazy(() => import('./pages/user/UserProfile'));
 
-import MfaRecovery from './pages/MfaRecovery';
-import ForgotPassword from './pages/ForgotPassword';
-import PublicVerify from './pages/PublicVerify';
+const MfaRecovery = lazy(() => import('./pages/MfaRecovery'));
+const ForgotPassword = lazy(() => import('./pages/ForgotPassword'));
+const PublicVerify = lazy(() => import('./pages/PublicVerify'));
 import { useAuth } from './context/AuthContext';
 import SetManualPassword from './components/SetManualPassword';
 
@@ -50,6 +53,7 @@ export default function App() {
     <ErrorBoundary>
       <BrowserRouter>
         <AuthProvider>
+          <Suspense fallback={<LoadingScreen />}>
           <Routes>
             <Route element={<AppLayout />}>
               {/* Public Routes */}
@@ -58,7 +62,7 @@ export default function App() {
               <Route path="/register" element={<Register />} />
               <Route path="/verify-email" element={<VerifyEmail />} />
               <Route path="/verify" element={<VerifyCertificate />} />
-              {/* Public LinkedIn credential URL routes — no auth required */}
+              {/* Public certificate verification routes — no auth required */}
               <Route path="/verify-certificate" element={<PublicVerify />} />
               <Route path="/verify-certificate/:certificateNumber" element={<PublicVerify />} />
               <Route path="/verify/:certificateNumber" element={<PublicVerify />} />
@@ -108,6 +112,7 @@ export default function App() {
               <Route path="*" element={<NotFound />} />
             </Route>
           </Routes>
+          </Suspense>
         </AuthProvider>
       </BrowserRouter>
     </ErrorBoundary>

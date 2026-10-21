@@ -1,8 +1,8 @@
 /**
- * PublicVerify — The public LinkedIn credential verification page.
+ * PublicVerify — Public certificate verification.
  *
  * Accessible at:
- *   /verify-certificate/:certificateNumber   (LinkedIn credential URL format)
+ *   /verify-certificate/:certificateNumber
  *   /verify/:certificateNumber               (legacy alias)
  *   /verify-certificate                      (manual search form)
  *
@@ -29,6 +29,7 @@ import {
 } from 'lucide-react';
 import { EP } from '../services/endpoints';
 import { API_BASE, http, ApiError } from '../services/http';
+import ZoomableCertificateViewer from '../components/ZoomableCertificateViewer';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -219,7 +220,7 @@ export default function PublicVerify() {
               </button>
             </div>
             <p className="text-[11px] text-slate-400">
-              Enter the Credential ID exactly as printed on the certificate or as shown in the LinkedIn
+              Enter the Certificate ID exactly as printed on the certificate
               Licenses &amp; Certifications section.
             </p>
           </form>
@@ -297,6 +298,8 @@ function VerifiedCard({
   onReset: () => void;
 }) {
   const isVerified = data.verification_result === 'VERIFIED';
+  const [showCertificateViewer, setShowCertificateViewer] = useState(false);
+  const previewSrc = data.preview_url ? `${API_BASE.replace(/\/+$/, '')}${data.preview_url}` : null;
   return (
     <div className={`${isVerified ? 'bg-teal-50/50 dark:bg-teal-950/20 border-teal-200 dark:border-teal-800' : 'bg-amber-50/60 dark:bg-amber-950/20 border-amber-200 dark:border-amber-800'} border rounded-2xl p-6 shadow-sm space-y-5`}>
       {/* Header */}
@@ -324,20 +327,22 @@ function VerifiedCard({
         </span>
       </div>
 
-      {isVerified && data.preview_url ? (
+      {isVerified && previewSrc ? (
         <div className="overflow-hidden rounded-xl border border-slate-200 dark:border-slate-700 bg-white">
-          <img
-            src={`${API_BASE.replace(/\/+$/, '')}${data.preview_url}`}
-            alt={`Certificate ${data.certificate_number}`}
-            className="block h-auto w-full object-contain"
-            loading="lazy"
-            referrerPolicy="no-referrer"
-            onError={(event) => {
-              event.currentTarget.style.display = 'none';
-              const notice = event.currentTarget.nextElementSibling;
-              if (notice instanceof HTMLElement) notice.hidden = false;
-            }}
-          />
+          <button type="button" onClick={() => setShowCertificateViewer(true)} className="block w-full cursor-zoom-in" aria-label="Open certificate viewer">
+            <img
+              src={previewSrc}
+              alt={`Certificate ${data.certificate_number}`}
+              className="mx-auto block h-auto max-h-[60dvh] max-w-full w-auto object-contain"
+              loading="lazy"
+              referrerPolicy="no-referrer"
+              onError={(event) => {
+                event.currentTarget.style.display = 'none';
+                const notice = event.currentTarget.parentElement?.nextElementSibling;
+                if (notice instanceof HTMLElement) notice.hidden = false;
+              }}
+            />
+          </button>
           <p hidden className="p-4 text-center text-sm text-slate-600 dark:text-slate-400">
             The certificate is verified, but its preview is unavailable.
           </p>
@@ -347,6 +352,9 @@ function VerifiedCard({
           The certificate is verified, but its preview is unavailable.
         </p>
       ) : null}
+      {showCertificateViewer && previewSrc && (
+        <ZoomableCertificateViewer src={previewSrc} alt={`Certificate ${data.certificate_number}`} onClose={() => setShowCertificateViewer(false)} />
+      )}
 
       {/* Fields grid */}
       {isVerified && <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">

@@ -65,8 +65,6 @@ export interface Cert {
   pdfDownloadUrl?: string; // URL to download the PostgreSQL-stored PDF
   code?: string;
   sha?: string;
-  credentialUrl?: string | null;
-  isCredentialUrlPublic?: boolean;
   createdAt?: string;
 }
 

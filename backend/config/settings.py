@@ -287,7 +287,7 @@ DEFAULT_FROM_EMAIL = os.getenv(
 )
 SERVER_EMAIL = os.getenv("SERVER_EMAIL", "support@onesmarter.com")
 FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:5173").rstrip("/")
-# Public website URL used for LinkedIn Credential URLs and public verification
+# Public website URL used in certificate emails and CORS configuration
 PUBLIC_FRONTEND_URL = os.getenv("PUBLIC_FRONTEND_URL", "").strip().rstrip("/")
 
 # --------------------------------------------------

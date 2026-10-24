@@ -7,12 +7,6 @@ __pycache__/
 db.sqlite3
 media/
 
-# Database exports and backups can contain production personal data and secrets.
-*.dump
-*.sql
-*.backup
-*.bak
-
 # Build and deployment artifacts must not package server-side data or settings.
 backend/media/
 backend/.env

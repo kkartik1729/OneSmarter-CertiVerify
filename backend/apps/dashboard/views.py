@@ -1,5 +1,8 @@
 
+import datetime
+
 from django.contrib.auth import get_user_model
+from django.core.cache import cache
 from django.db.models import Count, Q
 from django.db.models.functions import TruncDate
 from django.utils import timezone
@@ -10,10 +13,17 @@ from rest_framework.views import APIView
 from apps.certificates.models import Certificate
 from apps.certificates.permissions import is_certiverify_admin
 from apps.verification.models import VerificationAttempt
-
-import datetime
+from apps.verification.serializers import VerificationAttemptSerializer
 
 User = get_user_model()
+SUCCESS_RESULTS = {VerificationAttempt.Result.VERIFIED, VerificationAttempt.Result.FOUND}
+FAILED_RESULTS = {
+    VerificationAttempt.Result.NOT_FOUND,
+    VerificationAttempt.Result.NOT_VERIFIED,
+    VerificationAttempt.Result.PENDING,
+    VerificationAttempt.Result.REJECTED,
+    VerificationAttempt.Result.REVOKED,
+}
 
 
 class DashboardView(APIView):
@@ -23,11 +33,6 @@ class DashboardView(APIView):
         is_admin = is_certiverify_admin(request.user)
 
         user = request.user
-        if not is_admin and user and user.is_authenticated:
-            profile = getattr(user, "profile", None)
-            if profile and getattr(profile, "email_verified", False):
-                from apps.certificates.services import claim_unclaimed_certificates_for_user
-                claim_unclaimed_certificates_for_user(user)
 
         certificates = Certificate.objects.all()
 
@@ -76,50 +81,26 @@ class DashboardView(APIView):
         total_searches = user_attempts.count()
 
         # Distinct certificate records found through user's searches
-        user_found_attempts = user_attempts.filter(
-            result__in=[
-                VerificationAttempt.Result.FOUND,
-                VerificationAttempt.Result.VERIFIED,
-            ]
-        )
+        user_found_attempts = user_attempts.filter(result__in=SUCCESS_RESULTS)
         distinct_verified = (
             user_found_attempts.values("certificate_number")
             .distinct()
             .count()
         )
 
-        recent_user_searches = [
-            {
-                "id": v.id,
-                "certificate_number": v.certificate_number,
-                "result": v.result,
-                "verification_result": (
-                    "VERIFIED"
-                    if v.result in (
-                        VerificationAttempt.Result.FOUND,
-                        VerificationAttempt.Result.VERIFIED,
-                    )
-                    else "NOT_VERIFIED"
-                ),
-                "status": (
-                    "VERIFIED"
-                    if v.result in (
-                        VerificationAttempt.Result.FOUND,
-                        VerificationAttempt.Result.VERIFIED,
-                    )
-                    else "NOT_FOUND"
-                ),
-                "certificate_title": (
-                    v.certificate.title if v.certificate else None
-                ),
-                "created_at": v.created_at,
-            }
-            for v in user_attempts.select_related("certificate").order_by("-created_at")[:5]
-        ]
+        recent_attempts = user_attempts.select_related("certificate").order_by(
+            "-created_at", "-id"
+        )[:5]
+        recent_user_searches = VerificationAttemptSerializer(
+            recent_attempts, many=True
+        ).data
+        # Keep the existing dashboard API alias while using the shared serializer.
+        for item in recent_user_searches:
+            item["status"] = item["result"]
 
         response = {
             "role": "ADMIN" if is_admin else "USER",
-            "my_certificates": stats["total"],
+            "my_certificates": Certificate.objects.filter(owner=user).count(),
             "verified_records": distinct_verified,
             "verification_searches": total_searches,
             "statistics": {
@@ -132,12 +113,18 @@ class DashboardView(APIView):
         }
 
         if is_admin:
+            admin_cache_key = f"dashboard:admin:v1:{request.user.pk}"
+            cached_admin_stats = cache.get(admin_cache_key)
+            if cached_admin_stats is not None:
+                response["admin_stats"] = cached_admin_stats
+                return Response(response)
+
             # Admin-only metrics
             total_users = User.objects.count()
             verification_stats = VerificationAttempt.objects.aggregate(
                 total=Count("id"),
-                found=Count("id", filter=Q(result="FOUND")),
-                not_found=Count("id", filter=Q(result="NOT_FOUND")),
+                found=Count("id", filter=Q(result__in=SUCCESS_RESULTS)),
+                not_found=Count("id", filter=Q(result__in=FAILED_RESULTS)),
             )
 
             # Last 30 days of certificate creation (daily counts)
@@ -161,8 +148,8 @@ class DashboardView(APIView):
                 .values("day")
                 .annotate(
                     total=Count("id"),
-                    found=Count("id", filter=Q(result="FOUND")),
-                    not_found=Count("id", filter=Q(result="NOT_FOUND")),
+                    found=Count("id", filter=Q(result__in=SUCCESS_RESULTS)),
+                    not_found=Count("id", filter=Q(result__in=FAILED_RESULTS)),
                 )
                 .order_by("day")
             )
@@ -217,5 +204,6 @@ class DashboardView(APIView):
                 "issuer_breakdown": issuer_list,
                 "recent_verifications": recent_verify_data,
             }
+            cache.set(admin_cache_key, response["admin_stats"], timeout=60)
 
         return Response(response)

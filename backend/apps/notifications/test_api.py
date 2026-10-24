@@ -57,6 +57,33 @@ class NotificationAPITests(APITestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.data["unread_count"], 1)
 
+    def test_is_read_filter_is_case_insensitive(self):
+        self.client.force_authenticate(user=self.user)
+
+        response = self.client.get("/api/notifications/?is_read=FALSE")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(self.notification.id, [item["id"] for item in response.data])
+
+    def test_is_read_filter_accepts_boolean_numeric_forms_and_rejects_garbage(self):
+        self.notification.is_read = True
+        self.notification.save(update_fields=["is_read"])
+        self.client.force_authenticate(user=self.user)
+
+        for value in ("true", "TRUE", "1"):
+            with self.subTest(value=value):
+                response = self.client.get(f"/api/notifications/?is_read={value}")
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual([n["id"] for n in response.data], [self.notification.id])
+        for value in ("false", "FALSE", "0"):
+            with self.subTest(value=value):
+                response = self.client.get(f"/api/notifications/?is_read={value}")
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(response.data, [])
+
+        invalid = self.client.get("/api/notifications/?is_read=sometimes")
+        self.assertEqual(invalid.status_code, 400)
+
     def test_mark_notification_as_read(self):
         self.client.force_authenticate(user=self.user)
 

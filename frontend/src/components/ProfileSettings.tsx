@@ -3,17 +3,18 @@ import { useAuth } from '../context/AuthContext';
 import { User, Mail, ShieldCheck, CheckCircle2, AlertCircle } from 'lucide-react';
 import { toast } from '../lib/ui';
 import { errMsg } from '../services';
-import { getCountries, getCountryCallingCode, parsePhoneNumberFromString } from 'libphonenumber-js/max';
+import { getCountries, getCountryCallingCode, parsePhoneNumberFromString } from 'libphonenumber-js/min';
 import type { CountryCode } from 'libphonenumber-js';
 
 type PhoneCountry = { code: CountryCode; name: string; flag: string; dial: string };
-const countryDisplayNames = new (Intl as unknown as {
-  DisplayNames: new (locales: string[], options: { type: string }) => { of(code: string): string | undefined };
-}).DisplayNames(['en'], { type: 'region' });
+const DisplayNames = (Intl as typeof Intl & {
+  DisplayNames?: new (locales: string[], options: { type: 'region' }) => { of(code: string): string | undefined };
+}).DisplayNames;
+const countryDisplayNames = DisplayNames ? new DisplayNames(['en'], { type: 'region' }) : null;
 const flagForCountry = (code: string) => String.fromCodePoint(...code.toUpperCase().split('').map((letter) => letter.charCodeAt(0) + 127397));
 const phoneCountries: PhoneCountry[] = getCountries().map((code) => ({
   code,
-  name: countryDisplayNames.of(code) ?? code,
+  name: countryDisplayNames?.of(code) ?? code,
   flag: flagForCountry(code),
   dial: `+${getCountryCallingCode(code)}`,
 })).sort((a, b) => a.name.localeCompare(b.name));
@@ -183,11 +184,12 @@ export default function ProfileSettings() {
 
           {/* Organization (editable) */}
           <div>
-            <label className="block text-xs font-semibold uppercase tracking-wider text-slate-700 dark:text-slate-300 mb-1.5">
+            <label htmlFor="profile-organization" className="block text-xs font-semibold uppercase tracking-wider text-slate-700 dark:text-slate-300 mb-1.5">
               Organization / Company
             </label>
             <div className="relative max-w-xl">
               <input
+                id="profile-organization"
                 type="text"
                 value={organization}
                 onChange={e => setOrganization(e.target.value)}
@@ -200,7 +202,7 @@ export default function ProfileSettings() {
 
           {/* Phone (editable) */}
           <div>
-            <label className="block text-xs font-semibold uppercase tracking-wider text-slate-700 dark:text-slate-300 mb-1.5">
+            <label htmlFor="profile-phone" className="block text-xs font-semibold uppercase tracking-wider text-slate-700 dark:text-slate-300 mb-1.5">
               Phone Number
             </label>
             <div className="relative">
@@ -221,7 +223,7 @@ export default function ProfileSettings() {
                     </div>
                   </div>}
                 </div>
-                <input type="tel" inputMode="tel" autoComplete="tel-national" value={phone} onChange={event => {
+                <input id="profile-phone" type="tel" inputMode="tel" autoComplete="tel-national" value={phone} onChange={event => {
                   const entered = event.target.value.trim();
                   if (entered.startsWith('+')) {
                     const parsed = parsePhoneNumberFromString(entered);

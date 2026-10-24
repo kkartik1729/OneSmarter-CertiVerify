@@ -1,12 +1,24 @@
 
 from django.conf import settings
+from django.core.exceptions import ValidationError
 from django.db import models
 
 
+class ImmutableAuditLogQuerySet(models.QuerySet):
+    def update(self, **kwargs):
+        raise ValidationError("Audit log entries cannot be updated.")
+
+    def delete(self):
+        raise ValidationError("Audit log entries cannot be deleted.")
+
+
 class AuditLog(models.Model):
+    objects = ImmutableAuditLogQuerySet.as_manager()
+
     class Action(models.TextChoices):
         CERTIFICATE_CREATED = "CERTIFICATE_CREATED", "Certificate Created"
         CERTIFICATE_VERIFIED = "CERTIFICATE_VERIFIED", "Certificate Verified"
+        CERTIFICATE_LOOKUP_FAILED = "CERTIFICATE_LOOKUP_FAILED", "Certificate Lookup Failed"
         CERTIFICATE_APPROVED = "CERTIFICATE_APPROVED", "Certificate Approved"
         CERTIFICATE_REJECTED = "CERTIFICATE_REJECTED", "Certificate Rejected"
         TEMPLATE_UPLOADED = "TEMPLATE_UPLOADED", "Template Uploaded"
@@ -41,7 +53,7 @@ class AuditLog(models.Model):
     created_at = models.DateTimeField(auto_now_add=True, db_index=True)
 
     class Meta:
-        ordering = ["-created_at"]
+        ordering = ["-created_at", "-id"]
         indexes = [
             models.Index(
                 fields=["action", "-created_at"],
@@ -51,3 +63,11 @@ class AuditLog(models.Model):
 
     def __str__(self):
         return f"{self.action} - {self.created_at}"
+
+    def save(self, *args, **kwargs):
+        if self.pk and type(self).objects.filter(pk=self.pk).exists():
+            raise ValidationError("Audit log entries are immutable.")
+        return super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        raise ValidationError("Audit log entries cannot be deleted.")

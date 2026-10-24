@@ -3,6 +3,7 @@ import { UploadCloud, FileText, CheckCircle2, AlertCircle } from 'lucide-react';
 import { certificateService, adminUsersService, errMsg, ApiError } from '../services';
 import type { Cert, AdminUser } from '../types';
 import { toast } from '../lib/ui';
+import { localDateISO } from '../lib/date';
 
 interface CertificateFormProps {
   onSuccess?: (newCert: Cert) => void;
@@ -14,7 +15,7 @@ export default function CertificateForm({ onSuccess }: CertificateFormProps) {
   const [issuer, setIssuer] = useState('');
   const [recipient, setRecipient] = useState('');
   const [ownerId, setOwnerId] = useState('');
-  const [issueDate, setIssueDate] = useState(new Date().toISOString().slice(0, 10));
+  const [issueDate, setIssueDate] = useState(localDateISO());
   const [file, setFile] = useState<File | null>(null);
 
   const [users, setUsers] = useState<AdminUser[]>([]);
@@ -136,10 +137,11 @@ export default function CertificateForm({ onSuccess }: CertificateFormProps) {
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-5">
           {/* Certificate Number */}
           <div>
-            <label className="block text-xs font-semibold uppercase tracking-wider text-slate-700 dark:text-slate-300 mb-1.5">
+            <label htmlFor="certificate-number" className="block text-xs font-semibold uppercase tracking-wider text-slate-700 dark:text-slate-300 mb-1.5">
               Certificate Number / Unique ID *
             </label>
             <input
+              id="certificate-number"
               type="text"
               required
               value={number}
@@ -154,10 +156,11 @@ export default function CertificateForm({ onSuccess }: CertificateFormProps) {
 
           {/* Certificate Title */}
           <div>
-            <label className="block text-xs font-semibold uppercase tracking-wider text-slate-700 dark:text-slate-300 mb-1.5">
+            <label htmlFor="certificate-title" className="block text-xs font-semibold uppercase tracking-wider text-slate-700 dark:text-slate-300 mb-1.5">
               Certificate Title *
             </label>
             <input
+              id="certificate-title"
               type="text"
               required
               value={title}
@@ -172,10 +175,11 @@ export default function CertificateForm({ onSuccess }: CertificateFormProps) {
 
           {/* Recipient Name */}
           <div>
-            <label className="block text-xs font-semibold uppercase tracking-wider text-slate-700 dark:text-slate-300 mb-1.5">
+            <label htmlFor="certificate-recipient" className="block text-xs font-semibold uppercase tracking-wider text-slate-700 dark:text-slate-300 mb-1.5">
               Recipient Full Name *
             </label>
             <input
+              id="certificate-recipient"
               type="text"
               required
               value={recipient}
@@ -190,10 +194,11 @@ export default function CertificateForm({ onSuccess }: CertificateFormProps) {
 
           {/* Assigned Owner Account Dropdown */}
           <div>
-            <label className="block text-xs font-semibold uppercase tracking-wider text-slate-700 dark:text-slate-300 mb-1.5">
+            <label htmlFor="certificate-owner" className="block text-xs font-semibold uppercase tracking-wider text-slate-700 dark:text-slate-300 mb-1.5">
               Assigned Account (Registered User) *
             </label>
             <select
+              id="certificate-owner"
               required
               value={ownerId}
               onChange={e => setOwnerId(e.target.value)}
@@ -222,10 +227,11 @@ export default function CertificateForm({ onSuccess }: CertificateFormProps) {
 
           {/* Issuer */}
           <div>
-            <label className="block text-xs font-semibold uppercase tracking-wider text-slate-700 dark:text-slate-300 mb-1.5">
+            <label htmlFor="certificate-issuer" className="block text-xs font-semibold uppercase tracking-wider text-slate-700 dark:text-slate-300 mb-1.5">
               Issuing Organization *
             </label>
             <input
+              id="certificate-issuer"
               type="text"
               required
               value={issuer}
@@ -240,10 +246,11 @@ export default function CertificateForm({ onSuccess }: CertificateFormProps) {
 
           {/* Issue Date */}
           <div>
-            <label className="block text-xs font-semibold uppercase tracking-wider text-slate-700 dark:text-slate-300 mb-1.5">
+            <label htmlFor="certificate-issue-date" className="block text-xs font-semibold uppercase tracking-wider text-slate-700 dark:text-slate-300 mb-1.5">
               Issue Date *
             </label>
             <input
+              id="certificate-issue-date"
               type="date"
               required
               value={issueDate}
@@ -257,11 +264,12 @@ export default function CertificateForm({ onSuccess }: CertificateFormProps) {
 
           {/* File Upload (Optional) */}
           <div className="sm:col-span-2">
-            <label className="block text-xs font-semibold uppercase tracking-wider text-slate-700 dark:text-slate-300 mb-1.5">
+            <label htmlFor="certificate-document" className="block text-xs font-semibold uppercase tracking-wider text-slate-700 dark:text-slate-300 mb-1.5">
               Certificate Document (Optional PDF / Image)
             </label>
             <div className="relative border-2 border-dashed border-slate-300 dark:border-slate-700 hover:border-teal-500 dark:hover:border-teal-500 rounded-xl p-3 text-center transition cursor-pointer bg-slate-50 dark:bg-slate-800/40">
               <input
+                id="certificate-document"
                 type="file"
                 accept=".pdf,image/*"
                 onChange={e => setFile(e.target.files?.[0] ?? null)}

@@ -1,6 +1,7 @@
 from django.urls import path
 from .views import (
     CurrentUserView,
+    LogoutView,
     RegisterView,
     MFASetupView,
     MFAConfirmView,
@@ -11,7 +12,6 @@ from .views import (
     MFARecoveryCompleteView,
     PasswordResetRequestView,
     PasswordResetValidateTokenView,
-    PasswordResetVerifyView,
     PasswordResetCompleteView,
     VerifyEmailView,
     ResendVerificationEmailView,
@@ -35,6 +35,7 @@ urlpatterns = [
     path("google-login/", GoogleAuthView.as_view(), name="google_login"),
     path("google/", GoogleAuthView.as_view(), name="google_auth"),
     path("token/refresh/", ExistingUserTokenRefreshView.as_view(), name="token_refresh"),
+    path("logout/", LogoutView.as_view(), name="logout"),
     path("me/", CurrentUserView.as_view(), name="current_user"),
     path("mfa/setup/", MFASetupView.as_view(), name="mfa_setup"),
     path("mfa/confirm/", MFAConfirmView.as_view(), name="mfa_confirm"),
@@ -46,9 +47,8 @@ urlpatterns = [
     # Password Reset via Email Link / Token
     path("password-reset/request/", PasswordResetRequestView.as_view(), name="password_reset_request"),
     path("password-reset/validate/", PasswordResetValidateTokenView.as_view(), name="password_reset_validate"),
-    path("password-reset/verify/", PasswordResetVerifyView.as_view(), name="password_reset_verify"),
     path("password-reset/complete/", PasswordResetCompleteView.as_view(), name="password_reset_complete"),
     # Admin-only
     path("admin/users/", AdminUserListView.as_view(), name="admin-user-list"),
     path("admin/users/<int:pk>/", AdminUserDetailView.as_view(), name="admin-user-detail"),
-]
+]

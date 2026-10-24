@@ -15,6 +15,7 @@ const titleMap: Record<string, string> = {
   '/admin/dashboard/analytics': 'Analytics & Reporting',
   '/admin/dashboard/verifications': 'Verification Records',
   '/admin/dashboard/profile': 'Admin Profile & Security',
+  '/admin/dashboard/set-password': 'Set Manual Password',
 };
 
 export default function AdminLayout() {

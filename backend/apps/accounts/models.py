@@ -1,12 +1,22 @@
 
 from django.conf import settings
 from django.db import models
+from django.utils import timezone
 
 
 class UserProfile(models.Model):
     class Role(models.TextChoices):
         USER = "USER", "User"
         ADMIN = "ADMIN", "Admin"
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["google_sub"],
+                condition=~models.Q(google_sub=""),
+                name="accounts_unique_google_sub_nonempty",
+            ),
+        ]
 
     user = models.OneToOneField(
         settings.AUTH_USER_MODEL,
@@ -36,6 +46,7 @@ class UserProfile(models.Model):
     # Email verification tracking
     email_verified = models.BooleanField(default=False, db_index=True)
     email_verified_at = models.DateTimeField(null=True, blank=True)
+    password_changed_at = models.DateTimeField(null=True, blank=True)
 
     # Stable Google OAuth subject identifier
     google_sub = models.CharField(
@@ -53,7 +64,7 @@ class UserProfile(models.Model):
     def effective_role(self):
         if getattr(self.user, "is_superuser", False) or getattr(self.user, "is_staff", False):
             return self.Role.ADMIN
-        return self.role
+        return self.Role.USER
 
     def __str__(self):
         return f"{self.user.username} - {self.effective_role}"
@@ -76,7 +87,6 @@ class MFARecoveryToken(models.Model):
         ordering = ["-created_at"]
 
     def is_valid(self):
-        from django.utils import timezone
         return not self.is_used and timezone.now() <= self.expires_at
 
     def __str__(self):
@@ -93,7 +103,9 @@ class PasswordResetRequest(models.Model):
         on_delete=models.CASCADE,
         related_name="password_reset_requests",
     )
-    otp_hash = models.CharField(max_length=64, db_index=True)
+    # This hash is compared in Python after retrieving the user's active rows;
+    # an index on the value is never used by the current lookup path.
+    otp_hash = models.CharField(max_length=64)
     reset_token_hash = models.CharField(
         max_length=64,
         blank=True,
@@ -112,7 +124,6 @@ class PasswordResetRequest(models.Model):
         ordering = ["-created_at"]
 
     def is_otp_valid(self):
-        from django.utils import timezone
         return (
             not self.is_completed
             and not self.otp_verified
@@ -121,7 +132,6 @@ class PasswordResetRequest(models.Model):
         )
 
     def is_reset_token_valid(self):
-        from django.utils import timezone
         return (
             not self.is_completed
             and self.otp_verified
@@ -158,7 +168,6 @@ class PasswordResetToken(models.Model):
         ordering = ["-created_at"]
 
     def is_valid(self):
-        from django.utils import timezone
         return not self.is_used and timezone.now() <= self.expires_at
 
     def __str__(self):
@@ -181,12 +190,12 @@ class EmailVerificationToken(models.Model):
     expires_at = models.DateTimeField()
     is_used = models.BooleanField(default=False)
     used_at = models.DateTimeField(null=True, blank=True)
+    attempts = models.PositiveSmallIntegerField(default=0)
 
     class Meta:
         ordering = ["-created_at"]
 
     def is_valid(self):
-        from django.utils import timezone
         return not self.is_used and timezone.now() <= self.expires_at
 
     def __str__(self):

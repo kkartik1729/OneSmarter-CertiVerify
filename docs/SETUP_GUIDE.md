@@ -7,8 +7,8 @@ This guide configures a fresh, independent development environment after cloning
 - `backend/`: Django 5.2.18, Django REST Framework, PostgreSQL settings, migrations, uploaded/generated media.
 - `frontend/`: React 18, TypeScript, Vite. Use the committed `package-lock.json` with `npm ci`.
 - `docs/`: API, schema, and setup documentation.
-- Vite runs at `http://localhost:5173` and proxies `/api` to Django at `http://127.0.0.1:8005` by default (`frontend/vite.config.ts`). Run Django on **8005** unless you also update the local `DEV_API_PROXY_TARGET`.
-- PostgreSQL is the default database. The committed backend example uses port **5432**, the usual local PostgreSQL port. This project currently falls back to port 8000 if `DB_PORT` is absent, so keep the local `.env` value explicit and match the port shown by the installed PostgreSQL service.
+- Vite runs at `http://localhost:5173` and proxies `/api` to Django at `http://127.0.0.1:8000` by default (`frontend/vite.config.ts`). Run Django on **8000** unless you also update the local `DEV_API_PROXY_TARGET`.
+- PostgreSQL is the default database. The backend uses `DB_PORT` when set and defaults to **5432**, PostgreSQL's standard port. If your PostgreSQL service uses a different port, set `DB_PORT` in `backend/.env` to that service's actual port. Django itself runs on port **8000**.
 
 ## 1. Install prerequisites
 
@@ -91,6 +91,7 @@ Relevant variables:
 | `EMAIL_BACKEND` | Console backend locally; SMTP is optional. |
 | `GOOGLE_CLIENT_ID` | Optional backend OAuth client ID. Do not put a client secret in frontend config. |
 | `CORS_ALLOWED_ORIGINS` | Usually blank; localhost Vite origins are already allowed by Django. |
+| `CSRF_TRUSTED_ORIGINS` | Set explicit HTTPS origins only when production CSRF-protected requests require them; local Vite origins are enabled only in development. |
 
 ## 5. Create a separate local PostgreSQL database
 
@@ -134,6 +135,19 @@ python manage.py check
 python manage.py test
 ```
 
+The test suite may use SQLite for convenience. Row-locking behavior such as
+`select_for_update()` differs from PostgreSQL on SQLite, so concurrency and
+locking behavior should also be validated against a disposable PostgreSQL test
+database before relying on it in production.
+
+Local development uses an in-process cache. Production uses Django's shared
+PostgreSQL cache backend; after selecting the production environment and
+verifying the target database, create its cache table once with
+`python manage.py createcachetable`. This adds the cache table and does not
+alter certificate or account records. If production is configured to use
+Redis instead, provision Redis and use the approved Redis cache configuration
+rather than creating the PostgreSQL cache table.
+
 Do not delete migrations, use `--fake`, flush tables, or run destructive SQL to resolve setup issues. The migrations create the schema; this setup does not create an admin account until the next step.
 
 ## 7. Create your own admin and handle MFA
@@ -156,7 +170,7 @@ npm run build
 npm run dev
 ```
 
-The committed frontend example sets `VITE_API_BASE_URL=/api` and `DEV_API_PROXY_TARGET=http://127.0.0.1:8005`; this keeps requests on the same local Vite origin and matches the Django command below. Do not change API URLs in application source files. If Django runs on another port, edit only `DEV_API_PROXY_TARGET` in local `frontend/.env` and restart Vite.
+The committed frontend example sets `VITE_API_BASE_URL=/api` and `DEV_API_PROXY_TARGET=http://127.0.0.1:8000`; this keeps requests on the same local Vite origin and matches the Django command below. Do not change API URLs in application source files. If Django runs on another port, edit only `DEV_API_PROXY_TARGET` in local `frontend/.env` and restart Vite.
 
 Optional Google sign-in requires an authorized OAuth web client. Set the same client ID in `frontend/.env` as `VITE_GOOGLE_CLIENT_ID` and in `backend/.env` as `GOOGLE_CLIENT_ID`, and authorize `http://localhost:5173` in that client's development origins. If no authorized client is available, leave it unset; password login remains available.
 
@@ -165,7 +179,7 @@ Optional Google sign-in requires an authorized OAuth web client. Set the same cl
 In the backend terminal (`backend/`):
 
 ```powershell
-python manage.py runserver 8005
+python manage.py runserver 8000
 ```
 
 In the frontend terminal (`frontend/`):
@@ -174,18 +188,18 @@ In the frontend terminal (`frontend/`):
 npm run dev
 ```
 
-Open `http://localhost:5173`. The Django admin is at `http://127.0.0.1:8005/admin/`; the API is at `http://127.0.0.1:8005/api/`. Verify the app can log in with the newly created account and load its courses/templates. Test certificate generation only with local test data and the console email backend; no real email is sent by that backend. Use a fresh local template upload if the clone has no authorized media files.
+Open `http://localhost:5173`. The Django admin is at `http://127.0.0.1:8000/admin/`; the API is at `http://127.0.0.1:8000/api/`. Verify the app can log in with the newly created account and load its courses/templates. Test certificate generation only with local test data and the console email backend; no real email is sent by that backend. Use a fresh local template upload if the clone has no authorized media files.
 
 ## Optional: access from a phone on the same private Wi-Fi
 
-Vite is already configured to bind to `0.0.0.0`. Do not expose these development servers to the public internet. For phone testing, use the laptop's private LAN IPv4 address in the browser. Configure Django `ALLOWED_HOSTS` to include that address and `CORS_ALLOWED_ORIGINS` to include the Vite origin using that address (for example `http://192.168.1.25:5173`); set the local frontend `DEV_API_PROXY_TARGET` to the laptop's LAN address on port 8005. Allow only ports 5173 and 8005 on a trusted private network if Windows Firewall requires it. Return those values to localhost when finished.
+Vite is already configured to bind to `0.0.0.0`. Do not expose these development servers to the public internet. For phone testing, use the laptop's private LAN IPv4 address in the browser. Configure Django `ALLOWED_HOSTS` to include that address and `CORS_ALLOWED_ORIGINS` to include the Vite origin using that address (for example `http://192.168.1.25:5173`); set the local frontend `DEV_API_PROXY_TARGET` to the laptop's LAN address on port 8000. Allow only ports 5173 and 8000 on a trusted private network if Windows Firewall requires it. Return those values to localhost when finished.
 
 ## Local-only files and common issues
 
 - Backend `.env`, frontend `.env`, `.venv`, `node_modules`, `dist`, `backend/media`, and database dumps/backups are machine-specific and must stay out of commits. Existing uploads and generated records are not included in a fresh clone; obtain any needed template assets from an authorized source and upload them locally.
-- **Repository-owner action before sharing a fresh clone:** this checkout has a tracked file named `backend/certiverify_backup.dump`. The new ignore rule only protects future untracked dumps; it cannot keep a tracked file out of clones. The file was not opened or restored. Do not import it into the friend's local DB. Remove it from repository tracking and, if it contains sensitive data, clean the remote history and rotate affected credentials before asking the friend to clone. This requires an authorized repository change and is not done by this local setup guide.
+- **Repository-owner action before sharing a fresh clone:** the current worktree removes `backend/certiverify_backup.dump` and ignores database dumps, but prior Git history may still contain it. Do not import it into a local database. The repository owner must review approved history cleanup and rotate credentials or sessions that may have been exposed before sharing or publishing the repository. History rewriting and credential rotation are external operations and are not performed by this local setup guide.
 - `connection refused` from PostgreSQL: check the service and actual port, then compare them with `DB_HOST`/`DB_PORT`.
-- Frontend API network error: keep Django on port 8005 or align local `DEV_API_PROXY_TARGET`; restart Vite after editing `.env`.
+- Frontend API network error: keep Django on port 8000 or align local `DEV_API_PROXY_TARGET`; restart Vite after editing `.env`.
 - Email/OTP testing: keep the console backend selected so messages and codes appear in the backend terminal. Use SMTP only with separate development credentials and an authorized test recipient.
 - Google sign-in unavailable: configure an authorized development client ID and local origin as described above; do not invent or reuse private credentials.
 

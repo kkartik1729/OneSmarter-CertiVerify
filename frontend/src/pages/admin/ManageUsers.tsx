@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Users, RefreshCw, Shield, ShieldCheck } from 'lucide-react';
 import { adminUsersService, errMsg } from '../../services';
 import type { AdminUser } from '../../types';
@@ -21,8 +21,10 @@ export default function ManageUsers() {
 
   const [search, setSearch] = useState('');
   const [roleFilter, setRoleFilter] = useState('ALL');
+  const requestId = useRef(0);
 
   const loadUsers = async () => {
+    const currentRequest = ++requestId.current;
     setLoading(true);
     setError(null);
     try {
@@ -30,17 +32,18 @@ export default function ManageUsers() {
         search: search.trim() || undefined,
         role: roleFilter !== 'ALL' ? roleFilter : undefined,
       });
-      setUsers(data);
+      if (currentRequest === requestId.current) setUsers(data);
     } catch (err) {
-      setError(errMsg(err));
+      if (currentRequest === requestId.current) setError(errMsg(err));
     } finally {
-      setLoading(false);
+      if (currentRequest === requestId.current) setLoading(false);
     }
   };
 
   useEffect(() => {
-    loadUsers();
-  }, [roleFilter]);
+    const timer = window.setTimeout(() => { void loadUsers(); }, 250);
+    return () => window.clearTimeout(timer);
+  }, [search, roleFilter]);
 
   // Client-side instant filter on top of server query
   const filteredUsers = users.filter(u => {

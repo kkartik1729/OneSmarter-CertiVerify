@@ -3,6 +3,7 @@ from django.shortcuts import get_object_or_404
 
 from rest_framework import generics, status
 from rest_framework.permissions import IsAuthenticated
+from rest_framework.exceptions import ValidationError
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
@@ -19,12 +20,14 @@ class NotificationListView(generics.ListAPIView):
             recipient=self.request.user
         ).select_related("certificate")
 
-        read_filter = self.request.query_params.get("is_read")
-
-        if read_filter == "true":
-            queryset = queryset.filter(is_read=True)
-        elif read_filter == "false":
-            queryset = queryset.filter(is_read=False)
+        raw_filter = self.request.query_params.get("is_read")
+        if raw_filter is None or raw_filter.strip() == "":
+            return queryset
+        read_filter = raw_filter.strip().lower()
+        values = {"true": True, "1": True, "false": False, "0": False}
+        if read_filter not in values:
+            raise ValidationError({"is_read": "Use true, false, 1, or 0."})
+        queryset = queryset.filter(is_read=values[read_filter])
 
         return queryset
 

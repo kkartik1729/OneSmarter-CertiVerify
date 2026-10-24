@@ -1,9 +1,89 @@
 /** Converts raw backend JSON into the UI types in ../types. */
-import type { Cert, CertStatus, PublicRecord, User } from '../types';
+import type { Cert, CertStatus, Course, CertificateTemplate, GenerationBatch, PublicRecord, User } from '../types';
 
 type R = Record<string, unknown>;
 const rec = (v: unknown): R => (v && typeof v === 'object' ? (v as R) : {});
 const s = (v: unknown, d = ''): string => (v == null ? d : String(v));
+const requiredNumber = (r: R, key: string): number => {
+  const value = Number(r[key]);
+  if (!Number.isFinite(value)) throw new Error(`Unexpected server response: ${key} must be a number.`);
+  return value;
+};
+const requiredString = (r: R, key: string): string => {
+  if (typeof r[key] !== 'string') throw new Error(`Unexpected server response: ${key} must be text.`);
+  return r[key];
+};
+const requiredRecord = (value: unknown, resource: string): R => {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error(`Unexpected server response for ${resource}.`);
+  }
+  return value as R;
+};
+
+export function mapCourse(value: unknown): Course {
+  const r = requiredRecord(value, 'course');
+  return {
+    id: requiredNumber(r, 'id'),
+    name: requiredString(r, 'name'),
+    title: requiredString(r, 'title'),
+    issuer: requiredString(r, 'issuer'),
+    start_date: requiredString(r, 'start_date'),
+    end_date: requiredString(r, 'end_date'),
+    created_by: typeof r.created_by === 'number' ? r.created_by : undefined,
+    created_by_username: typeof r.created_by_username === 'string' ? r.created_by_username : undefined,
+    created_at: typeof r.created_at === 'string' ? r.created_at : undefined,
+    updated_at: typeof r.updated_at === 'string' ? r.updated_at : undefined,
+  };
+}
+
+export function mapTemplate(value: unknown): CertificateTemplate {
+  const r = requiredRecord(value, 'certificate template');
+  const layout = r.layout_config && typeof r.layout_config === 'object' && !Array.isArray(r.layout_config)
+    ? r.layout_config as Record<string, unknown>
+    : {};
+  return {
+    id: requiredNumber(r, 'id'),
+    name: requiredString(r, 'name'),
+    image: s(r.image),
+    image_url: typeof r.image_url === 'string' ? r.image_url : undefined,
+    description: typeof r.description === 'string' ? r.description : undefined,
+    layout_config: layout,
+    file_format: typeof r.file_format === 'string' ? r.file_format : undefined,
+    version: typeof r.version === 'number' ? r.version : undefined,
+    uploaded_by: typeof r.uploaded_by === 'number' ? r.uploaded_by : undefined,
+    uploaded_by_username: typeof r.uploaded_by_username === 'string' ? r.uploaded_by_username : undefined,
+    created_at: typeof r.created_at === 'string' ? r.created_at : undefined,
+    updated_at: typeof r.updated_at === 'string' ? r.updated_at : undefined,
+  };
+}
+
+export function mapGenerationBatch(value: unknown): GenerationBatch {
+  const r = requiredRecord(value, 'generation batch');
+  const allowed = ['PENDING', 'PROCESSING', 'COMPLETED', 'FAILED'] as const;
+  if (typeof r.status !== 'string' || !allowed.includes(r.status as typeof allowed[number])) {
+    throw new Error('Unexpected server response: generation batch status is invalid.');
+  }
+  const count = (key: string) => requiredNumber(r, key);
+  return {
+    id: requiredNumber(r, 'id'),
+    course: typeof r.course === 'number' ? r.course : null,
+    course_name: typeof r.course_name === 'string' ? r.course_name : undefined,
+    template: typeof r.template === 'number' ? r.template : null,
+    template_name: typeof r.template_name === 'string' ? r.template_name : undefined,
+    status: r.status as GenerationBatch['status'],
+    total_rows: count('total_rows'),
+    successful: count('successful'),
+    failed: count('failed'),
+    skipped_duplicates: count('skipped_duplicates'),
+    emails_sent: count('emails_sent'),
+    emails_failed: count('emails_failed'),
+    error_report: Array.isArray(r.error_report) ? r.error_report as GenerationBatch['error_report'] : undefined,
+    created_by: typeof r.created_by === 'number' ? r.created_by : undefined,
+    created_by_username: typeof r.created_by_username === 'string' ? r.created_by_username : undefined,
+    created_at: typeof r.created_at === 'string' ? r.created_at : undefined,
+    completed_at: typeof r.completed_at === 'string' ? r.completed_at : undefined,
+  };
+}
 
 /** DRF returns either a plain array or {results: []} when pagination is on. */
 export const asList = (d: unknown): R[] =>
@@ -73,7 +153,6 @@ export function mapCert(x: unknown): Cert {
     isPdf: /\.pdf($|\?)/i.test(file),
     hasPdf: r.has_pdf === true,
     pdfDownloadUrl: typeof r.pdf_download_url === 'string' ? r.pdf_download_url : undefined,
-    code: s(r.verification_code),
     sha: s(r.file_sha256),
     createdAt: s(r.created_at).slice(0, 10),
   };

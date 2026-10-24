@@ -6,6 +6,7 @@ from .models import EmailVerificationToken, MFARecoveryToken, PasswordResetReque
 
 @admin.register(UserProfile)
 class UserProfileAdmin(admin.ModelAdmin):
+    exclude = ("totp_secret", "pending_totp_secret")
     list_display = (
         "user",
         "role",
@@ -18,7 +19,19 @@ class UserProfileAdmin(admin.ModelAdmin):
         "user__email",
         "organization",
     )
-    readonly_fields = ("created_at", "updated_at")
+    # MFA seeds are excluded above. Security-sensitive identity/authorization
+    # state is managed only through verified application flows, never admin edits.
+    readonly_fields = (
+        "role",
+        "google_sub",
+        "email_verified",
+        "email_verified_at",
+        "mfa_enabled",
+        "mfa_enabled_at",
+        "password_changed_at",
+        "created_at",
+        "updated_at",
+    )
 
 
 @admin.register(MFARecoveryToken)

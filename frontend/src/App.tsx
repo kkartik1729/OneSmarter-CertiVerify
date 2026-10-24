@@ -3,8 +3,8 @@ import { BrowserRouter, Route, Routes, Navigate } from 'react-router-dom';
 import { AuthProvider } from './context/AuthContext';
 import AppLayout from './components/AppLayout';
 import RoleBasedRoute from './components/RoleBasedRoute';
-import AdminLayout from './components/AdminLayout';
-import UserLayout from './components/UserLayout';
+const AdminLayout = lazy(() => import('./components/AdminLayout'));
+const UserLayout = lazy(() => import('./components/UserLayout'));
 
 import LoadingScreen from './components/LoadingScreen';
 
@@ -36,14 +36,15 @@ const MfaRecovery = lazy(() => import('./pages/MfaRecovery'));
 const ForgotPassword = lazy(() => import('./pages/ForgotPassword'));
 const PublicVerify = lazy(() => import('./pages/PublicVerify'));
 import { useAuth } from './context/AuthContext';
-import SetManualPassword from './components/SetManualPassword';
+const SetManualPassword = lazy(() => import('./components/SetManualPassword'));
 
 import ErrorBoundary from './components/ErrorBoundary';
 
 // Role-aware root dashboard redirect
 function DashboardRedirect() {
-  const { user, loading } = useAuth();
+  const { user, loading, bootError, retryRestore } = useAuth();
   if (loading) return null;
+  if (bootError) return <div role="alert" className="max-w-xl mx-auto p-6"><p>{bootError}</p><button type="button" className="btn" onClick={retryRestore}>Try again</button></div>;
   if (!user) return <Navigate to="/login" replace />;
   return <Navigate to={user.role === 'admin' ? '/admin/dashboard' : '/user/dashboard'} replace />;
 }

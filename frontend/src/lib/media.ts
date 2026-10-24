@@ -15,7 +15,7 @@ export function resolveCertificateMediaUrl(
   let url = rawUrl.trim();
   if (!url) return null;
 
-  // Backend origin (e.g. http://127.0.0.1:8000 or http://localhost:8005)
+  // Backend origin (e.g. http://127.0.0.1:8000)
   const apiOrigin = API_BASE.replace(/\/api\/?$/, '');
 
   // If already absolute URL

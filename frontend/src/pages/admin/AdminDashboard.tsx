@@ -385,7 +385,7 @@ export default function AdminDashboard() {
           ) : (
             <div className="max-h-72 overflow-y-auto overscroll-contain [scrollbar-color:#94a3b8_transparent] dark:[scrollbar-color:#64748b_transparent] divide-y divide-slate-100 dark:divide-slate-800">
               {recentVerifies.map(v => {
-                const isFound = v.result === 'FOUND' || v.result === 'VERIFIED';
+                const isFound = v.result === 'VERIFIED';
                 return (
                   <div key={v.id} className="py-3 flex items-center justify-between gap-3 text-xs">
                     <div className="min-w-0">

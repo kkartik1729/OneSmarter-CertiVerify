@@ -2,8 +2,8 @@ import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { Award, ShieldCheck, History, ArrowRight, Search, Eye, Download, AlertTriangle } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
-import { certificateService, verificationHistoryService, errMsg } from '../../services';
-import type { Cert, VerificationAttemptItem } from '../../types';
+import { certificateService, dashboardService, errMsg } from '../../services';
+import type { Cert, DashboardStats } from '../../types';
 import StatCard from '../../components/StatCard';
 import { StatCardSkeleton } from '../../components/LoadingSkeleton';
 import StatusBadge from '../../components/StatusBadge';
@@ -15,10 +15,11 @@ import { toast } from '../../lib/ui';
 export default function UserDashboard() {
   const { user, verifyEmail, resendVerification } = useAuth();
   const [certs, setCerts] = useState<Cert[]>([]);
-  const [verifications, setVerifications] = useState<VerificationAttemptItem[]>([]);
+  const [dashboard, setDashboard] = useState<DashboardStats | null>(null);
   const [selectedCert, setSelectedCert] = useState<Cert | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [downloadError, setDownloadError] = useState<string | null>(null);
 
   // Email verification state
   const [otp, setOtp] = useState('');
@@ -30,12 +31,12 @@ export default function UserDashboard() {
     setLoading(true);
     setError(null);
     try {
-      const [cList, vList] = await Promise.all([
+      const [overview, cList] = await Promise.all([
+        dashboardService.get(),
         certificateService.list(),
-        verificationHistoryService.list(),
       ]);
+      setDashboard(overview);
       setCerts(cList);
-      setVerifications(vList);
     } catch (err) {
       setError(errMsg(err));
     } finally {
@@ -68,14 +69,8 @@ export default function UserDashboard() {
   }
 
   // Consistent Verified Records metric: count distinct authentic certificate numbers found in user's lookup queries
-  const verifiedCount = new Set(
-    verifications
-      .filter(v => v.result === 'FOUND' || v.result === 'VERIFIED')
-      .map(v => v.certificate_number.trim().toUpperCase())
-  ).size;
-
   const recentCerts = certs.slice(0, 5);
-  const recentLookups = verifications.slice(0, 5);
+  const recentLookups = dashboard?.recent_verification_searches ?? [];
 
   const handleVerifyEmail = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -118,18 +113,19 @@ export default function UserDashboard() {
   return (
     <div className="space-y-8">
       {/* Email Verification Required Banner — only display when unclaimed certificates genuinely exist */}
-      {user && user.emailVerified === false && user.hasUnclaimedCertificates === true && (
+      {user && user.emailVerified === false && (
         <div className="p-5 sm:p-6 rounded-2xl bg-amber-500/10 border border-amber-500/30 text-amber-900 dark:text-amber-200 shadow-sm">
           <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
             <div className="flex items-start gap-3.5">
               <AlertTriangle className="w-5 h-5 text-amber-600 dark:text-amber-400 flex-shrink-0 mt-0.5" />
               <div>
                 <h4 className="text-sm font-bold text-amber-950 dark:text-amber-200">
-                  Verify Your Account Email to Claim Issued Certificates
+                  Verify Your Account Email
                 </h4>
                 <p className="text-xs text-amber-800/90 dark:text-amber-300/80 mt-1 max-w-xl">
-                  Your account email <span className="font-semibold">{user.email}</span> is not verified yet. This is account email verification, not a certificate verification code. Verify it to securely link previously issued certificates.
+                  Your account email <span className="font-semibold">{user.email}</span> is not verified yet. Verify it to continue using your account and securely link any eligible issued certificates.
                 </p>
+                <Link to={`/verify-email?email=${encodeURIComponent(user.email)}`} className="mt-2 inline-block text-xs font-semibold underline">Open email verification</Link>
                 {verifyError && (
                   <p className="text-xs font-semibold text-rose-600 dark:text-rose-400 mt-2">
                     {verifyError}
@@ -198,19 +194,19 @@ export default function UserDashboard() {
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
         <StatCard
           title="My Certificates"
-          value={certs.length}
+          value={dashboard?.my_certificates ?? certs.length}
           icon={Award}
           color="teal"
         />
         <StatCard
           title="Verified Records"
-          value={verifiedCount}
+          value={dashboard?.verified_records ?? 0}
           icon={ShieldCheck}
           color="emerald"
         />
         <StatCard
           title="Verification Searches"
-          value={verifications.length}
+          value={dashboard?.verification_searches ?? 0}
           icon={History}
           color="indigo"
         />
@@ -220,6 +216,7 @@ export default function UserDashboard() {
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         {/* Recent Certificates */}
         <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl p-6 shadow-sm">
+          {downloadError && <p role="alert" className="mb-3 text-sm text-rose-700 dark:text-rose-300">{downloadError}</p>}
           <div className="flex items-center justify-between mb-4">
             <div>
               <h3 className="text-base font-bold text-slate-900 dark:text-white">
@@ -264,11 +261,12 @@ export default function UserDashboard() {
                       <button
                         type="button"
                         onClick={async () => {
+                          setDownloadError(null);
                           try {
                             const blob = c.hasPdf ? await certificateService.pdfBlob(c.key) : await certificateService.imageBlob(c.key);
                             downloadBlob(blob, `certificate_${c.number}.${c.hasPdf ? 'pdf' : 'png'}`);
                           } catch (err) {
-                            setError(errMsg(err));
+                            setDownloadError(errMsg(err));
                           }
                         }}
                         className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-semibold text-slate-700 hover:text-slate-900 bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:text-slate-300 dark:hover:bg-slate-700 rounded-lg transition"
@@ -307,7 +305,7 @@ export default function UserDashboard() {
           ) : (
             <div className="max-h-72 overflow-y-auto overscroll-contain [scrollbar-color:#94a3b8_transparent] dark:[scrollbar-color:#64748b_transparent] divide-y divide-slate-100 dark:divide-slate-800">
               {recentLookups.map(v => {
-                const isFound = v.result === 'FOUND' || v.result === 'VERIFIED';
+                const isFound = v.result === 'VERIFIED' || v.result === 'FOUND';
                 return (
                   <div key={v.id} className="py-3 flex items-center justify-between gap-3 text-xs">
                     <div className="min-w-0">

@@ -6,6 +6,8 @@ import io
 
 import logging
 
+import re
+
 import secrets
 
 from datetime import timedelta
@@ -29,7 +31,8 @@ from django.core.cache import cache
 from django.core.exceptions import ValidationError as DjangoValidationError
 
 from django.core.mail import send_mail
-from django.db import transaction
+from django.db import IntegrityError, transaction
+from django.db.models.functions import Lower, Trim
 
 from django.utils import timezone
 
@@ -53,7 +56,7 @@ from rest_framework_simplejwt.tokens import RefreshToken, Token
 
 
 
-from .emails import (
+from .services import (
 
     EmailDeliveryError,
 
@@ -62,18 +65,26 @@ from .emails import (
     send_mfa_recovery_email,
 
     send_mfa_reset_notification_email,
+    send_mfa_enabled_notification_email,
 
     send_password_changed_notification_email,
 
     send_password_reset_email,
 
-    send_password_reset_otp_email,
 
     send_email_verification_otp_email,
 
 )
+from .authentication import issue_user_refresh_token
+from .client_ip import get_client_ip
 
 from .models import EmailVerificationToken, MFARecoveryToken, PasswordResetRequest, PasswordResetToken, UserProfile
+from .throttles import (
+    EmailVerificationIPThrottle,
+    LoginIPThrottle,
+    LoginIdentityThrottle,
+    PasswordResetIPThrottle,
+)
 
 from .serializers import RegisterSerializer, UserProfileSerializer
 
@@ -82,22 +93,6 @@ from .serializers import RegisterSerializer, UserProfileSerializer
 logger = logging.getLogger(__name__)
 
 User = get_user_model()
-
-
-
-
-
-def get_client_ip(request):
-
-    """Retrieve client IP address for rate limiting."""
-
-    x_forwarded_for = request.META.get("HTTP_X_FORWARDED_FOR")
-
-    if x_forwarded_for:
-
-        return x_forwarded_for.split(",")[0].strip()
-
-    return request.META.get("REMOTE_ADDR", "127.0.0.1")
 
 
 
@@ -139,6 +134,23 @@ def get_or_sync_profile(user):
 
 
 
+class LogoutView(APIView):
+    """Blacklist a refresh token; invalid/stale tokens are harmless to retry."""
+
+    permission_classes = [AllowAny]
+    authentication_classes = []
+
+    def post(self, request):
+        refresh_value = request.data.get("refresh")
+        if isinstance(refresh_value, str) and refresh_value:
+            try:
+                RefreshToken(refresh_value).blacklist()
+            except TokenError:
+                # Logout is idempotent and must remain available to stale clients.
+                pass
+        return Response(status=status.HTTP_205_RESET_CONTENT)
+
+
 class CurrentUserView(APIView):
     """Return the authenticated user's profile for the frontend."""
 
@@ -172,13 +184,15 @@ class MFAChallengeToken(Token):
 
 class RegisterView(generics.CreateAPIView):
 
-    """Register users; send verification only when an issued certificate must be claimed."""
+    """Register users and send an account verification code."""
 
 
 
     serializer_class = RegisterSerializer
 
     permission_classes = [AllowAny]
+    authentication_classes = []
+    throttle_classes = [EmailVerificationIPThrottle]
 
 
 
@@ -186,85 +200,73 @@ class RegisterView(generics.CreateAPIView):
 
         serializer = self.get_serializer(data=request.data)
 
-        serializer.is_valid(raise_exception=True)
+        if not serializer.is_valid():
+            email = str(request.data.get("email", "")).strip()
+            username = str(request.data.get("username", "")).strip()
+            identity_exists = bool(
+                (email and User.objects.filter(email__iexact=email).exists())
+                or (username and User.objects.filter(username__iexact=username).exists())
+            )
+            if identity_exists:
+                return Response(
+                    {"detail": "If registration can be completed, verification instructions will be sent to the matching email."},
+                    status=status.HTTP_202_ACCEPTED,
+                )
+            serializer.is_valid(raise_exception=True)
 
-        user = serializer.save()
-
-
-
-        # A code is needed only to claim an eligible certificate issued before
-        # registration. Other new users can sign in without an OTP email.
-        from apps.certificates.models import Certificate
-        from django.db.models.functions import Lower, Trim
-
-        normalized_email = (user.email or "").strip().lower()
-        has_unclaimed_issued_certificate = Certificate.objects.annotate(
-            clean_recipient_email=Trim(Lower("recipient_email")),
-        ).filter(
-            owner__isnull=True,
-            status=Certificate.Status.VERIFIED,
-            clean_recipient_email=normalized_email,
-        ).exists()
-
-        email_sent = False
-        if has_unclaimed_issued_certificate:
-            otp = f"{secrets.randbelow(1_000_000):06d}"
-            otp_hash = hashlib.sha256(otp.encode("utf-8")).hexdigest()
-            token = secrets.token_urlsafe(32)
-            token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
-            verification_record = EmailVerificationToken.objects.create(
-                user=user,
-                token_hash=token_hash,
-                otp_hash=otp_hash,
-                expires_at=timezone.now() + timedelta(hours=24),
+        try:
+            user = serializer.save()
+        except IntegrityError:
+            # A concurrent registration may win the uniqueness race after
+            # validation. Keep the response indistinguishable from a duplicate.
+            return Response(
+                {"detail": "If registration can be completed, verification instructions will be sent to the matching email."},
+                status=status.HTTP_202_ACCEPTED,
             )
 
-            try:
-                email_sent = bool(send_email_verification_otp_email(user, otp))
-            except Exception:
-                # Do not log OTPs, tokens, or credentials.
-                logger.exception("Failed to send verification email to %s", user.email)
-                email_sent = False
-            if not email_sent:
-                verification_record.is_used = True
-                verification_record.used_at = timezone.now()
-                verification_record.save(update_fields=["is_used", "used_at"])
+        try:
+            from apps.audit.models import AuditLog
+            from apps.audit.services import log_action
+            log_action(
+                action=AuditLog.Action.USER_REGISTERED,
+                actor=user,
+                target_type="User",
+                target_id=str(user.pk),
+                description="Account registered; email verification is pending",
+                ip_address=get_client_ip(request),
+            )
+        except Exception:
+            logger.exception("Account was created but its audit event could not be recorded")
 
 
 
-        headers = self.get_success_headers(serializer.data)
+        otp = f"{secrets.randbelow(1_000_000):06d}"
+        otp_hash = hashlib.sha256(otp.encode("utf-8")).hexdigest()
+        token = secrets.token_urlsafe(32)
+        token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
+        verification_record = EmailVerificationToken.objects.create(
+            user=user,
+            token_hash=token_hash,
+            otp_hash=otp_hash,
+            expires_at=timezone.now() + timedelta(minutes=10),
+        )
+
+        try:
+            email_sent = bool(send_email_verification_otp_email(user, otp))
+        except Exception:
+            # Do not log OTPs, tokens, or credentials.
+            logger.exception("Failed to send account verification email")
+            email_sent = False
+        if not email_sent:
+            verification_record.is_used = True
+            verification_record.used_at = timezone.now()
+            verification_record.save(update_fields=["is_used", "used_at"])
+
+
 
         return Response(
-
-            {
-
-                "user": serializer.data,
-                "verification_email_sent": email_sent,
-
-                "message": (
-
-                    "Registration successful. "
-
-                    + (
-                        "Verification code sent to your inbox."
-                        if email_sent
-                        else (
-                            "Verification email could not be sent; please request a new code."
-                            if has_unclaimed_issued_certificate
-                            else "No email verification is required; you can sign in."
-                        )
-                    )
-
-                ),
-
-                "email": user.email,
-
-            },
-
-            status=status.HTTP_201_CREATED,
-
-            headers=headers,
-
+            {"detail": "If registration can be completed, verification instructions will be sent to the matching email."},
+            status=status.HTTP_202_ACCEPTED,
         )
 
 
@@ -420,11 +422,28 @@ class MFAConfirmView(APIView):
 
 
 
-        return Response({
+        from apps.audit.models import AuditLog
+        from apps.audit.services import log_action
+        try:
+            log_action(
+                action=AuditLog.Action.MFA_ENABLED,
+                actor=request.user,
+                target_type="User",
+                target_id=str(request.user.pk),
+                description="Authenticator MFA enabled by account owner",
+                ip_address=get_client_ip(request),
+            )
+        except Exception:
+            logger.exception("MFA was enabled but its audit event could not be recorded")
 
-            "detail": "Authenticator MFA enabled successfully."
+        def send_enrollment_notice():
+            try:
+                send_mfa_enabled_notification_email(request.user)
+            except Exception as exc:
+                logger.warning("MFA enrollment notification failed (%s)", type(exc).__name__)
 
-        })
+        transaction.on_commit(send_enrollment_notice)
+        return Response({"detail": "Authenticator MFA enabled successfully."})
 
 
 
@@ -447,6 +466,8 @@ class MFALoginView(APIView):
     permission_classes = [AllowAny]
 
     authentication_classes = []
+
+    throttle_classes = [LoginIPThrottle, LoginIdentityThrottle]
 
 
 
@@ -534,6 +555,12 @@ class MFALoginView(APIView):
 
             profile = get_or_sync_profile(user)
 
+            if not profile.email_verified:
+                return Response(
+                    {"detail": "Verify your email address before signing in."},
+                    status=status.HTTP_403_FORBIDDEN,
+                )
+
 
 
             is_setup = purpose == "mfa_setup_challenge"
@@ -576,8 +603,6 @@ class MFALoginView(APIView):
 
             attempts = cache.get(attempts_key, 0)
 
-
-
             if attempts >= 5:
 
                 return Response(
@@ -590,7 +615,16 @@ class MFALoginView(APIView):
 
 
 
-            cache.set(attempts_key, attempts + 1, timeout=300)
+            if not cache.add(attempts_key, 1, timeout=300):
+                attempts = cache.incr(attempts_key)
+            else:
+                attempts = 1
+
+            if attempts > 5:
+                return Response(
+                    {"detail": "Too many attempts. Start login again."},
+                    status=status.HTTP_429_TOO_MANY_REQUESTS,
+                )
 
 
 
@@ -642,7 +676,9 @@ class MFALoginView(APIView):
 
             # Mark code as used for 60 seconds to prevent replay
 
-            cache.set(otp_used_key, True, timeout=60)
+            # The verifier accepts the current TOTP step plus one step on
+            # either side, so the replay marker must cover that full window.
+            cache.set(otp_used_key, True, timeout=90)
 
 
 
@@ -684,7 +720,9 @@ class MFALoginView(APIView):
 
 
 
-            refresh = RefreshToken.for_user(user)
+            refresh = issue_user_refresh_token(user)
+            user.last_login = timezone.now()
+            user.save(update_fields=["last_login"])
 
             from apps.audit.models import AuditLog
             from apps.audit.services import log_action
@@ -729,14 +767,11 @@ class MFALoginView(APIView):
 
         # Allow sign-in by case-insensitive username or email
         if user is None:
-            user_candidate = (
-                User.objects.filter(username__iexact=username).first()
-                or User.objects.filter(email__iexact=username).first()
-            )
-            if not user_candidate and "@" not in username:
-                user_candidate = User.objects.filter(email__istartswith=f"{username}@").first()
-
-            if user_candidate and user_candidate.check_password(password):
+            username_candidate = User.objects.filter(username__iexact=username).first()
+            user_candidate = username_candidate or User.objects.filter(email__iexact=username).first()
+            # Django's authenticate() already checked a real username and
+            # emitted user_login_failed; do not repeat an expensive hash check.
+            if not username_candidate and user_candidate and user_candidate.check_password(password):
                 user = user_candidate
 
 
@@ -754,6 +789,15 @@ class MFALoginView(APIView):
 
 
         profile = get_or_sync_profile(user)
+
+        if not profile.email_verified:
+            return Response(
+                {
+                    "detail": "Verify your email address before signing in.",
+                    "email_verification_required": True,
+                },
+                status=status.HTTP_403_FORBIDDEN,
+            )
 
 
 
@@ -997,27 +1041,7 @@ class MFARecoveryRequestView(APIView):
 
             except SMTPConfigurationError as e:
 
-                logger.warning(f"SMTP configuration error sending MFA recovery email to {email}: {e}")
-
-                if getattr(settings, "DEBUG", False):
-
-                    return Response(
-
-                        {
-
-                            "detail": (
-
-                                "SMTP is not fully configured on the server. "
-
-                                "Please configure EMAIL_HOST_USER and EMAIL_HOST_PASSWORD in backend/.env."
-
-                            )
-
-                        },
-
-                        status=status.HTTP_503_SERVICE_UNAVAILABLE,
-
-                    )
+                logger.warning("MFA recovery email configuration failed (%s)", type(e).__name__)
 
                 return Response(
 
@@ -1029,7 +1053,7 @@ class MFARecoveryRequestView(APIView):
 
             except EmailDeliveryError as e:
 
-                logger.error(f"Error sending MFA recovery email to {email}: {e}")
+                logger.error("MFA recovery email delivery failed (%s)", type(e).__name__)
 
                 return Response(
 
@@ -1075,6 +1099,7 @@ class MFARecoveryConfirmView(APIView):
 
 
 
+    @transaction.atomic
     def post(self, request):
 
         token_str = str(request.data.get("token", "")).strip()
@@ -1095,7 +1120,10 @@ class MFARecoveryConfirmView(APIView):
 
         recovery_record = (
 
-            MFARecoveryToken.objects.filter(token_hash=token_hash)
+            MFARecoveryToken.objects.select_for_update().filter(
+                token_hash=token_hash,
+                purpose="mfa_recovery",
+            )
 
             .select_related("user")
 
@@ -1123,6 +1151,12 @@ class MFARecoveryConfirmView(APIView):
 
                 status=status.HTTP_400_BAD_REQUEST,
 
+            )
+
+        if recovery_record.user.profile.pending_totp_secret:
+            return Response(
+                {"detail": "Authenticator setup is already in progress. Complete it with the displayed code."},
+                status=status.HTTP_409_CONFLICT,
             )
 
 
@@ -1274,7 +1308,7 @@ class MFARecoveryCompleteView(APIView):
 
             user = User.objects.get(**{api_settings.USER_ID_FIELD: user_id})
 
-        except Exception:
+        except (TokenError, KeyError, TypeError, ValueError, User.DoesNotExist):
 
             return Response(
 
@@ -1414,19 +1448,23 @@ class MFARecoveryCompleteView(APIView):
 
         # Send security notification email
 
-        try:
+        # Deliver after the token/profile transaction commits so SMTP latency
+        # cannot hold the locked recovery rows or profile open.
+        def send_recovery_notice():
+            try:
+                send_mfa_reset_notification_email(user)
+            except Exception as exc:
+                logger.warning("MFA recovery notification failed (%s)", type(exc).__name__)
 
-            send_mfa_reset_notification_email(user)
-
-        except Exception as e:
-
-            logger.error(f"Error sending recovery confirmation email: {e}")
+        transaction.on_commit(send_recovery_notice)
 
 
 
         # Issue tokens for API compatibility; frontend guides user to Back to Sign In
 
-        refresh = RefreshToken.for_user(user)
+        refresh = issue_user_refresh_token(user)
+        user.last_login = timezone.now()
+        user.save(update_fields=["last_login"])
 
 
 
@@ -1447,873 +1485,188 @@ class MFARecoveryCompleteView(APIView):
 
 
 class PasswordResetRequestView(APIView):
-
-    """
-
-    Step 1 of password recovery:
-
-    Accept email, generate a cryptographically secure single-use reset token,
-
-    store its hash with 15-minute expiry in PostgreSQL, and send a branded email
-
-    with a direct reset link to the website.
-
-    Returns generic message to prevent account enumeration.
-
-    """
-
-
+    """Send a generic response and a hashed, single-use reset-link token."""
 
     permission_classes = [AllowAny]
-
     authentication_classes = []
+    throttle_classes = [PasswordResetIPThrottle]
 
-
-
+    @transaction.atomic
     def post(self, request):
-
         email = str(request.data.get("email", "")).strip().lower()
-
-
-
         if not email or "@" not in email:
+            return Response({"detail": "Enter a valid email address."}, status=status.HTTP_400_BAD_REQUEST)
 
-            return Response(
-
-                {"detail": "Enter a valid registered email address."},
-
-                status=status.HTTP_400_BAD_REQUEST,
-
-            )
-
-
-
-        # Rate limiting by IP (max 5 requests per 15 min)
-
-        client_ip = get_client_ip(request)
-
-        rate_key = f"certiverify:pwreset:rate:{client_ip}"
-
-        requests_count = cache.get(rate_key, 0)
-
-        if requests_count >= 5:
-
-            return Response(
-
-                {"detail": "Too many password reset requests. Please try again later."},
-
-                status=status.HTTP_429_TOO_MANY_REQUESTS,
-
-            )
-
-        cache.set(rate_key, requests_count + 1, timeout=900)
-
-
-
-        # Email cooldown (max 1 request per 60 seconds per email)
-
-        cooldown_key = f"certiverify:pwreset:cooldown:{email}"
-
-        if cache.get(cooldown_key):
-
-            return Response(
-
-                {"detail": "A reset link was recently requested. Please check your email or wait a moment."},
-
-                status=status.HTTP_429_TOO_MANY_REQUESTS,
-
-            )
-
-        cache.set(cooldown_key, True, timeout=60)
-
-
-
-        generic_msg = (
-
+        generic = (
             "If an account with that email address exists, "
-
             "a password reset link has been sent to your email address."
-
         )
-
-
-
-        matching_users = User.objects.filter(email__iexact=email, is_active=True)
-
-        if matching_users.count() == 1:
-
-            user = matching_users.first()
-
-
-
-            # Invalidate older active password reset requests & tokens for this user
-
-            PasswordResetToken.objects.filter(user=user, is_used=False).update(is_used=True)
-
-            PasswordResetRequest.objects.filter(user=user, is_completed=False).update(is_completed=True)
-
-
-
-            # Generate cryptographically secure single-use reset token
-
-            raw_token = secrets.token_urlsafe(32)
-
-            token_hash = hashlib.sha256(raw_token.encode("utf-8")).hexdigest()
-
-
-
-            # Persist in dedicated PasswordResetToken model
-
-            PasswordResetToken.objects.create(
-
-                user=user,
-
-                token_hash=token_hash,
-
-                expires_at=timezone.now() + timedelta(minutes=15),
-
-                purpose="password_reset",
-
-            )
-
-
-
-            # Also maintain legacy OTP record for backward compatibility
-
-            otp = f"{secrets.randbelow(1000000):06d}"
-
-            otp_hash = hashlib.sha256(otp.encode("utf-8")).hexdigest()
-
-            PasswordResetRequest.objects.create(
-
-                user=user,
-
-                otp_hash=otp_hash,
-
-                reset_token_hash=token_hash,
-
-                otp_expires_at=timezone.now() + timedelta(minutes=10),
-
-                reset_token_expires_at=timezone.now() + timedelta(minutes=15),
-
-                attempts=0,
-
-                max_attempts=5,
-
-            )
-
-
-
-            frontend_base = getattr(settings, "FRONTEND_URL", "http://localhost:5173").rstrip("/")
-
-            reset_url = f"{frontend_base}/reset-password?token={raw_token}"
-
-
-
-            try:
-
-                send_password_reset_email(user, reset_url)
-
-            except SMTPConfigurationError as e:
-
-                logger.warning(f"SMTP configuration error sending password reset email to {email}: {e}")
-
-                if getattr(settings, "DEBUG", False):
-
-                    return Response(
-
-                        {
-
-                            "detail": (
-
-                                "SMTP is not fully configured on the server. "
-
-                                "Please configure EMAIL_HOST_USER and EMAIL_HOST_PASSWORD in backend/.env."
-
-                            )
-
-                        },
-
-                        status=status.HTTP_503_SERVICE_UNAVAILABLE,
-
-                    )
-
-                return Response(
-
-                    {"detail": "Unable to dispatch email due to mail server configuration error."},
-
-                    status=status.HTTP_500_INTERNAL_SERVER_ERROR,
-
-                )
-
-            except EmailDeliveryError as e:
-
-                logger.error(f"Error sending password reset email to {email}: {e}")
-
-                return Response(
-
-                    {"detail": "Failed to send reset email due to a mail server error. Please try again later."},
-
-                    status=status.HTTP_500_INTERNAL_SERVER_ERROR,
-
-                )
-
-        elif matching_users.count() > 1:
-
-            logger.warning(
-
-                f"Multiple active accounts found with email '{email}'. "
-
-                "Refusing automatic password reset for security."
-
-            )
-
-
-
-        return Response({"detail": generic_msg}, status=status.HTTP_200_OK)
-
-
-
+        matches = User.objects.filter(email__iexact=email, is_active=True)
+        if matches.count() != 1:
+            return Response({"detail": generic}, status=status.HTTP_200_OK)
+
+        user_id = matches.values_list("pk", flat=True).first()
+        user = User.objects.select_for_update().get(pk=user_id)
+        recent = PasswordResetToken.objects.filter(
+            user=user,
+            purpose="password_reset",
+            created_at__gte=timezone.now() - timedelta(hours=1),
+        )
+        if recent.filter(created_at__gte=timezone.now() - timedelta(seconds=60)).exists() or recent.count() >= 5:
+            return Response({"detail": generic}, status=status.HTTP_200_OK)
+
+        PasswordResetToken.objects.filter(
+            user=user, purpose="password_reset", is_used=False
+        ).update(
+            is_used=True, used_at=timezone.now()
+        )
+        raw_token = secrets.token_urlsafe(32)
+        token_hash = hashlib.sha256(raw_token.encode("utf-8")).hexdigest()
+        reset_record = PasswordResetToken.objects.create(
+            user=user,
+            token_hash=token_hash,
+            expires_at=timezone.now() + timedelta(minutes=15),
+            purpose="password_reset",
+        )
+        frontend_base = getattr(settings, "FRONTEND_URL", "http://localhost:5173").rstrip("/")
+        # Fragment values are not sent to the frontend host or included in HTTP
+        # access logs and Referer headers. The page immediately removes it.
+        reset_url = f"{frontend_base}/reset-password#token={raw_token}"
+        try:
+            send_password_reset_email(user, reset_url)
+        except (SMTPConfigurationError, EmailDeliveryError) as exc:
+            reset_record.is_used = True
+            reset_record.used_at = timezone.now()
+            reset_record.save(update_fields=["is_used", "used_at"])
+            logger.warning("Password reset email delivery failed (%s).", type(exc).__name__)
+        return Response({"detail": generic}, status=status.HTTP_200_OK)
 
 
 class PasswordResetValidateTokenView(APIView):
-
-    """
-
-    Validate a password-reset token received via email link.
-
-    Checks that the token exists, is unexpired, and has not been used.
-
-    Does NOT modify state or reset the password.
-
-    """
-
-
+    """Validate only the secure reset-link token contract."""
 
     permission_classes = [AllowAny]
-
     authentication_classes = []
+    throttle_classes = [PasswordResetIPThrottle]
 
-
-
-    def _validate_token_str(self, token_str: str):
-
+    def _validate_token_str(self, token_str):
         if not token_str:
-
             return Response(
-
                 {"detail": "Password reset token is required."},
-
                 status=status.HTTP_400_BAD_REQUEST,
-
             )
-
-
-
         token_hash = hashlib.sha256(token_str.encode("utf-8")).hexdigest()
-
-
-
-        # Check PasswordResetToken first
-
-        reset_token_record = (
-
-            PasswordResetToken.objects.filter(token_hash=token_hash)
-
-            .select_related("user")
-
-            .first()
-
-        )
-
-        if reset_token_record and reset_token_record.is_valid():
-
-            if not reset_token_record.user.is_active:
-
-                return Response(
-
-                    {"detail": "This account is inactive."},
-
-                    status=status.HTTP_401_UNAUTHORIZED,
-
-                )
-
-            return Response(
-
-                {
-
-                    "valid": True,
-
-                    "email": reset_token_record.user.email,
-
-                    "detail": "Password reset token is valid.",
-
-                },
-
-                status=status.HTTP_200_OK,
-
+        record = (
+            PasswordResetToken.objects.filter(
+                token_hash=token_hash,
+                purpose="password_reset",
+                is_used=False,
             )
-
-
-
-        # Fallback check PasswordResetRequest
-
-        reset_req = (
-
-            PasswordResetRequest.objects.filter(reset_token_hash=token_hash)
-
             .select_related("user")
-
             .first()
-
         )
-
-        if reset_req and reset_req.is_reset_token_valid():
-
-            if not reset_req.user.is_active:
-
-                return Response(
-
-                    {"detail": "This account is inactive."},
-
-                    status=status.HTTP_401_UNAUTHORIZED,
-
-                )
-
+        if record and record.is_valid() and record.user.is_active:
             return Response(
-
                 {
-
                     "valid": True,
-
-                    "email": reset_req.user.email,
-
+                    "email": record.user.email,
                     "detail": "Password reset token is valid.",
-
                 },
-
                 status=status.HTTP_200_OK,
-
             )
-
-
-
         return Response(
-
             {
-
                 "detail": (
-
                     "This password reset link is invalid, expired, or has already been used. "
-
                     "Please request a new reset link."
-
                 )
-
             },
-
             status=status.HTTP_400_BAD_REQUEST,
-
         )
-
-
 
     def post(self, request):
-
-        token_str = str(
-
-            request.data.get("token") or request.data.get("reset_token") or ""
-
-        ).strip()
-
-        return self._validate_token_str(token_str)
-
-
+        token = str(request.data.get("token") or request.data.get("reset_token") or "").strip()
+        return self._validate_token_str(token)
 
     def get(self, request):
-
-        token_str = str(
-
-            request.query_params.get("token") or request.query_params.get("reset_token") or ""
-
-        ).strip()
-
-        return self._validate_token_str(token_str)
-
-
-
-
-
-class PasswordResetVerifyView(APIView):
-
-    """
-
-    Step 2 of password recovery (supports both direct token check and OTP verification):
-
-    - If 'token' is provided: validates the single-use reset token from email link.
-
-    - If 'otp' is provided: validates 6-digit verification code and returns reset_token.
-
-    """
-
-
-
-    permission_classes = [AllowAny]
-
-    authentication_classes = []
-
-
-
-    def post(self, request):
-
-        token_param = str(
-
-            request.data.get("token") or request.query_params.get("token") or ""
-
-        ).strip()
-
-        if token_param:
-
-            validate_view = PasswordResetValidateTokenView()
-
-            return validate_view._validate_token_str(token_param)
-
-
-
-        email = str(request.data.get("email", "")).strip().lower()
-
-        otp = str(request.data.get("otp", "")).strip()
-
-
-
-        if not email or "@" not in email:
-
-            return Response(
-
-                {"detail": "Enter a valid email address."},
-
-                status=status.HTTP_400_BAD_REQUEST,
-
-            )
-
-
-
-        if not (otp.isdigit() and len(otp) == 6):
-
-            return Response(
-
-                {"detail": "Enter the 6-digit verification code sent to your email."},
-
-                status=status.HTTP_400_BAD_REQUEST,
-
-            )
-
-
-
-        matching_users = User.objects.filter(email__iexact=email, is_active=True)
-
-        if matching_users.count() != 1:
-
-            return Response(
-
-                {"detail": "Invalid or expired verification code."},
-
-                status=status.HTTP_400_BAD_REQUEST,
-
-            )
-
-
-
-        user = matching_users.first()
-
-        reset_req = (
-
-            PasswordResetRequest.objects.filter(
-
-                user=user,
-
-                is_completed=False,
-
-                otp_verified=False,
-
-            )
-
-            .order_by("-created_at")
-
-            .first()
-
-        )
-
-
-
-        if not reset_req:
-
-            return Response(
-
-                {"detail": "No active password reset request found. Please request a new code."},
-
-                status=status.HTTP_400_BAD_REQUEST,
-
-            )
-
-
-
-        if timezone.now() > reset_req.otp_expires_at:
-
-            reset_req.is_completed = True
-
-            reset_req.save(update_fields=["is_completed"])
-
-            return Response(
-
-                {"detail": "Verification code has expired. Please request a new code."},
-
-                status=status.HTTP_400_BAD_REQUEST,
-
-            )
-
-
-
-        if reset_req.attempts >= reset_req.max_attempts:
-
-            reset_req.is_completed = True
-
-            reset_req.save(update_fields=["is_completed"])
-
-            return Response(
-
-                {"detail": "Maximum verification attempts exceeded. Please request a new code."},
-
-                status=status.HTTP_400_BAD_REQUEST,
-
-            )
-
-
-
-        provided_hash = hashlib.sha256(otp.encode("utf-8")).hexdigest()
-
-        if not secrets.compare_digest(provided_hash, reset_req.otp_hash):
-
-            reset_req.attempts += 1
-
-            reset_req.save(update_fields=["attempts"])
-
-            remaining = reset_req.max_attempts - reset_req.attempts
-
-            if remaining <= 0:
-
-                reset_req.is_completed = True
-
-                reset_req.save(update_fields=["is_completed"])
-
-                return Response(
-
-                    {"detail": "Maximum verification attempts exceeded. Please request a new code."},
-
-                    status=status.HTTP_400_BAD_REQUEST,
-
-                )
-
-            return Response(
-
-                {"detail": f"Invalid verification code. {remaining} attempt(s) remaining."},
-
-                status=status.HTTP_400_BAD_REQUEST,
-
-            )
-
-
-
-        # Code is correct: mark verified and generate short-lived reset authorization token
-
-        raw_reset_token = secrets.token_urlsafe(32)
-
-        reset_req.otp_verified = True
-
-        reset_req.reset_token_hash = hashlib.sha256(raw_reset_token.encode("utf-8")).hexdigest()
-
-        reset_req.reset_token_expires_at = timezone.now() + timedelta(minutes=15)
-
-        reset_req.save(
-
-            update_fields=["otp_verified", "reset_token_hash", "reset_token_expires_at"]
-
-        )
-
-
-
-        # Also create PasswordResetToken for unified tracking
-
-        PasswordResetToken.objects.create(
-
-            user=user,
-
-            token_hash=reset_req.reset_token_hash,
-
-            expires_at=reset_req.reset_token_expires_at,
-
-            purpose="password_reset",
-
-        )
-
-
-
-        return Response(
-
-            {
-
-                "reset_token": raw_reset_token,
-
-                "detail": "Verification code accepted. Please enter your new password.",
-
-            },
-
-            status=status.HTTP_200_OK,
-
-        )
-
-
-
+        token = str(request.query_params.get("token") or request.query_params.get("reset_token") or "").strip()
+        return self._validate_token_str(token)
 
 
 class PasswordResetCompleteView(APIView):
-
-    """
-
-    Step 3 of password recovery:
-
-    Validate short-lived reset authorization token, enforce Django's configured
-
-    password validators, set the new password in PostgreSQL, invalidate older reset sessions,
-
-    and send confirmation notification email. MFA state is strictly preserved.
-
-    """
-
-
+    """Consume a secure email-link token exactly once and invalidate old sessions."""
 
     permission_classes = [AllowAny]
-
     authentication_classes = []
-
-
+    throttle_classes = [PasswordResetIPThrottle]
 
     def post(self, request):
-
-        reset_token = str(
-
-            request.data.get("token") or request.data.get("reset_token") or ""
-
-        ).strip()
-
+        raw_token = str(request.data.get("token") or request.data.get("reset_token") or "").strip()
         password = str(request.data.get("password", ""))
-
         password_confirm = str(request.data.get("password_confirm", ""))
-
-
-
-        if not reset_token:
-
-            return Response(
-
-                {"detail": "Password reset authorization token is required."},
-
-                status=status.HTTP_400_BAD_REQUEST,
-
-            )
-
-
-
+        if not raw_token:
+            return Response({"detail": "Password reset authorization token is required."}, status=status.HTTP_400_BAD_REQUEST)
         if not password:
-
-            return Response(
-
-                {"password": ["Password is required."]},
-
-                status=status.HTTP_400_BAD_REQUEST,
-
-            )
-
-
-
+            return Response({"password": ["Password is required."]}, status=status.HTTP_400_BAD_REQUEST)
         if password != password_confirm:
+            return Response({"password_confirm": ["Passwords do not match."]}, status=status.HTTP_400_BAD_REQUEST)
 
-            return Response(
-
-                {"password_confirm": ["Passwords do not match."]},
-
-                status=status.HTTP_400_BAD_REQUEST,
-
-            )
-
-
-
-        token_hash = hashlib.sha256(reset_token.encode("utf-8")).hexdigest()
-
-
-
-        # Check PasswordResetToken first
-
-        token_record = (
-
-            PasswordResetToken.objects.filter(token_hash=token_hash)
-
-            .select_related("user")
-
-            .first()
-
-        )
-
-
-
-        user = None
-
-        if token_record and token_record.is_valid():
-
-            user = token_record.user
-
-        else:
-
-            # Fallback to PasswordResetRequest for OTP flow
-
-            reset_req = (
-
-                PasswordResetRequest.objects.filter(
-
-                    reset_token_hash=token_hash,
-
-                    is_completed=False,
-
+        token_hash = hashlib.sha256(raw_token.encode("utf-8")).hexdigest()
+        try:
+            with transaction.atomic():
+                token_record = PasswordResetToken.objects.select_for_update().select_related("user").get(
+                    token_hash=token_hash, purpose="password_reset", is_used=False
                 )
+                if not token_record.is_valid() or not token_record.user.is_active:
+                    raise PasswordResetToken.DoesNotExist
+                user = User.objects.select_for_update().get(pk=token_record.user_id)
+                try:
+                    validate_password(password, user=user)
+                except DjangoValidationError as exc:
+                    return Response({"password": list(exc.messages)}, status=status.HTTP_400_BAD_REQUEST)
 
-                .select_related("user")
+                now = timezone.now()
+                user.set_password(password)
+                user.save(update_fields=["password"])
+                profile = get_or_sync_profile(user)
+                profile.password_changed_at = now
+                profile.save(update_fields=["password_changed_at", "updated_at"])
 
-                .first()
-
-            )
-
-            if reset_req and reset_req.is_reset_token_valid():
-
-                user = reset_req.user
-
-
-
-        if not user:
-
+                token_record.is_used = True
+                token_record.used_at = now
+                token_record.save(update_fields=["is_used", "used_at"])
+                PasswordResetToken.objects.filter(user=user, is_used=False).update(
+                    is_used=True, used_at=now
+                )
+                PasswordResetRequest.objects.filter(user=user, is_completed=False).update(
+                    is_completed=True
+                )
+        except (PasswordResetToken.DoesNotExist, User.DoesNotExist):
             return Response(
-
-                {
-
-                    "detail": (
-
-                        "This password reset session is invalid, expired, or has already been used. "
-
-                        "Please request a new reset link."
-
-                    )
-
-                },
-
+                {"detail": "This password reset session is invalid, expired, or already used. Please request a new reset link."},
                 status=status.HTTP_400_BAD_REQUEST,
-
             )
-
-
-
-        if not user.is_active:
-
-            return Response(
-
-                {"detail": "This account is inactive."},
-
-                status=status.HTTP_401_UNAUTHORIZED,
-
-            )
-
-
-
-        # Enforce Django password validators
 
         try:
-
-            validate_password(password, user=user)
-
-        except DjangoValidationError as exc:
-
-            return Response(
-
-                {"password": list(exc.messages)},
-
-                status=status.HTTP_400_BAD_REQUEST,
-
-            )
-
-
-
-        # Set new password
-
-        user.set_password(password)
-
-        user.save()
-
-
-
-        # Invalidate the used token and all other outstanding reset tokens for this user
-
-        if token_record:
-
-            token_record.is_used = True
-
-            token_record.used_at = timezone.now()
-
-            token_record.save(update_fields=["is_used", "used_at"])
-
-        PasswordResetToken.objects.filter(user=user, is_used=False).update(
-
-            is_used=True, used_at=timezone.now()
-
-        )
-
-        PasswordResetRequest.objects.filter(user=user, is_completed=False).update(
-
-            is_completed=True
-
-        )
-
-
-
-        # Send password changed confirmation email
-
-        try:
-
             send_password_changed_notification_email(user)
-
-        except Exception as e:
-
-            logger.error(f"Error sending password changed notification email: {e}")
-
-
-
-        return Response(
-
-            {
-
-                "detail": (
-
-                    "Your password has been changed successfully. "
-
-                    "Please sign in with your new password."
-
-                )
-
-            },
-
-            status=status.HTTP_200_OK,
-
-        )
-
-
-
+        except Exception as exc:
+            logger.warning("Password-change notification failed (%s).", type(exc).__name__)
+        try:
+            from apps.audit.models import AuditLog
+            from apps.audit.services import log_action
+            log_action(
+                action=AuditLog.Action.OTHER,
+                actor=user,
+                target_type="User",
+                target_id=str(user.pk),
+                description="Password reset completed through email verification",
+                ip_address=get_client_ip(request),
+            )
+        except Exception:
+            logger.exception("Password reset completed but its audit event could not be recorded")
+        return Response({
+            "detail": "Your password has been changed successfully. Please sign in with your new password."
+        }, status=status.HTTP_200_OK)
 
 
 class VerifyEmailView(APIView):
@@ -2329,9 +1682,12 @@ class VerifyEmailView(APIView):
     """
 
     permission_classes = [AllowAny]
+    authentication_classes = []
+    throttle_classes = [EmailVerificationIPThrottle]
 
 
 
+    @transaction.atomic
     def post(self, request):
 
         email = str(request.data.get("email", "")).strip().lower()
@@ -2384,9 +1740,11 @@ class VerifyEmailView(APIView):
 
                 is_used=False,
 
-                expires_at__gte=now,
+                expires_at__gt=now,
 
-            ).select_related("user").first()
+                attempts__lt=5,
+
+            ).select_for_update().select_related("user").first()
 
             if token_record:
 
@@ -2406,6 +1764,10 @@ class VerifyEmailView(APIView):
 
 
 
+        EmailVerificationToken.objects.filter(
+            user=user, is_used=False, expires_at__lte=now
+        ).update(is_used=True, used_at=now)
+
         profile = get_or_sync_profile(user)
 
 
@@ -2420,9 +1782,11 @@ class VerifyEmailView(APIView):
 
                 is_used=False,
 
-                expires_at__gte=now,
+                expires_at__gt=now,
 
-            ).order_by("-created_at")
+                attempts__lt=5,
+
+            ).select_for_update().order_by("-created_at", "-id")
 
 
 
@@ -2437,6 +1801,17 @@ class VerifyEmailView(APIView):
                 token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
 
                 token_record = active_tokens.filter(token_hash=token_hash).first()
+
+            if not token_record:
+                failed_record = active_tokens.first()
+                if failed_record:
+                    failed_record.attempts += 1
+                    update_fields = ["attempts"]
+                    if failed_record.attempts >= 5:
+                        failed_record.is_used = True
+                        failed_record.used_at = now
+                        update_fields.extend(["is_used", "used_at"])
+                    failed_record.save(update_fields=update_fields)
 
 
 
@@ -2523,9 +1898,12 @@ class ResendVerificationEmailView(APIView):
     """
 
     permission_classes = [AllowAny]
+    authentication_classes = []
+    throttle_classes = [EmailVerificationIPThrottle]
 
 
 
+    @transaction.atomic
     def post(self, request):
 
         email = str(request.data.get("email", "")).strip().lower()
@@ -2548,11 +1926,13 @@ class ResendVerificationEmailView(APIView):
 
             return Response(
 
-                {"detail": "If an account exists with this email, a verification code has been sent."},
+                {"detail": "If verification is required, instructions will be sent to the matching email."},
 
                 status=status.HTTP_200_OK,
 
             )
+
+        user = User.objects.select_for_update().get(pk=user.pk)
 
 
 
@@ -2562,33 +1942,11 @@ class ResendVerificationEmailView(APIView):
 
             return Response(
 
-                {"detail": "Email is already verified."},
+                {"detail": "If verification is required, instructions will be sent to the matching email."},
 
-                status=status.HTTP_400_BAD_REQUEST,
-
-            )
-
-        # Verification mail is only needed for claiming an eligible,
-        # previously issued certificate. Certificate mail for future issuance
-        # uses its normal independent notification workflow.
-        from apps.certificates.models import Certificate
-        from django.db.models.functions import Lower, Trim
-
-        normalized_email = (user.email or "").strip().lower()
-        has_unclaimed_issued_certificate = Certificate.objects.annotate(
-            clean_recipient_email=Trim(Lower("recipient_email")),
-        ).filter(
-            owner__isnull=True,
-            status=Certificate.Status.VERIFIED,
-            clean_recipient_email=normalized_email,
-        ).exists()
-        if not has_unclaimed_issued_certificate:
-            return Response(
-                {"detail": "No email verification is required for this account."},
                 status=status.HTTP_200_OK,
+
             )
-
-
 
         # Rate limit: check if a token was created in the last 60 seconds
 
@@ -2606,15 +1964,31 @@ class ResendVerificationEmailView(APIView):
 
             return Response(
 
-                {"detail": "Please wait a moment before requesting another verification code."},
+                {"detail": "If verification is required, instructions will be sent to the matching email."},
 
-                status=status.HTTP_429_TOO_MANY_REQUESTS,
+                status=status.HTTP_200_OK,
 
+            )
+
+        recent_count = EmailVerificationToken.objects.filter(
+            user=user,
+            created_at__gte=timezone.now() - timedelta(hours=1),
+        ).count()
+        if recent_count >= 5:
+            return Response(
+                {"detail": "If verification is required, instructions will be sent to the matching email."},
+                status=status.HTTP_200_OK,
             )
 
 
 
         # Invalidate previous unused tokens
+
+        EmailVerificationToken.objects.filter(
+            user=user,
+            is_used=False,
+            expires_at__lte=timezone.now(),
+        ).update(is_used=True, used_at=timezone.now())
 
         EmailVerificationToken.objects.filter(user=user, is_used=False).update(
 
@@ -2642,7 +2016,7 @@ class ResendVerificationEmailView(APIView):
 
             otp_hash=otp_hash,
 
-            expires_at=timezone.now() + timedelta(hours=24),
+            expires_at=timezone.now() + timedelta(minutes=10),
 
         )
 
@@ -2654,7 +2028,7 @@ class ResendVerificationEmailView(APIView):
 
         except Exception as e:
 
-            logger.warning("Failed to resend verification email to %s: %s", user.email, e)
+            logger.warning("Failed to resend verification email (%s)", type(e).__name__)
 
             email_sent = False
 
@@ -2697,9 +2071,11 @@ class GoogleAuthView(APIView):
 
     Authenticates a user via verified Google OAuth ID token.
 
-    Returns access + refresh JWT tokens directly without requiring an additional
+    Returns JWTs only when the account's required factors are complete. Accounts
 
-    authenticator challenge, while keeping TOTP MFA active for password logins.
+    with enrolled TOTP receive a challenge; password-bearing accounts that have
+
+    not enrolled MFA must complete setup through password sign-in first.
 
     """
 
@@ -2707,21 +2083,19 @@ class GoogleAuthView(APIView):
 
     authentication_classes = []
 
+    throttle_classes = [LoginIPThrottle, LoginIdentityThrottle]
+
 
 
     def post(self, request):
 
-        token_str = (
-
+        raw_token = (
             request.data.get("id_token")
-
             or request.data.get("credential")
-
             or request.data.get("token")
-
             or ""
-
-        ).strip()
+        )
+        token_str = raw_token.strip() if isinstance(raw_token, str) else ""
 
 
 
@@ -2850,19 +2224,34 @@ class GoogleAuthView(APIView):
             matched_profile = UserProfile.objects.filter(google_sub=google_sub).select_related("user").first()
             if matched_profile:
                 user = matched_profile.user
-                if (user.email or "").strip().lower() != email:
+                if not user.is_active:
                     return Response(
-                        {"detail": "The Google account email does not match the linked account."},
+                        {"detail": "This account is inactive. Contact an administrator for assistance."},
                         status=status.HTTP_401_UNAUTHORIZED,
                     )
+                if (user.email or "").strip().lower() != email:
+                    email_owner = User.objects.annotate(
+                        normalized_email=Lower(Trim("email")),
+                    ).filter(normalized_email=email).exclude(pk=user.pk).exists()
+                    if email_owner:
+                        return Response(
+                            {"detail": "The new Google email is already linked to another account."},
+                            status=status.HTTP_409_CONFLICT,
+                        )
+                    user.email = email
+                    user.save(update_fields=["email"])
 
         # Step 2: If not found by sub, check for existing user by verified Google email address
         if user is None:
-            from django.db.models.functions import Lower, Trim
             existing_user = User.objects.annotate(
                 normalized_email=Lower(Trim("email")),
             ).filter(normalized_email=email).first()
             if existing_user:
+                if not existing_user.is_active:
+                    return Response(
+                        {"detail": "This account is inactive. Contact an administrator for assistance."},
+                        status=status.HTTP_401_UNAUTHORIZED,
+                    )
                 existing_profile = get_or_sync_profile(existing_user)
                 # The Google ID token was verified for the configured client
                 # and carries Google's verified-email claim. This proves
@@ -2878,68 +2267,117 @@ class GoogleAuthView(APIView):
                 # Link repeatably to the same account and preserve its user ID,
                 # password, role, permissions, and certificate relationships.
                 user = existing_user
-                with transaction.atomic():
-                    existing_profile = UserProfile.objects.select_for_update().get(pk=existing_profile.pk)
-                    if existing_profile.google_sub and existing_profile.google_sub != google_sub:
-                        return Response(
-                            {"detail": "This account is already linked to a different Google identity."},
-                            status=status.HTTP_409_CONFLICT,
-                        )
-                    fields_to_update = []
-                    if existing_profile.google_sub != google_sub:
-                        existing_profile.google_sub = google_sub
-                        fields_to_update.append("google_sub")
-                    if not existing_profile.email_verified:
-                        existing_profile.email_verified = True
-                        existing_profile.email_verified_at = timezone.now()
-                        fields_to_update.extend(["email_verified", "email_verified_at"])
-                    if fields_to_update:
-                        existing_profile.save(update_fields=[*fields_to_update, "updated_at"])
+                try:
+                    with transaction.atomic():
+                        existing_profile = UserProfile.objects.select_for_update().get(pk=existing_profile.pk)
+                        if existing_profile.google_sub and existing_profile.google_sub != google_sub:
+                            return Response(
+                                {"detail": "This account is already linked to a different Google identity."},
+                                status=status.HTTP_409_CONFLICT,
+                            )
+                        fields_to_update = []
+                        if existing_profile.google_sub != google_sub:
+                            existing_profile.google_sub = google_sub
+                            fields_to_update.append("google_sub")
+                        if not existing_profile.email_verified:
+                            existing_profile.email_verified = True
+                            existing_profile.email_verified_at = timezone.now()
+                            fields_to_update.extend(["email_verified", "email_verified_at"])
+                        if fields_to_update:
+                            existing_profile.save(update_fields=[*fields_to_update, "updated_at"])
+                except IntegrityError:
+                    return Response(
+                        {"detail": "This Google identity is already linked to another account."},
+                        status=status.HTTP_409_CONFLICT,
+                    )
 
         # Step 3: Create new user if not found
         if user is None:
-            base_username = (email.split("@")[0] or "google_user").replace("+", "_").replace(".", "_")
+            raw_local_part = (email.split("@", 1)[0] or "google_user").replace("+", "_").replace(".", "_")
+            base_username = re.sub(r"[^\w.@+-]", "_", raw_local_part, flags=re.UNICODE) or "google_user"
             candidate_username = base_username[:25]
             counter = 1
-            while User.objects.filter(username__iexact=candidate_username).exists():
-                candidate_username = f"{base_username[:20]}_{counter}"
-                counter += 1
-
             first_name = (id_info.get("given_name") or "").strip()[:150]
             last_name = (id_info.get("family_name") or "").strip()[:150]
-
-            user = User.objects.create(
-                username=candidate_username,
-                email=email,
-                first_name=first_name,
-                last_name=last_name,
-                is_active=True,
-            )
-            user.set_unusable_password()
-            user.save()
+            while True:
+                try:
+                    with transaction.atomic():
+                        user = User(
+                            username=candidate_username,
+                            email=email,
+                            first_name=first_name,
+                            last_name=last_name,
+                            is_active=True,
+                        )
+                        user.set_unusable_password()
+                        user.save(force_insert=True)
+                    break
+                except IntegrityError:
+                    if User.objects.filter(email__iexact=email).exists():
+                        return Response(
+                            {"detail": "An account with this Google email already exists. Sign in with that account."},
+                            status=status.HTTP_409_CONFLICT,
+                        )
+                    if not User.objects.filter(username__iexact=candidate_username).exists():
+                        raise
+                    candidate_username = f"{base_username[:20]}_{counter}"
+                    counter += 1
 
         # Update profile: ensure email_verified is True and google_sub is recorded
-        profile = get_or_sync_profile(user)
-        profile_dirty = False
-        if not profile.email_verified:
-            profile.email_verified = True
-            profile.email_verified_at = timezone.now()
-            profile_dirty = True
-        if google_sub and profile.google_sub != google_sub:
-            profile.google_sub = google_sub
-            profile_dirty = True
-        if profile_dirty:
-            profile.save()
+        try:
+            with transaction.atomic():
+                profile = get_or_sync_profile(user)
+                profile_dirty = False
+                if not profile.email_verified:
+                    profile.email_verified = True
+                    profile.email_verified_at = timezone.now()
+                    profile_dirty = True
+                if google_sub and profile.google_sub != google_sub:
+                    profile.google_sub = google_sub
+                    profile_dirty = True
+                if profile_dirty:
+                    profile.save()
+        except IntegrityError:
+            return Response(
+                {"detail": "This Google identity is already linked to another account."},
+                status=status.HTTP_409_CONFLICT,
+            )
 
         # Link any unclaimed certificates previously issued to this email address
         try:
             from apps.certificates.services import claim_unclaimed_certificates_for_user
             claim_unclaimed_certificates_for_user(user)
         except Exception as e:
-            logger.warning("Error claiming certificates during Google sign-in for %s: %s", email, e)
+            logger.warning("Certificate claim failed during Google sign-in (%s)", type(e).__name__)
 
-        # Issue JWT tokens directly — no authenticator challenge for Google OAuth flow
-        refresh = RefreshToken.for_user(user)
+        # Respect an account's configured second factor for Google sign-in too.
+        if profile.mfa_enabled and profile.totp_secret:
+            challenge_token = MFAChallengeToken()
+            challenge_token[api_settings.USER_ID_CLAIM] = getattr(
+                user, api_settings.USER_ID_FIELD
+            )
+            challenge_token["purpose"] = "mfa_challenge"
+            return Response({
+                "mfa_required": True,
+                "mfa_setup_required": False,
+                "challenge": str(challenge_token),
+                "detail": "Enter your authenticator code to complete Google sign-in.",
+            }, status=status.HTTP_200_OK)
+
+        # Accounts without an enrolled second factor must complete the same
+        # mandatory TOTP enrollment used by password login.
+        if user.has_usable_password() and not profile.mfa_enabled:
+            return Response({
+                "mfa_required": True,
+                "mfa_setup_required": True,
+                "challenge": "",
+                "detail": "Sign in with your password to complete two-factor setup.",
+            }, status=status.HTTP_403_FORBIDDEN)
+
+        # Issue tokens only after all required authentication factors succeed.
+        refresh = issue_user_refresh_token(user)
+        user.last_login = timezone.now()
+        user.save(update_fields=["last_login"])
 
         from apps.audit.models import AuditLog
         from apps.audit.services import log_action
@@ -3021,9 +2459,6 @@ class SetManualPasswordView(APIView):
 
         user.set_password(password)
         user.save(update_fields=["password"])
-        profile.refresh_from_db()
-        profile.user = user
-
         from apps.audit.models import AuditLog
         from apps.audit.services import log_action
 
@@ -3039,7 +2474,7 @@ class SetManualPasswordView(APIView):
         try:
             send_password_changed_notification_email(user)
         except Exception:
-            logger.exception("Failed to send password-established notification email to %s", user.email)
+            logger.exception("Failed to send password-established notification email")
 
         return Response({
             "detail": "Manual password set successfully. You can now sign in using your username or email and password.",

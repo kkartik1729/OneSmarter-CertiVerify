@@ -8,6 +8,7 @@ export const EP = {
   verifyEmail: '/accounts/verify-email/',
   resendVerification: '/accounts/resend-verification/',
   refresh: '/accounts/token/refresh/',
+  logout: '/accounts/logout/',
   me: '/accounts/me/',
   mfaSetup: '/accounts/mfa/setup/',
   mfaConfirm: '/accounts/mfa/confirm/',
@@ -16,7 +17,6 @@ export const EP = {
   mfaRecoveryComplete: '/accounts/mfa/recovery/complete/',
   passwordResetRequest: '/accounts/password-reset/request/',
   passwordResetValidate: '/accounts/password-reset/validate/',
-  passwordResetVerify: '/accounts/password-reset/verify/',
   passwordResetComplete: '/accounts/password-reset/complete/',
   adminUsers: '/accounts/admin/users/',
   adminUser: (id: string | number) => `/accounts/admin/users/${id}/`,
@@ -52,5 +52,5 @@ export const EP = {
   // dashboard
   dashboard: '/dashboard/',
   // audit
-  auditLogs: '/audit/logs/',
+  auditLogs: '/audit/',
 } as const;

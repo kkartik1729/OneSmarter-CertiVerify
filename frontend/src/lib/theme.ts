@@ -2,7 +2,7 @@ import { useState } from 'react';
 export type Theme = 'dark' | 'light';
 const KEY = 'cv-theme'; // only a UI preference is stored
 export const initTheme = () => {
-  let t: Theme = 'dark';
+  let t: Theme = window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
   try {
     const saved = localStorage.getItem(KEY);
     if (saved === 'light' || saved === 'dark') {

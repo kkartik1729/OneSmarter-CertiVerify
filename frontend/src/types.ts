@@ -63,7 +63,6 @@ export interface Cert {
   pdf?: boolean;
   hasPdf?: boolean;        // true when PDF is stored in PostgreSQL
   pdfDownloadUrl?: string; // URL to download the PostgreSQL-stored PDF
-  code?: string;
   sha?: string;
   createdAt?: string;
 }
@@ -87,7 +86,7 @@ export interface CertificateTemplate {
   image: string;
   image_url?: string;
   description?: string;
-  layout_config?: Record<string, any>;
+  layout_config?: Record<string, unknown>;
   file_format?: string;
   version?: number;
   uploaded_by?: number;
@@ -129,8 +128,6 @@ export interface CSVValidationRow {
   start_date: string;
   end_date: string;
   issue_date: string;
-  user_id: number | null;
-  has_account?: boolean;
   is_valid: boolean;
   errors: string[];
 }
@@ -194,7 +191,7 @@ export interface Verification {
 export interface VerificationAttemptItem {
   id: number;
   certificate_number: string;
-  result: 'FOUND' | 'NOT_FOUND' | 'VERIFIED' | 'REJECTED';
+  result: 'FOUND' | 'NOT_FOUND' | 'VERIFIED' | 'REJECTED' | 'REVOKED' | 'PENDING' | 'NOT_VERIFIED';
   verification_result?: string;
   certificate_title?: string | null;
   requested_by_username: string | null;
@@ -203,6 +200,9 @@ export interface VerificationAttemptItem {
 
 export interface DashboardStats {
   role: 'ADMIN' | 'USER';
+  my_certificates: number;
+  verified_records: number;
+  verification_searches: number;
   statistics: {
     total: number;
     verified: number;
@@ -216,6 +216,15 @@ export interface DashboardStats {
     issuer: string;
     recipient_name: string;
     status: CertStatus;
+    created_at: string;
+  }>;
+  recent_verification_searches: Array<{
+    id: number;
+    certificate_number: string;
+    result: string;
+    verification_result: string;
+    status: string;
+    certificate_title: string | null;
     created_at: string;
   }>;
   admin_stats?: {

@@ -8,13 +8,27 @@ interface GoogleSignInButtonProps {
   text?: 'signin_with' | 'signup_with' | 'continue_with';
 }
 
+interface GoogleCredentialResponse { credential?: string }
+interface GoogleInitializeConfig {
+  client_id: string;
+  callback: (response: GoogleCredentialResponse) => void;
+}
+interface GoogleButtonOptions {
+  theme?: 'outline' | 'filled_blue' | 'filled_black';
+  size?: 'large' | 'medium' | 'small';
+  width?: number;
+  text?: 'signin_with' | 'signup_with' | 'continue_with';
+  shape?: 'rectangular' | 'pill' | 'circle' | 'square';
+  logo_alignment?: 'left' | 'center';
+}
+
 declare global {
   interface Window {
     google?: {
       accounts: {
         id: {
-          initialize: (config: any) => void;
-          renderButton: (parent: HTMLElement, options: any) => void;
+          initialize: (config: GoogleInitializeConfig) => void;
+          renderButton: (parent: HTMLElement, options: GoogleButtonOptions) => void;
           prompt: () => void;
         };
       };
@@ -63,7 +77,7 @@ export default function GoogleSignInButton({
       try {
         window.google.accounts.id.initialize({
           client_id: clientId,
-          callback: async (response: { credential?: string }) => {
+          callback: async (response: GoogleCredentialResponse) => {
             if (!response?.credential) {
               onErrorRef.current('No Google credential returned.');
               return;

@@ -10,6 +10,7 @@ import StatusBadge from './StatusBadge';
 import AuthenticatedCertificateImage from './AuthenticatedCertificateImage';
 import { certificateService } from '../services';
 import { downloadBlob } from '../lib/download';
+import { useAccessibleDialog } from '../lib/dialog';
 
 interface CertificateDetailsProps {
   cert: Cert | null;
@@ -25,6 +26,8 @@ export default function CertificateDetails({
   const [imgFailed, setImgFailed] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
   const [expandedImage, setExpandedImage] = useState(false);
+  const [retryingEmail, setRetryingEmail] = useState(false);
+  const dialogRef = useAccessibleDialog(Boolean(cert), onClose);
 
   if (!cert) return null;
 
@@ -41,8 +44,21 @@ export default function CertificateDetails({
     }
   };
 
+  const retryCertificateEmail = async () => {
+    setRetryingEmail(true);
+    setActionError(null);
+    try {
+      const result = await certificateService.retryEmail(cert.key);
+      setActionError(result.email_sent ? 'Certificate email was accepted successfully.' : result.message);
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : 'Email retry failed.');
+    } finally {
+      setRetryingEmail(false);
+    }
+  };
+
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm animate-in fade-in">
+    <div ref={dialogRef} role="dialog" aria-modal="true" aria-label={`Certificate details for ${cert.number}`} tabIndex={-1} className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm animate-in fade-in">
       <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl max-w-xl w-full p-6 shadow-xl space-y-5 max-h-[90vh] overflow-y-auto">
         <div className="flex items-start justify-between border-b border-slate-200 dark:border-slate-800 pb-4">
           <div className="flex items-center gap-3">
@@ -61,6 +77,7 @@ export default function CertificateDetails({
           <button
             type="button"
             onClick={onClose}
+            aria-label="Close certificate details"
             className="p-1.5 text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 rounded-lg"
           >
             <X className="w-5 h-5" />
@@ -164,29 +181,17 @@ export default function CertificateDetails({
           </div>
         )}
 
-        {/* SHA and verification codes */}
-        {!userDashboard && (cert.sha || cert.code) && (
+        {/* SHA checksum */}
+        {!userDashboard && cert.sha && (
           <div className="p-3.5 rounded-xl bg-slate-100/70 dark:bg-slate-800/80 border border-slate-200 dark:border-slate-700 space-y-2 text-xs">
-            {cert.sha && (
-              <div>
-                <span className="text-slate-500 block text-[11px] font-medium">
-                  SHA-256 Checksum:
-                </span>
-                <span className="font-mono text-slate-800 dark:text-slate-300 break-all select-all">
-                  {cert.sha}
-                </span>
-              </div>
-            )}
-            {cert.code && (
-              <div>
-                <span className="text-slate-500 block text-[11px] font-medium">
-                  Security Code:
-                </span>
-                <span className="font-mono text-slate-800 dark:text-slate-300">
-                  {cert.code}
-                </span>
-              </div>
-            )}
+            <div>
+              <span className="text-slate-500 block text-[11px] font-medium">
+                SHA-256 Checksum:
+              </span>
+              <span className="font-mono text-slate-800 dark:text-slate-300 break-all select-all">
+                {cert.sha}
+              </span>
+            </div>
           </div>
         )}
 
@@ -223,6 +228,16 @@ export default function CertificateDetails({
           </div>
         ) : null)}
         {actionError && <p role="alert" className="text-xs text-rose-700 dark:text-rose-300">{actionError}</p>}
+        {!userDashboard && cert.status === 'VERIFIED' && cert.emailSent === false && (
+          <button
+            type="button"
+            onClick={retryCertificateEmail}
+            disabled={retryingEmail}
+            className="px-3 py-2 text-sm font-semibold text-white bg-indigo-600 hover:bg-indigo-700 disabled:opacity-60 rounded-lg"
+          >
+            {retryingEmail ? 'Retrying email…' : 'Retry certificate email'}
+          </button>
+        )}
         {expandedImage && (
           <AuthenticatedCertificateImage certificateId={cert.key} alt={cert.title} zoomable onClose={() => setExpandedImage(false)} />
         )}

@@ -55,7 +55,8 @@ export default function AnalyticsChart({
             No verification activity recorded yet in PostgreSQL.
           </div>
         ) : (
-          <div className="h-72 w-full">
+          <div className="h-72 w-full" role="group" aria-label="Daily verification attempts chart">
+            <p className="sr-only">{verifyTrends.map(item => `${item.date}: ${item.found ?? 0} verified matches, ${item.not_found ?? 0} not found lookups.`).join(' ')}</p>
             <ResponsiveContainer width="100%" height="100%">
               <BarChart data={verifyTrends} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
                 <CartesianGrid strokeDasharray="3 3" opacity={0.15} />
@@ -63,11 +64,11 @@ export default function AnalyticsChart({
                 <YAxis tick={{ fontSize: 11 }} allowDecimals={false} />
                 <Tooltip
                   contentStyle={{
-                    backgroundColor: '#0f172a',
-                    borderColor: '#334155',
+                    backgroundColor: 'var(--s)',
+                    borderColor: 'var(--bd)',
                     borderRadius: '8px',
                     fontSize: '12px',
-                    color: '#fff',
+                    color: 'var(--t)',
                   }}
                 />
                 <Legend wrapperStyle={{ fontSize: '12px', paddingTop: '10px' }} />
@@ -93,7 +94,8 @@ export default function AnalyticsChart({
               No registration trend records yet.
             </div>
           ) : (
-            <div className="h-60 w-full">
+            <div className="h-60 w-full" role="group" aria-label="Certificate registrations chart">
+              <p className="sr-only">{certTrends.map(item => `${item.date}: ${item.count ?? 0} certificates created.`).join(' ')}</p>
               <ResponsiveContainer width="100%" height="100%">
                 <LineChart data={certTrends} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
                   <CartesianGrid strokeDasharray="3 3" opacity={0.15} />
@@ -101,11 +103,11 @@ export default function AnalyticsChart({
                   <YAxis tick={{ fontSize: 11 }} allowDecimals={false} />
                   <Tooltip
                     contentStyle={{
-                      backgroundColor: '#0f172a',
-                      borderColor: '#334155',
+                      backgroundColor: 'var(--s)',
+                      borderColor: 'var(--bd)',
                       borderRadius: '8px',
                       fontSize: '12px',
-                      color: '#fff',
+                      color: 'var(--t)',
                     }}
                   />
                   <Line
@@ -135,7 +137,8 @@ export default function AnalyticsChart({
               No issuer data available.
             </div>
           ) : (
-            <div className="h-60 w-full flex items-center justify-center">
+            <div className="h-60 w-full flex items-center justify-center" role="group" aria-label="Certificates by issuing organization chart">
+              <p className="sr-only">{issuerBreakdown.map(item => `${item.issuer}: ${item.count} certificates.`).join(' ')}</p>
               <ResponsiveContainer width="100%" height="100%">
                 <PieChart>
                   <Pie
@@ -154,11 +157,11 @@ export default function AnalyticsChart({
                   </Pie>
                   <Tooltip
                     contentStyle={{
-                      backgroundColor: '#0f172a',
-                      borderColor: '#334155',
+                      backgroundColor: 'var(--s)',
+                      borderColor: 'var(--bd)',
                       borderRadius: '8px',
                       fontSize: '12px',
-                      color: '#fff',
+                      color: 'var(--t)',
                     }}
                   />
                   <Legend wrapperStyle={{ fontSize: '11px' }} />

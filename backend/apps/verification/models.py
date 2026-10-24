@@ -9,7 +9,9 @@ class VerificationAttempt(models.Model):
         VERIFIED = "VERIFIED", "Verified"
         PENDING = "PENDING", "Pending"
         REJECTED = "REJECTED", "Rejected"
+        REVOKED = "REVOKED", "Revoked"
         NOT_FOUND = "NOT_FOUND", "Not Found"
+        NOT_VERIFIED = "NOT_VERIFIED", "Not Verified"
 
     certificate = models.ForeignKey(
         "certificates.Certificate",
@@ -34,7 +36,7 @@ class VerificationAttempt(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
-        ordering = ["-created_at"]
+        ordering = ["-created_at", "-id"]
         indexes = [
             models.Index(
                 fields=["certificate_number", "-created_at"],

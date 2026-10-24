@@ -10,7 +10,6 @@ export interface VerificationCheckResponse {
   verification_result: string;
   status: string;
   message: string;
-  verification_attempt_id?: number;
   certificate?: {
     title: string;
     issuer: string;
@@ -24,9 +23,9 @@ export const verificationHistoryService = {
     return asList(data).map(r => ({
       id: Number(r.id),
       certificate_number: String(r.certificate_number ?? ''),
-      result: (String(r.result ?? 'NOT_FOUND') as 'FOUND' | 'NOT_FOUND' | 'VERIFIED' | 'REJECTED'),
+      result: (String(r.result ?? 'NOT_FOUND') as VerificationAttemptItem['result']),
       verification_result: String(
-        r.verification_result ?? (r.result === 'FOUND' || r.result === 'VERIFIED' ? 'VERIFIED' : 'NOT_VERIFIED')
+        r.verification_result ?? (r.result === 'VERIFIED' ? 'VERIFIED' : String(r.result ?? 'NOT_FOUND'))
       ),
       certificate_title: r.certificate_title ? String(r.certificate_title) : null,
       requested_by_username: r.requested_by_username ? String(r.requested_by_username) : null,

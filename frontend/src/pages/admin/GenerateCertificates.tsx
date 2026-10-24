@@ -32,9 +32,11 @@ import type {
   CSVValidationRow,
   GenerationBatch,
 } from '../../types';
+import { localDateISO } from '../../lib/date';
 import ErrorMessage from '../../components/ErrorMessage';
 import LoadingSkeleton from '../../components/LoadingSkeleton';
 import TemplateLayoutEditor from '../../components/TemplateLayoutEditor';
+import { useAccessibleDialog } from '../../lib/dialog';
 
 export default function GenerateCertificates() {
   // Stepper state: 1 = Course & Template, 2 = CSV & Validation, 3 = Preview & Confirm, 4 = Results
@@ -55,7 +57,6 @@ export default function GenerateCertificates() {
   const [batchEndDate, setBatchEndDate] = useState('');
   const [batchIssueDate, setBatchIssueDate] = useState('');
   const [batchCompletionDescription, setBatchCompletionDescription] = useState('');
-  const [batchOutputFormat, setBatchOutputFormat] = useState<'PDF' | 'PNG' | 'JPEG'>('PDF');
   const [deletingTemplate, setDeletingTemplate] = useState(false);
 
   // Editable rows (for per-row overrides in step 3)
@@ -64,6 +65,7 @@ export default function GenerateCertificates() {
   // Per-student inline row editing modal
   const [editingRowIndex, setEditingRowIndex] = useState<number | null>(null);
   const [editFormData, setEditFormData] = useState<CSVValidationRow | null>(null);
+  const editRowDialogRef = useAccessibleDialog(Boolean(editFormData), () => setEditFormData(null));
   const [editNameError, setEditNameError] = useState<string | null>(null);
 
   const handleStartEditRow = (idx: number, row: CSVValidationRow) => {
@@ -77,6 +79,11 @@ export default function GenerateCertificates() {
     const trimmedName = editFormData.student_name.trim();
     if (!trimmedName || trimmedName.length >= 30) {
       setEditNameError('Student name must be 1–29 characters.');
+      return;
+    }
+    const normalizedEmail = editFormData.student_email.trim().toLowerCase();
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizedEmail)) {
+      setEditNameError('Enter a valid student email address.');
       return;
     }
     const parseDateStr = (dStr: string) => {
@@ -97,7 +104,7 @@ export default function GenerateCertificates() {
     const updated: CSVValidationRow = {
       ...editFormData,
       student_name: trimmedName,
-      student_email: editFormData.student_email.trim().toLowerCase(),
+      student_email: normalizedEmail,
     };
     setEditableRows((prev) =>
       prev.map((r, i) => (i === editingRowIndex ? updated : r))
@@ -138,6 +145,7 @@ export default function GenerateCertificates() {
 
   // Preview Certificate
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+  const previewDialogRef = useAccessibleDialog(Boolean(previewUrl), () => setPreviewUrl(null));
   const [loadingPreview, setLoadingPreview] = useState(false);
 
   // Bulk Generation Execution
@@ -381,7 +389,7 @@ export default function GenerateCertificates() {
         course_name: row?.course_name || selectedCourse?.name || '',
         start_date: row?.start_date || selectedCourse?.start_date || '',
         end_date: row?.end_date || selectedCourse?.end_date || '',
-        issue_date: row?.issue_date || new Date().toISOString().slice(0, 10),
+        issue_date: row?.issue_date || localDateISO(),
         issuer_name: selectedCourse?.issuer || 'OneSmarter, Inc.',
         completion_description: batchCompletionDescription.trim() || undefined,
       });
@@ -419,7 +427,6 @@ export default function GenerateCertificates() {
           certificate_title: batchCertificateTitle.trim() || undefined,
           issuer: batchIssuer.trim() || undefined,
           completion_description: batchCompletionDescription.trim() || undefined,
-          output_format: batchOutputFormat,
         }
       );
       setBatchResult(result);
@@ -595,8 +602,9 @@ export default function GenerateCertificates() {
               <form onSubmit={handleCreateCourse} className="p-4 bg-slate-50 dark:bg-slate-800/50 rounded-xl border border-slate-200 dark:border-slate-700 space-y-3 text-xs">
                 <h4 className="font-semibold text-slate-900 dark:text-white">{editingCourseId ? 'Edit Course' : 'Register New Course'}</h4>
                 <div>
-                  <label className="block text-slate-600 dark:text-slate-300 mb-1">Course Name *</label>
+                  <label htmlFor="new-course-name" className="block text-slate-600 dark:text-slate-300 mb-1">Course Name *</label>
                   <input
+                    id="new-course-name"
                     type="text"
                     required
                     placeholder="e.g. Python Programming Masterclass"
@@ -607,8 +615,9 @@ export default function GenerateCertificates() {
                 </div>
                 <div className="grid grid-cols-2 gap-3">
                   <div>
-                    <label className="block text-slate-600 dark:text-slate-300 mb-1">Certificate Title</label>
+                    <label htmlFor="new-course-title" className="block text-slate-600 dark:text-slate-300 mb-1">Certificate Title</label>
                     <input
+                      id="new-course-title"
                       type="text"
                       value={newCourseTitle}
                       onChange={(e) => setNewCourseTitle(e.target.value)}
@@ -616,8 +625,9 @@ export default function GenerateCertificates() {
                     />
                   </div>
                   <div>
-                    <label className="block text-slate-600 dark:text-slate-300 mb-1">Issuing Authority</label>
+                    <label htmlFor="new-course-issuer" className="block text-slate-600 dark:text-slate-300 mb-1">Issuing Authority</label>
                     <input
+                      id="new-course-issuer"
                       type="text"
                       value={newCourseIssuer}
                       onChange={(e) => setNewCourseIssuer(e.target.value)}
@@ -627,8 +637,9 @@ export default function GenerateCertificates() {
                 </div>
                 <div className="grid grid-cols-2 gap-3">
                   <div>
-                    <label className="block text-slate-600 dark:text-slate-300 mb-1">Start Date *</label>
+                    <label htmlFor="new-course-start" className="block text-slate-600 dark:text-slate-300 mb-1">Start Date *</label>
                     <input
+                      id="new-course-start"
                       type="date"
                       required
                       value={newCourseStart}
@@ -637,8 +648,9 @@ export default function GenerateCertificates() {
                     />
                   </div>
                   <div>
-                    <label className="block text-slate-600 dark:text-slate-300 mb-1">End Date *</label>
+                    <label htmlFor="new-course-end" className="block text-slate-600 dark:text-slate-300 mb-1">End Date *</label>
                     <input
+                      id="new-course-end"
                       type="date"
                       required
                       min={newCourseStart || undefined}
@@ -745,8 +757,9 @@ export default function GenerateCertificates() {
               <form onSubmit={handleUploadTemplate} className="p-4 bg-slate-50 dark:bg-slate-800/50 rounded-xl border border-slate-200 dark:border-slate-700 space-y-3 text-xs">
                 <h4 className="font-semibold text-slate-900 dark:text-white">Upload Certificate Image Template</h4>
                 <div>
-                  <label className="block text-slate-600 dark:text-slate-300 mb-1">Template Name *</label>
+                  <label htmlFor="upload-template-name" className="block text-slate-600 dark:text-slate-300 mb-1">Template Name *</label>
                   <input
+                    id="upload-template-name"
                     type="text"
                     required
                     value={templateName}
@@ -755,8 +768,9 @@ export default function GenerateCertificates() {
                   />
                 </div>
                 <div>
-                  <label className="block text-slate-600 dark:text-slate-300 mb-1">Select PNG, JPG, or PDF Template File *</label>
+                  <label htmlFor="upload-template-file" className="block text-slate-600 dark:text-slate-300 mb-1">Select PNG, JPG, or PDF Template File *</label>
                   <input
+                    id="upload-template-file"
                     type="file"
                     required
                     accept=".png,.jpg,.jpeg,.pdf"
@@ -927,21 +941,6 @@ export default function GenerateCertificates() {
                   onChange={(e) => setBatchIssuer(e.target.value)}
                   className="w-full max-w-sm px-3 py-2 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 rounded-lg text-slate-900 dark:text-white"
                 />
-              </div>
-
-              <div>
-                <label className="block min-h-8 text-slate-600 dark:text-slate-300 mb-1 font-medium">
-                  Output Format
-                </label>
-                <select
-                  value={batchOutputFormat}
-                  onChange={(e) => setBatchOutputFormat(e.target.value as 'PDF' | 'PNG' | 'JPEG')}
-                  className="w-full max-w-sm px-3 py-2 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 rounded-lg text-slate-900 dark:text-white"
-                >
-                  <option value="PDF">PDF (Recommended & Print-Ready)</option>
-                  <option value="PNG">PNG (High Resolution Image)</option>
-                  <option value="JPEG">JPEG (Standard Image)</option>
-                </select>
               </div>
 
               <div>
@@ -1192,11 +1191,7 @@ export default function GenerateCertificates() {
                           </ul>
                         ) : (
                           <span className="text-teal-600 dark:text-teal-400 text-[11px]">
-                            {r.has_account ? (
-                              `Registered account (User ID: ${r.user_id})`
-                            ) : (
-                              `Unregistered recipient — will be issued with owner=null and PDF emailed`
-                            )}
+                            Eligible for issuance. Recipient ownership will be resolved during generation.
                           </span>
                         )}
                       </td>
@@ -1204,6 +1199,7 @@ export default function GenerateCertificates() {
                         <div className="inline-flex items-center gap-1.5">
                           <button
                             type="button"
+                            aria-label={`Edit certificate fields for ${r.student_name}`}
                             onClick={() => handleStartEditRow(idx, r)}
                             className="p-1.5 text-slate-600 hover:text-teal-600 bg-slate-100 hover:bg-teal-50 dark:bg-slate-800 dark:hover:bg-teal-950/60 rounded-lg transition"
                             title="Edit certificate fields for this student"
@@ -1212,6 +1208,7 @@ export default function GenerateCertificates() {
                           </button>
                           <button
                             type="button"
+                            aria-label={`Preview certificate for ${r.student_name}`}
                             onClick={() => handlePreviewCertificate(r)}
                             className="p-1.5 text-teal-600 hover:text-teal-700 bg-teal-50 dark:bg-teal-950/60 rounded-lg transition"
                             title="Preview personalized certificate"
@@ -1259,7 +1256,7 @@ export default function GenerateCertificates() {
 
           {/* Row Edit Modal */}
           {editingRowIndex !== null && editFormData && (
-            <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-sm flex items-center justify-center p-4">
+            <div ref={editRowDialogRef} role="dialog" aria-modal="true" aria-label={`Edit certificate fields for row ${editFormData.row_number}`} tabIndex={-1} className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-sm flex items-center justify-center p-4">
               <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl max-w-lg w-full p-6 shadow-2xl space-y-4">
                 <div className="flex items-center justify-between border-b border-slate-100 dark:border-slate-800 pb-3">
                   <h4 className="text-base font-bold text-slate-900 dark:text-white flex items-center gap-2">
@@ -1277,10 +1274,11 @@ export default function GenerateCertificates() {
 
                 <div className="space-y-3 text-xs">
                   <div>
-                    <label className="block text-slate-600 dark:text-slate-300 mb-1 font-medium">
+                    <label htmlFor="edit-roster-recipient-name" className="block text-slate-600 dark:text-slate-300 mb-1 font-medium">
                       Recipient Name (1–29 chars) *
                     </label>
                     <input
+                      id="edit-roster-recipient-name"
                       type="text"
                       maxLength={29}
                       value={editFormData.student_name}
@@ -1301,10 +1299,11 @@ export default function GenerateCertificates() {
                   </div>
 
                   <div>
-                    <label className="block text-slate-600 dark:text-slate-300 mb-1 font-medium">
+                    <label htmlFor="edit-roster-recipient-email" className="block text-slate-600 dark:text-slate-300 mb-1 font-medium">
                       Recipient Email *
                     </label>
                     <input
+                      id="edit-roster-recipient-email"
                       type="email"
                       value={editFormData.student_email}
                       onChange={(e) =>
@@ -1315,10 +1314,11 @@ export default function GenerateCertificates() {
                   </div>
 
                   <div>
-                    <label className="block text-slate-600 dark:text-slate-300 mb-1 font-medium">
+                    <label htmlFor="edit-roster-course-name" className="block text-slate-600 dark:text-slate-300 mb-1 font-medium">
                       Course Name Override
                     </label>
                     <input
+                      id="edit-roster-course-name"
                       type="text"
                       value={editFormData.course_name}
                       onChange={(e) =>
@@ -1330,10 +1330,11 @@ export default function GenerateCertificates() {
 
                   <div className="grid grid-cols-2 gap-3">
                     <div>
-                      <label className="block text-slate-600 dark:text-slate-300 mb-1 font-medium">
+                      <label htmlFor="edit-roster-start-date" className="block text-slate-600 dark:text-slate-300 mb-1 font-medium">
                         Start Date (DD/MM/YYYY)
                       </label>
                       <input
+                        id="edit-roster-start-date"
                         type="text"
                         placeholder="DD/MM/YYYY"
                         value={editFormData.start_date}
@@ -1344,10 +1345,11 @@ export default function GenerateCertificates() {
                       />
                     </div>
                     <div>
-                      <label className="block text-slate-600 dark:text-slate-300 mb-1 font-medium">
+                      <label htmlFor="edit-roster-end-date" className="block text-slate-600 dark:text-slate-300 mb-1 font-medium">
                         End Date (DD/MM/YYYY)
                       </label>
                       <input
+                        id="edit-roster-end-date"
                         type="text"
                         placeholder="DD/MM/YYYY"
                         value={editFormData.end_date}
@@ -1360,10 +1362,11 @@ export default function GenerateCertificates() {
                   </div>
 
                   <div>
-                    <label className="block text-slate-600 dark:text-slate-300 mb-1 font-medium">
+                    <label htmlFor="edit-roster-issue-date" className="block text-slate-600 dark:text-slate-300 mb-1 font-medium">
                       Issue Date (DD/MM/YYYY)
                     </label>
                     <input
+                      id="edit-roster-issue-date"
                       type="text"
                       placeholder="DD/MM/YYYY"
                       value={editFormData.issue_date}
@@ -1525,7 +1528,7 @@ export default function GenerateCertificates() {
 
       {/* Modal: Preview Certificate Image */}
       {previewUrl && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/70 backdrop-blur-sm animate-in fade-in">
+        <div ref={previewDialogRef} role="dialog" aria-modal="true" aria-label="Personalized certificate preview" tabIndex={-1} className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/70 backdrop-blur-sm animate-in fade-in">
           <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl max-w-3xl w-full p-6 shadow-2xl space-y-4 max-h-[90vh] overflow-y-auto">
             <div className="flex items-center justify-between border-b border-slate-200 dark:border-slate-800 pb-3">
               <div>
@@ -1540,6 +1543,7 @@ export default function GenerateCertificates() {
               <button
                 type="button"
                 onClick={() => setPreviewUrl(null)}
+                aria-label="Close certificate preview"
                 className="text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 text-sm font-bold"
               >
                 ✕

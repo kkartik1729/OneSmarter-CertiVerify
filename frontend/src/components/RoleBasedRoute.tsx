@@ -1,4 +1,4 @@
-import { Navigate, Outlet } from 'react-router-dom';
+import { Navigate, Outlet, useLocation } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import { homeFor, PATHS } from '../lib/paths';
 import type { Role } from '../types';
@@ -10,6 +10,7 @@ interface RoleBasedRouteProps {
 
 export default function RoleBasedRoute({ allowedRoles }: RoleBasedRouteProps) {
   const { user, loading, bootError, retryRestore } = useAuth();
+  const location = useLocation();
 
   if (loading) return <LoadingScreen />;
 
@@ -32,7 +33,7 @@ export default function RoleBasedRoute({ allowedRoles }: RoleBasedRouteProps) {
   }
 
   if (!user) {
-    return <Navigate to={PATHS.login} replace />;
+    return <Navigate to={PATHS.login} replace state={{ from: location }} />;
   }
 
   if (!allowedRoles.includes(user.role)) {

@@ -11,9 +11,28 @@ export default defineConfig(({ mode }) => {
       strictPort: false,
       proxy: {
         '/api': {
-          target: env.DEV_API_PROXY_TARGET || 'http://127.0.0.1:8005',
+          target: env.DEV_API_PROXY_TARGET || 'http://127.0.0.1:8000',
           changeOrigin: true,
           secure: false,
+        },
+        '/media': {
+          target: env.DEV_API_PROXY_TARGET || 'http://127.0.0.1:8000',
+          changeOrigin: true,
+          secure: false,
+        },
+      },
+    },
+    build: {
+      rollupOptions: {
+        output: {
+          manualChunks(id) {
+            const normalizedId = id.replace(/\\/g, '/');
+            if (/node_modules\/(react|react-dom|scheduler)\//.test(normalizedId)) return 'react-vendor';
+            if (normalizedId.includes('/node_modules/react-router')) return 'router-vendor';
+            if (normalizedId.includes('/node_modules/lucide-react')) return 'icons-vendor';
+            if (normalizedId.includes('/node_modules/recharts')) return 'charts-vendor';
+            return undefined;
+          },
         },
       },
     },

@@ -4,6 +4,7 @@ import uuid
 
 from django.conf import settings
 from django.db import models
+from django.db.models.functions import Lower, Trim
 
 
 def certificate_upload_path(instance, filename):
@@ -27,6 +28,7 @@ class Certificate(models.Model):
         PENDING = "PENDING", "Pending"
         VERIFIED = "VERIFIED", "Verified"
         REJECTED = "REJECTED", "Rejected"
+        REVOKED = "REVOKED", "Revoked"
 
     owner = models.ForeignKey(
         settings.AUTH_USER_MODEL,
@@ -102,12 +104,25 @@ class Certificate(models.Model):
     completion_description = models.TextField(blank=True)
     email_sent = models.BooleanField(default=False)
     email_error = models.TextField(blank=True)
+    email_sending_at = models.DateTimeField(null=True, blank=True, editable=False)
 
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
         ordering = ["-created_at"]
+        constraints = [
+            models.UniqueConstraint(
+                models.F("course"),
+                Lower(Trim("recipient_email")),
+                condition=(
+                    models.Q(status="VERIFIED")
+                    & models.Q(course__isnull=False)
+                    & ~models.Q(recipient_email="")
+                ),
+                name="cert_unique_active_recipient_course",
+            ),
+        ]
 
     def clean(self):
         super().clean()
@@ -125,6 +140,9 @@ class Certificate(models.Model):
             self.recipient_email = self.recipient_email.strip().lower()
         elif self.owner and getattr(self.owner, "email", None):
             self.recipient_email = self.owner.email.strip().lower()
+        # Model.save() does not call clean() by default. Enforce the same name
+        # and date invariants for direct ORM writes as for API serializer writes.
+        self.clean()
         super().save(*args, **kwargs)
 
     @property

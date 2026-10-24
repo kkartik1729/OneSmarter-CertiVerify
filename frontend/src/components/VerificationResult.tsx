@@ -23,7 +23,16 @@ export default function VerificationResult({
   issueDate,
   timestamp,
 }: VerificationResultProps) {
-  const isSuccess = found && (result === 'FOUND' || result === 'VERIFIED');
+  const isSuccess = found && result === 'VERIFIED';
+  const statusTitle = result === 'PENDING'
+    ? 'Certificate Pending Review'
+    : result === 'REJECTED'
+      ? 'Certificate Rejected'
+        : result === 'REVOKED'
+          ? 'Certificate Revoked'
+      : result === 'NOT_FOUND'
+        ? 'Certificate Not Found'
+        : 'Certificate Not Verified';
 
   return (
     <div
@@ -51,7 +60,7 @@ export default function VerificationResult({
           <div>
             <div className="flex items-center gap-2">
               <h3 className="text-lg font-bold text-slate-900 dark:text-white">
-                {isSuccess ? 'Verified Authentic Certificate' : 'Certificate Not Found'}
+                {isSuccess ? 'Verified Authentic Certificate' : statusTitle}
               </h3>
               <span
                 className={`text-xs font-semibold px-2 py-0.5 rounded-full ${
@@ -124,10 +133,18 @@ export default function VerificationResult({
             Why was this certificate not verified?
           </p>
           <p>
-            No record matching certificate number <code className="font-mono bg-slate-100 dark:bg-slate-800 px-1 py-0.5 rounded">{number}</code> was found in our PostgreSQL registry.
+            {result === 'PENDING'
+              ? 'This certificate exists but has not been approved yet.'
+              : result === 'REJECTED'
+                ? 'This certificate was rejected by the issuing authority.'
+              : result === 'REVOKED'
+                ? 'This certificate was revoked by the issuing authority.'
+                : result === 'NOT_FOUND'
+                  ? <>No record matching certificate number <code className="font-mono bg-slate-100 dark:bg-slate-800 px-1 py-0.5 rounded">{number}</code> was found in the registry.</>
+                  : 'The registry does not currently confirm this certificate as verified.'}
           </p>
           <p>
-            Please double-check the spelling, letters, and hyphens or contact the issuing authority for assistance.
+            {result === 'PENDING' || result === 'REJECTED' || result === 'REVOKED' ? 'Contact the issuing authority for more information.' : 'Please double-check the spelling, letters, and hyphens or contact the issuing authority for assistance.'}
           </p>
         </div>
       )}

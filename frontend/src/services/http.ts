@@ -2,8 +2,8 @@ import { EP } from './endpoints';
 import { tokens } from './tokens';
 
 const RAW = ((import.meta.env.VITE_API_BASE_URL as string | undefined) ?? (import.meta.env.VITE_API_URL as string | undefined) ?? '').trim().replace(/\/+$/, '');
-/** Base URL of the API. "/api" is added if you forgot it. */
-export const API_BASE = RAW ? (/\/api$/.test(RAW) ? RAW : `${RAW}/api`) : '/api';
+/** Base URL of the API; existing `/api` and versioned `/api/vN` paths are preserved. */
+export const API_BASE = RAW ? (/\/api(?:\/v\d+)?$/.test(RAW) ? RAW : `${RAW}/api`) : '/api';
 const TIMEOUT_MS = Number(import.meta.env.VITE_API_TIMEOUT_MS) || 15000;
 
 type Method = 'GET' | 'POST' | 'PATCH' | 'PUT' | 'DELETE';
@@ -120,19 +120,30 @@ export async function http<T>(method: Method, path: string, body?: unknown, with
 
 /** Fetch an authenticated image/PDF response while preserving the shared refresh behavior. */
 export async function httpBlob(path: string): Promise<Blob> {
-  const fetchBlob = () => fetch(API_BASE + path, {
-    headers: tokens.access ? { Authorization: `Bearer ${tokens.access}` } : {},
-  });
-  let response: Response;
-  try {
-    response = await fetchBlob();
-    if (response.status === 401) {
-      const refreshed = tokens.refresh ? await refreshAccessToken() : false;
-      if (refreshed) response = await fetchBlob();
-      if (!refreshed || response.status === 401) expireSession();
+  const fetchBlob = async () => {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
+    try {
+      return await fetch(API_BASE + path, {
+        headers: tokens.access ? { Authorization: `Bearer ${tokens.access}` } : {},
+        signal: controller.signal,
+      });
+    } catch (error) {
+      throw new ApiError(
+        0,
+        error instanceof DOMException && error.name === 'AbortError'
+          ? 'The request timed out. The server may be unavailable.'
+          : 'Network error: cannot reach the server.',
+      );
+    } finally {
+      clearTimeout(timer);
     }
-  } catch {
-    throw new ApiError(0, 'Network error: cannot reach the server.');
+  };
+  let response = await fetchBlob();
+  if (response.status === 401) {
+    const refreshed = tokens.refresh ? await refreshAccessToken() : false;
+    if (refreshed) response = await fetchBlob();
+    if (!refreshed || response.status === 401) expireSession();
   }
   if (!response.ok) {
     const text = await response.text();

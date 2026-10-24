@@ -4,4 +4,6 @@ import App from './App';
 import './styles.css';
 import { initTheme } from './lib/theme';
 initTheme();
-createRoot(document.getElementById('root')!).render(<StrictMode><App /></StrictMode>);
+const rootElement = document.getElementById('root');
+if (!rootElement) throw new Error('The application root element is missing.');
+createRoot(rootElement).render(<StrictMode><App /></StrictMode>);

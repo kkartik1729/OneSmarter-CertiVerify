@@ -9,6 +9,7 @@ export default function VerifyBox({ record }: { record?: boolean } = {}) {
   const [err, setErr] = useState('');
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<VerificationCheckResponse | null>(null);
+  const [checkedAt, setCheckedAt] = useState<string | null>(null);
 
   const submit = async (e: FormEvent) => {
     e.preventDefault();
@@ -20,9 +21,11 @@ export default function VerifyBox({ record }: { record?: boolean } = {}) {
     }
     setBusy(true);
     setResult(null);
+    setCheckedAt(null);
     try {
       const res = await verificationHistoryService.check(query);
       setResult(res);
+      setCheckedAt(new Date().toISOString());
     } catch (error) {
       setErr(errMsg(error));
     } finally {
@@ -68,7 +71,7 @@ export default function VerifyBox({ record }: { record?: boolean } = {}) {
             title={result.certificate?.title}
             issuer={result.certificate?.issuer}
             issueDate={result.certificate?.issue_date}
-            timestamp={new Date().toISOString()}
+            timestamp={checkedAt ?? undefined}
           />
         </div>
       )}

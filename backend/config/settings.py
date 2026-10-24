@@ -1,13 +1,15 @@
-
 """
 Django settings for OneSmarter-CertiVerify.
 """
 
 import os
+import sys
 from datetime import timedelta
 from pathlib import Path
 
 from dotenv import load_dotenv
+from django.core.exceptions import ImproperlyConfigured
+from config.security import validate_django_secret_key
 
 # --------------------------------------------------
 # BASE DIRECTORY AND ENVIRONMENT
@@ -21,12 +23,20 @@ load_dotenv(BASE_DIR / ".env")
 # SECURITY SETTINGS
 # --------------------------------------------------
 
-SECRET_KEY = os.getenv(
-    "DJANGO_SECRET_KEY",
-    "dev-only-change-this-key-before-deployment"
-)
+try:
+    SECRET_KEY = validate_django_secret_key(os.getenv("DJANGO_SECRET_KEY", ""))
+except ValueError as exc:
+    raise ImproperlyConfigured(
+        str(exc)
+    ) from exc
 
-DEBUG = os.getenv("DJANGO_DEBUG", "True").lower() == "true"
+DJANGO_ENV = os.getenv("DJANGO_ENV", "production").strip().lower()
+_debug_requested = os.getenv("DJANGO_DEBUG", "False").strip().lower() == "true"
+if _debug_requested and DJANGO_ENV not in {"development", "local"}:
+    raise ImproperlyConfigured(
+        "DJANGO_DEBUG=True is allowed only when DJANGO_ENV is development or local."
+    )
+DEBUG = _debug_requested
 
 ALLOWED_HOSTS = [
     host.strip()
@@ -62,6 +72,7 @@ INSTALLED_APPS = [
     "apps.dashboard.apps.DashboardConfig",
     "apps.audit.apps.AuditConfig",
     "apps.notifications.apps.NotificationsConfig",
+    "rest_framework_simplejwt.token_blacklist",
 ]
 
 # --------------------------------------------------
@@ -127,8 +138,14 @@ else:
             "USER": os.getenv("DB_USER", "postgres"),
             "PASSWORD": os.getenv("DB_PASSWORD", ""),
             "HOST": os.getenv("DB_HOST", "127.0.0.1"),
-            "PORT": os.getenv("DB_PORT", "8000"),
+            "PORT": os.getenv("DB_PORT", "5432"),
             "CONN_MAX_AGE": 60,
+            # Fail promptly if PostgreSQL is unreachable. runserver checks
+            # migration state before binding its HTTP port, so an unbounded
+            # connection attempt otherwise looks like server startup is hung.
+            "OPTIONS": {
+                "connect_timeout": int(os.getenv("DB_CONNECT_TIMEOUT", "5")),
+            },
         }
     }
 
@@ -169,11 +186,19 @@ AUTH_PASSWORD_VALIDATORS = [
 
 REST_FRAMEWORK = {
     "DEFAULT_AUTHENTICATION_CLASSES": [
-        "rest_framework_simplejwt.authentication.JWTAuthentication",
+        "apps.accounts.authentication.SessionInvalidatingJWTAuthentication",
     ],
     "DEFAULT_PERMISSION_CLASSES": [
         "rest_framework.permissions.IsAuthenticated",
     ],
+    "DEFAULT_RENDERER_CLASSES": (
+        ["rest_framework.renderers.JSONRenderer"]
+        if not DEBUG
+        else [
+            "rest_framework.renderers.JSONRenderer",
+            "rest_framework.renderers.BrowsableAPIRenderer",
+        ]
+    ),
 }
 
 # --------------------------------------------------
@@ -181,13 +206,13 @@ REST_FRAMEWORK = {
 # --------------------------------------------------
 
 SIMPLE_JWT = {
-    "ACCESS_TOKEN_LIFETIME": timedelta(minutes=60),
+    "ACCESS_TOKEN_LIFETIME": timedelta(minutes=15),
     "REFRESH_TOKEN_LIFETIME": timedelta(days=7),
-    "ROTATE_REFRESH_TOKENS": False,
+    "ROTATE_REFRESH_TOKENS": True,
+    "BLACKLIST_AFTER_ROTATION": True,
     "AUTH_HEADER_TYPES": ("Bearer",),
-    # SimpleJWT defaults to 'username' field. The frontend sends the user's
-    # email address in the 'username' field during login, which works because
-    # RegisterSerializer sets username = email at registration time.
+    # These defaults identify the user in JWT claims; login accepts a username
+    # or complete email address in its `username` request field.
     "USER_ID_FIELD": "id",
     "USER_ID_CLAIM": "user_id",
 }
@@ -199,11 +224,76 @@ SIMPLE_JWT = {
 # In production, replace with a Redis backend:
 #   pip install django-redis
 #   CACHES = {"default": {"BACKEND": "django_redis.cache.RedisCache", "LOCATION": "redis://127.0.0.1:6379/1", ...}}
+_USE_LOCAL_CACHE = DEBUG or "test" in sys.argv
 CACHES = {
     "default": {
-        "BACKEND": "django.core.cache.backends.locmem.LocMemCache",
+        "BACKEND": (
+            "django.core.cache.backends.locmem.LocMemCache"
+            if _USE_LOCAL_CACHE else "django.core.cache.backends.db.DatabaseCache"
+        ),
         "LOCATION": "certiverify_cache",
     }
+}
+
+REST_FRAMEWORK["DEFAULT_THROTTLE_RATES"] = {
+    "email_verification_ip": "10/hour",
+    "password_reset_ip": "10/hour",
+    "login_ip": "20/hour",
+    "login_identity": "10/hour",
+    "public_verification_ip": "60/minute",
+}
+
+# Production deployments terminate TLS at a trusted reverse proxy. Set
+# SECURE_PROXY_SSL_HEADER only when that proxy strips client-supplied copies.
+_proxy_header_name = os.getenv("DJANGO_SECURE_PROXY_HEADER", "").strip()
+if _proxy_header_name:
+    SECURE_PROXY_SSL_HEADER = (_proxy_header_name, "https")
+TRUSTED_PROXY_IPS = tuple(
+    value.strip()
+    for value in os.getenv("DJANGO_TRUSTED_PROXY_IPS", "").split(",")
+    if value.strip()
+)
+SECURE_SSL_REDIRECT = os.getenv(
+    "DJANGO_SECURE_SSL_REDIRECT", "false" if DEBUG else "true"
+).strip().lower() == "true"
+SESSION_COOKIE_SECURE = not DEBUG
+CSRF_COOKIE_SECURE = not DEBUG
+SECURE_HSTS_SECONDS = int(os.getenv("DJANGO_HSTS_SECONDS", "31536000" if not DEBUG else "0"))
+SECURE_HSTS_INCLUDE_SUBDOMAINS = not DEBUG and os.getenv(
+    "DJANGO_HSTS_INCLUDE_SUBDOMAINS", "true"
+).strip().lower() == "true"
+SECURE_HSTS_PRELOAD = not DEBUG and os.getenv(
+    "DJANGO_HSTS_PRELOAD", "false"
+).strip().lower() == "true"
+SECURE_CONTENT_TYPE_NOSNIFF = True
+SECURE_REFERRER_POLICY = "strict-origin-when-cross-origin"
+X_FRAME_OPTIONS = "DENY"
+
+# Use Django's structured logging pipeline; emails and tokens must never be
+# included in messages passed to these loggers.
+LOGGING = {
+    "version": 1,
+    "disable_existing_loggers": False,
+    "filters": {
+        "require_debug_false": {"()": "django.utils.log.RequireDebugFalse"},
+    },
+    "formatters": {
+        "verbose": {
+            "format": "{levelname} {asctime} {name} {message}",
+            "style": "{",
+        },
+    },
+    "handlers": {
+        "console": {
+            "class": "logging.StreamHandler",
+            "formatter": "verbose",
+        },
+    },
+    "root": {"handlers": ["console"], "level": os.getenv("DJANGO_LOG_LEVEL", "INFO")},
+    "loggers": {
+        "django.request": {"handlers": ["console"], "level": "ERROR", "propagate": False},
+        "django.security": {"handlers": ["console"], "level": "WARNING", "propagate": False},
+    },
 }
 
 # --------------------------------------------------
@@ -214,25 +304,28 @@ CACHES = {
 
 _cors_env = os.getenv("CORS_ALLOWED_ORIGINS", "")
 _cors_list = [o.strip() for o in _cors_env.split(",") if o.strip()]
-
-CORS_ALLOWED_ORIGINS = [
+_local_frontend_origins = [
     "http://localhost:5173",
     "http://127.0.0.1:5173",
     "http://localhost:5174",
     "http://127.0.0.1:5174",
     "http://localhost:5175",
     "http://127.0.0.1:5175",
-] + _cors_list
+]
 
-# Include PUBLIC_FRONTEND_URL in CORS if configured
-if os.getenv("PUBLIC_FRONTEND_URL"):
-    _pub_origin = os.getenv("PUBLIC_FRONTEND_URL").strip().rstrip("/")
+CORS_ALLOWED_ORIGINS = (_local_frontend_origins if DEBUG else []) + _cors_list
+
+# Include the normalized public frontend URL in CORS if configured.
+PUBLIC_FRONTEND_URL = os.getenv("PUBLIC_FRONTEND_URL", "").strip().rstrip("/")
+if PUBLIC_FRONTEND_URL:
+    _pub_origin = PUBLIC_FRONTEND_URL
     if _pub_origin and _pub_origin not in CORS_ALLOWED_ORIGINS:
         CORS_ALLOWED_ORIGINS.append(_pub_origin)
 
-CSRF_TRUSTED_ORIGINS = [
-    o for o in CORS_ALLOWED_ORIGINS if o.startswith("https://") or o.startswith("http://")
-]
+_csrf_env = os.getenv("CSRF_TRUSTED_ORIGINS", "")
+CSRF_TRUSTED_ORIGINS = [o.strip() for o in _csrf_env.split(",") if o.strip()]
+if DEBUG:
+    CSRF_TRUSTED_ORIGINS = list(dict.fromkeys(CSRF_TRUSTED_ORIGINS + _local_frontend_origins))
 
 # The API authenticates via JWT Bearer tokens sent in the Authorization
 # header, so CORS_ALLOW_CREDENTIALS is left at its default (False).
@@ -245,7 +338,7 @@ CSRF_TRUSTED_ORIGINS = [
 
 LANGUAGE_CODE = "en-us"
 
-TIME_ZONE = "Asia/Kolkata"
+TIME_ZONE = "UTC"
 
 USE_I18N = True
 
@@ -255,7 +348,8 @@ USE_TZ = True
 # STATIC AND MEDIA FILES
 # --------------------------------------------------
 
-STATIC_URL = "static/"
+STATIC_URL = "/static/"
+STATIC_ROOT = BASE_DIR / "staticfiles"
 
 MEDIA_URL = "/media/"
 MEDIA_ROOT = BASE_DIR / "media"
@@ -274,9 +368,9 @@ EMAIL_BACKEND = os.getenv(
     "EMAIL_BACKEND",
     "django.core.mail.backends.smtp.EmailBackend",
 )
-EMAIL_HOST = os.getenv("EMAIL_HOST", "smtp.ionos.com")
+EMAIL_HOST = os.getenv("EMAIL_HOST", "")
 EMAIL_PORT = int(os.getenv("EMAIL_PORT", "587"))
-EMAIL_HOST_USER = os.getenv("EMAIL_HOST_USER", "akshay.kumar@onesmarter.com")
+EMAIL_HOST_USER = os.getenv("EMAIL_HOST_USER", "")
 EMAIL_HOST_PASSWORD = os.getenv("EMAIL_HOST_PASSWORD", "")
 EMAIL_USE_TLS = os.getenv("EMAIL_USE_TLS", "True").lower() == "true"
 EMAIL_USE_SSL = os.getenv("EMAIL_USE_SSL", "False").lower() == "true"
@@ -286,9 +380,9 @@ DEFAULT_FROM_EMAIL = os.getenv(
     "OneSmarter Support <support@onesmarter.com>",
 )
 SERVER_EMAIL = os.getenv("SERVER_EMAIL", "support@onesmarter.com")
+EMAIL_REPLY_TO = os.getenv("EMAIL_REPLY_TO", "help@onesmarter.com").strip()
 FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:5173").rstrip("/")
 # Public website URL used in certificate emails and CORS configuration
-PUBLIC_FRONTEND_URL = os.getenv("PUBLIC_FRONTEND_URL", "").strip().rstrip("/")
 
 # --------------------------------------------------
 # GOOGLE OAUTH 2.0 / GOOGLE IDENTITY SERVICES

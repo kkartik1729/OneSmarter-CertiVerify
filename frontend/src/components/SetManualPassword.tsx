@@ -5,6 +5,7 @@ import { KeyRound, CheckCircle2, AlertCircle, Mail, User as UserIcon, ShieldAler
 import Field from './Field';
 import { toast } from '../lib/ui';
 import { errMsg } from '../services';
+import { isPasswordPolicyValid, PASSWORD_RULE_MESSAGE } from '../lib/password';
 
 export default function SetManualPassword() {
   const { user, setPassword } = useAuth();
@@ -30,8 +31,8 @@ export default function SetManualPassword() {
       setError('Please enter a new password.');
       return;
     }
-    if (password.length < 8 || !/[a-z]/i.test(password) || !/\d/.test(password)) {
-      setError('Password must contain at least 8 characters with letters and numbers.');
+    if (!isPasswordPolicyValid(password)) {
+      setError(PASSWORD_RULE_MESSAGE);
       return;
     }
     if (password !== confirmPassword) {

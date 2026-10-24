@@ -1,5 +1,5 @@
-import { useEffect } from 'react';
 import { AlertTriangle, X } from 'lucide-react';
+import { useAccessibleDialog } from '../lib/dialog';
 
 interface ConfirmDialogProps {
   isOpen: boolean;
@@ -22,18 +22,12 @@ export default function ConfirmDialog({
   onCancel,
   danger = false,
 }: ConfirmDialogProps) {
-  useEffect(() => {
-    const onKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape' && isOpen) onCancel();
-    };
-    window.addEventListener('keydown', onKeyDown);
-    return () => window.removeEventListener('keydown', onKeyDown);
-  }, [isOpen, onCancel]);
+  const dialogRef = useAccessibleDialog(isOpen, onCancel);
 
   if (!isOpen) return null;
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm animate-in fade-in">
+    <div ref={dialogRef} role="dialog" aria-modal="true" aria-label={title} tabIndex={-1} className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm animate-in fade-in">
       <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl max-w-md w-full p-6 shadow-xl space-y-4">
         <div className="flex items-start justify-between">
           <div className="flex items-center gap-3">
@@ -53,6 +47,7 @@ export default function ConfirmDialog({
           <button
             type="button"
             onClick={onCancel}
+            aria-label="Close confirmation dialog"
             className="text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 p-1 rounded-lg"
           >
             <X className="w-4 h-4" />

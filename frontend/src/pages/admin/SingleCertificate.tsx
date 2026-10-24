@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import {
   Sparkles,
@@ -26,6 +26,7 @@ import type { Course, CertificateTemplate, AdminUser, Cert } from '../../types';
 import ErrorMessage from '../../components/ErrorMessage';
 import LoadingSkeleton from '../../components/LoadingSkeleton';
 import TemplateLayoutEditor from '../../components/TemplateLayoutEditor';
+import { useAccessibleDialog } from '../../lib/dialog';
 
 export default function SingleCertificate() {
   const [courses, setCourses] = useState<Course[]>([]);
@@ -47,6 +48,7 @@ export default function SingleCertificate() {
   const [studentSearch, setStudentSearch] = useState('');
   const [searchResults, setSearchResults] = useState<AdminUser[]>([]);
   const [searchingStudents, setSearchingStudents] = useState(false);
+  const studentSearchRequest = useRef(0);
   const [selectedStudent, setSelectedStudent] = useState<AdminUser | null>(null);
   const [recipientEmail, setRecipientEmail] = useState('');
   const [recipientEmailError, setRecipientEmailError] = useState<string | null>(null);
@@ -64,6 +66,7 @@ export default function SingleCertificate() {
 
   // Preview & Submission
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+  const previewDialogRef = useAccessibleDialog(Boolean(previewUrl), () => setPreviewUrl(null));
   const [loadingPreview, setLoadingPreview] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [createdCert, setCreatedCert] = useState<Cert | null>(null);
@@ -74,6 +77,10 @@ export default function SingleCertificate() {
   useEffect(() => () => {
     if (generatedImagePreviewUrl) URL.revokeObjectURL(generatedImagePreviewUrl);
   }, [generatedImagePreviewUrl]);
+
+  useEffect(() => () => {
+    if (uploadPreviewUrl) URL.revokeObjectURL(uploadPreviewUrl);
+  }, [uploadPreviewUrl]);
 
   // Alerts
   const [error, setError] = useState<string | null>(null);
@@ -158,22 +165,32 @@ export default function SingleCertificate() {
     }
   };
 
-  // Search students
-  const handleSearchStudents = async (query: string) => {
-    setStudentSearch(query);
-    if (!query.trim() || query.trim().length < 2) {
+  // Debounce student search and ignore responses for older queries.
+  useEffect(() => {
+    const query = studentSearch.trim();
+    const requestId = ++studentSearchRequest.current;
+    if (selectedStudent || query.length < 2) {
       setSearchResults([]);
+      setSearchingStudents(false);
       return;
     }
-    setSearchingStudents(true);
-    try {
-      const res = await adminUsersService.list({ search: query.trim() });
-      setSearchResults(res);
-    } catch (err) {
-      console.error('Error searching students:', err);
-    } finally {
-      setSearchingStudents(false);
-    }
+    const timer = window.setTimeout(async () => {
+      setSearchingStudents(true);
+      try {
+        const results = await adminUsersService.list({ search: query });
+        if (studentSearchRequest.current === requestId) setSearchResults(results);
+      } catch (err) {
+        if (studentSearchRequest.current === requestId) console.error('Error searching students:', err);
+      } finally {
+        if (studentSearchRequest.current === requestId) setSearchingStudents(false);
+      }
+    }, 250);
+    return () => window.clearTimeout(timer);
+  }, [studentSearch, selectedStudent]);
+
+  const handleSearchStudents = (query: string) => {
+    setStudentSearch(query);
+    setSelectedStudent(null);
   };
 
   const handleSelectStudent = (u: AdminUser) => {
@@ -245,10 +262,20 @@ export default function SingleCertificate() {
     setLoadingPreview(true);
     setError(null);
     try {
-      const tplId = await ensureTemplateId();
+      if (templateMode === 'upload' && !uploadFile) {
+        throw new Error('Please choose a template image (.png, .jpg, .jpeg) to upload.');
+      }
+      if (templateMode !== 'upload' && !selectedTemplateId) {
+        throw new Error('Please select a certificate template.');
+      }
       const c = courses.find((course) => course.id === Number(selectedCourseId));
       const res = await generationService.preview({
-        template_id: tplId,
+        template_id: templateMode === 'upload' ? undefined : Number(selectedTemplateId),
+        template_file: templateMode === 'upload' ? uploadFile || undefined : undefined,
+        template_name: templateMode === 'upload'
+          ? (uploadTemplateName || uploadFile?.name.replace(/\.[^/.]+$/, '') || 'Preview Template').trim()
+          : undefined,
+        template_description: templateMode === 'upload' ? descriptionOverride.trim() || undefined : undefined,
         course_id: Number(selectedCourseId) || undefined,
         student_name: studentDisplayName.trim() || 'Student Name',
         course_name: c?.name || '',
@@ -602,6 +629,7 @@ export default function SingleCertificate() {
                     <button
                       type="button"
                       disabled={isUploadingTemplate}
+                      aria-label="Upload and use certificate template"
                       onClick={handleInstantUploadTemplate}
                       className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-teal-600 hover:bg-teal-500 disabled:opacity-50 text-white text-xs font-semibold rounded-lg transition shadow-xs cursor-pointer"
                     >
@@ -860,7 +888,7 @@ export default function SingleCertificate() {
 
       {/* Preview Modal */}
       {previewUrl && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/70 backdrop-blur-sm animate-in fade-in">
+        <div ref={previewDialogRef} role="dialog" aria-modal="true" aria-label="Personalized certificate preview" tabIndex={-1} className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/70 backdrop-blur-sm animate-in fade-in">
           <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl max-w-3xl w-full p-6 shadow-2xl space-y-4 max-h-[90vh] overflow-y-auto">
             <div className="flex items-center justify-between border-b border-slate-200 dark:border-slate-800 pb-3">
               <div>
@@ -875,6 +903,7 @@ export default function SingleCertificate() {
               <button
                 type="button"
                 onClick={() => setPreviewUrl(null)}
+                aria-label="Close certificate preview"
                 className="text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 text-sm font-bold"
               >
                 ✕

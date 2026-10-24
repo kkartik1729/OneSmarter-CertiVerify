@@ -1,4 +1,4 @@
-import { useState, useEffect, type FormEvent } from 'react';
+import { useState, useEffect, useRef, type FormEvent } from 'react';
 import { Link, Navigate, useSearchParams } from 'react-router-dom';
 import { KeyRound, CheckCircle2, ArrowLeft, Mail, RefreshCw, ShieldAlert, AlertCircle } from 'lucide-react';
 import Field from '../components/Field';
@@ -6,13 +6,15 @@ import { useAuth } from '../context/AuthContext';
 import { Brand, ThemeToggle } from '../lib/ui';
 import { homeFor } from '../lib/paths';
 import { passwordResetService, errMsg } from '../services';
+import { isPasswordPolicyValid, PASSWORD_RULE_MESSAGE } from '../lib/password';
 
-type Step = 'email' | 'requested' | 'otp' | 'validating' | 'invalid_token' | 'password' | 'success';
+type Step = 'email' | 'requested' | 'validating' | 'invalid_token' | 'password' | 'success';
 
 export default function ForgotPassword() {
   const { user } = useAuth();
   const [searchParams] = useSearchParams();
-  const tokenFromUrl = searchParams.get('token') || '';
+  const tokenFromUrl = searchParams.get('token') || new URLSearchParams(window.location.hash.slice(1)).get('token') || '';
+  const initialToken = useRef(tokenFromUrl);
 
   // Multi-step workflow state
   const [step, setStep] = useState<Step>(tokenFromUrl ? 'validating' : 'email');
@@ -26,6 +28,7 @@ export default function ForgotPassword() {
   // Token validation state
   const [tokenError, setTokenError] = useState('');
   const [resendCooldown, setResendCooldown] = useState(60);
+  const [cooldownRun, setCooldownRun] = useState(0);
   const [resendBusy, setResendBusy] = useState(false);
 
   // Step 3: Password state
@@ -37,18 +40,23 @@ export default function ForgotPassword() {
 
   // When tokenFromUrl is present, validate token with backend immediately
   useEffect(() => {
-    if (!tokenFromUrl) return;
+    const token = initialToken.current;
+    if (!token) return;
+
+    // Remove legacy query-string tokens from browser history as soon as the
+    // page loads; new links use a fragment, which is never sent to the server.
+    window.history.replaceState(window.history.state, '', window.location.pathname);
 
     let isMounted = true;
     setStep('validating');
     setTokenError('');
 
     passwordResetService
-      .validateToken(tokenFromUrl)
+      .validateToken(token)
       .then(res => {
         if (!isMounted) return;
         if (res.valid) {
-          setResetToken(tokenFromUrl);
+          setResetToken(token);
           setStep('password');
         } else {
           setTokenError(res.detail || 'This password reset link is invalid, expired, or has already been used.');
@@ -64,17 +72,23 @@ export default function ForgotPassword() {
     return () => {
       isMounted = false;
     };
-  }, [tokenFromUrl]);
+  }, []);
 
   // Cooldown countdown for resending reset link/code
   useEffect(() => {
-    if (step !== 'requested' && step !== 'otp') return;
+    if (step !== 'requested') return;
     if (resendCooldown <= 0) return;
     const timer = setInterval(() => {
-      setResendCooldown(prev => (prev > 0 ? prev - 1 : 0));
+      setResendCooldown(prev => {
+        if (prev <= 1) {
+          clearInterval(timer);
+          return 0;
+        }
+        return prev - 1;
+      });
     }, 1000);
     return () => clearInterval(timer);
-  }, [step, resendCooldown]);
+  }, [step, cooldownRun]);
 
   // If already logged in, redirect to user dashboard
   if (user) {
@@ -96,6 +110,7 @@ export default function ForgotPassword() {
       const msg = await passwordResetService.requestReset(cleanEmail);
       setInfoMessage(msg);
       setResendCooldown(60);
+      setCooldownRun(run => run + 1);
       setStep('requested');
     } catch (err) {
       setEmailError(errMsg(err));
@@ -114,6 +129,7 @@ export default function ForgotPassword() {
       const msg = await passwordResetService.requestReset(cleanEmail);
       setInfoMessage(msg);
       setResendCooldown(60);
+      setCooldownRun(run => run + 1);
     } catch (err) {
       setEmailError(errMsg(err));
     } finally {
@@ -128,8 +144,8 @@ export default function ForgotPassword() {
 
     if (!password) {
       errors.password = 'Enter your new password.';
-    } else if (password.length < 8) {
-      errors.password = 'Password must be at least 8 characters long.';
+    } else if (!isPasswordPolicyValid(password)) {
+      errors.password = PASSWORD_RULE_MESSAGE;
     }
 
     if (!passwordConfirm) {

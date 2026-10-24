@@ -15,6 +15,7 @@ export default function MyCertificates() {
   const [certs, setCerts] = useState<Cert[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [downloadError, setDownloadError] = useState<string | null>(null);
   const [failedImages, setFailedImages] = useState<Record<string, boolean>>({});
 
   const [search, setSearch] = useState('');
@@ -50,6 +51,7 @@ export default function MyCertificates() {
 
   return (
     <div className="space-y-6">
+      {downloadError && <p role="alert" className="text-sm text-rose-700 dark:text-rose-300">{downloadError}</p>}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div>
           <h2 className="text-xl font-bold text-slate-900 dark:text-white">
@@ -132,12 +134,15 @@ export default function MyCertificates() {
                           <AuthenticatedCertificateImage
                             certificateId={c.key}
                             alt={c.title}
+                            thumbnail
                             className="w-16 h-11 object-cover rounded-md border border-slate-200 dark:border-slate-700 shadow-xs cursor-pointer hover:opacity-90 transition"
                             onClick={() => setSelectedCert(c)}
                             onError={() => setFailedImages(prev => ({ ...prev, [c.key]: true }))}
                           />
                         ) : (
-                          <div
+                          <button
+                            type="button"
+                            aria-label={`Open certificate details for ${c.title}`}
                             className="w-16 h-11 bg-slate-100 dark:bg-slate-800 rounded-md border border-slate-200 dark:border-slate-700 flex flex-col items-center justify-center text-slate-400 cursor-pointer"
                             onClick={() => setSelectedCert(c)}
                             title={isImageFailed ? "Certificate image file missing on server" : c.title}
@@ -146,7 +151,7 @@ export default function MyCertificates() {
                             {isImageFailed && (
                               <span className="text-[9px] text-rose-500 font-semibold leading-none mt-0.5">Missing</span>
                             )}
-                          </div>
+                          </button>
                         )}
                       </td>
                       <td className="py-3.5 px-3 font-mono font-medium text-slate-900 dark:text-white break-all">
@@ -176,6 +181,7 @@ export default function MyCertificates() {
                         <div className="flex flex-nowrap items-center justify-end gap-1">
                           <button
                             type="button"
+                              aria-label={`Open certificate details for ${c.title}`}
                             onClick={() => setSelectedCert(c)}
                             className="inline-flex shrink-0 items-center gap-1 px-2 py-1 text-[11px] font-semibold text-teal-600 hover:text-teal-700 bg-teal-50 dark:bg-teal-950/60 dark:text-teal-400 rounded-lg transition"
                           >
@@ -186,11 +192,12 @@ export default function MyCertificates() {
                             <button
                               type="button"
                               onClick={async () => {
+                                setDownloadError(null);
                                 try {
                                   const blob = c.hasPdf ? await certificateService.pdfBlob(c.key) : await certificateService.imageBlob(c.key);
                                   downloadBlob(blob, `certificate_${c.number}.${c.hasPdf ? 'pdf' : 'png'}`);
-                                } catch {
-                                  setFailedImages(prev => ({ ...prev, [c.key]: true }));
+                                } catch (err) {
+                                  setDownloadError(errMsg(err));
                                 }
                               }}
                               className="inline-flex shrink-0 items-center gap-1 px-2 py-1 text-[11px] font-semibold text-slate-700 dark:text-slate-300 hover:text-slate-900 bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 rounded-lg transition"

@@ -10,6 +10,7 @@ const titleMap: Record<string, string> = {
   '/user/dashboard/certificates': 'My Certificates',
   '/user/dashboard/history': 'Verification History',
   '/user/dashboard/profile': 'Profile & Security',
+  '/user/dashboard/set-password': 'Set Manual Password',
 };
 
 export default function UserLayout() {

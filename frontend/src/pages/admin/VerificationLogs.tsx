@@ -10,7 +10,9 @@ import ErrorMessage from '../../components/ErrorMessage';
 
 const outcomeFilters = [
   { label: 'All Lookups', value: 'ALL' },
-  { label: 'Found & Verified', value: 'FOUND' },
+  { label: 'Verified', value: 'VERIFIED' },
+  { label: 'Pending', value: 'PENDING' },
+  { label: 'Rejected', value: 'REJECTED' },
   { label: 'Not Found', value: 'NOT_FOUND' },
 ];
 
@@ -40,7 +42,9 @@ export default function VerificationLogs() {
   }, []);
 
   const filtered = logs.filter(l => {
-    const matchesOutcome = outcomeFilter === 'ALL' || l.result === outcomeFilter;
+    const matchesOutcome = outcomeFilter === 'ALL'
+      || l.result === outcomeFilter
+      || (outcomeFilter === 'VERIFIED' && l.result === 'FOUND');
     const q = search.toLowerCase().trim();
     const matchesSearch =
       !q ||
@@ -113,7 +117,7 @@ export default function VerificationLogs() {
               </thead>
               <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
                 {filtered.map(l => {
-                  const isFound = l.result === 'FOUND' || l.result === 'VERIFIED';
+                  const isFound = l.result === 'VERIFIED' || l.result === 'FOUND';
                   return (
                     <tr
                       key={l.id}

@@ -4,12 +4,13 @@ These endpoints enforce is_certiverify_admin permission.
 Passwords, OTPs, and TOTP secrets are never exposed.
 """
 from django.contrib.auth import get_user_model
+from django.db.models import Q
 from rest_framework import generics, status
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from apps.certificates.permissions import IsCertiVerifyAdmin, is_certiverify_admin
+from apps.certificates.permissions import IsCertiVerifyAdmin
 from .models import UserProfile
 from .serializers import AdminUserSerializer
 
@@ -39,10 +40,16 @@ class AdminUserListView(generics.ListAPIView):
 
         # Role filter
         role = self.request.query_params.get("role", "").strip().upper()
-        if role in ("ADMIN", "USER"):
-            qs = qs.filter(profile__role=role)
+        if role == "ADMIN":
+            qs = qs.filter(Q(is_staff=True) | Q(is_superuser=True))
+        elif role == "USER":
+            qs = qs.filter(
+                is_staff=False,
+                is_superuser=False,
+                profile__role=role,
+            )
 
-        return qs.distinct()
+        return qs
 
 
 class AdminUserDetailView(APIView):

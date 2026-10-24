@@ -1,13 +1,12 @@
 """
 Email notifications for certificate issuance and distribution with PDF attachment.
 """
-import io
 import logging
 from django.conf import settings
 from django.contrib.auth import get_user_model
-from PIL import Image
+from django.utils.html import escape
 
-from apps.accounts.emails import send_account_email
+from apps.accounts.services import send_account_email
 from apps.certificates.models import CertificatePDF
 
 logger = logging.getLogger(__name__)
@@ -45,11 +44,9 @@ def _get_or_create_certificate_pdf_bytes(certificate) -> bytes:
     # 2. Try converting stored certificate.file (e.g. generated PNG) to PDF
     if certificate.file:
         try:
-            certificate.file.open("rb")
-            img = Image.open(certificate.file).convert("RGB")
-            buf = io.BytesIO()
-            img.save(buf, format="PDF", resolution=150)
-            pdf_bytes = buf.getvalue()
+            from apps.certificates.generator import certificate_image_to_pdf
+            with certificate.file.open("rb") as image_file:
+                pdf_bytes = certificate_image_to_pdf(image_file.read())
             # Store in CertificatePDF for future downloads & caching
             try:
                 CertificatePDF.store(
@@ -68,7 +65,7 @@ def _get_or_create_certificate_pdf_bytes(certificate) -> bytes:
         try:
             from apps.certificates.generator import generate_certificate_image
             pdf_bytes, _ = generate_certificate_image(
-                template_path=certificate.template.image.path,
+                template_path=certificate.template.image,
                 student_name=certificate.recipient_name,
                 course_name=certificate.course_name or (certificate.course.name if certificate.course else certificate.title),
                 start_date=certificate.start_date.strftime("%d/%m/%Y") if certificate.start_date else "",
@@ -105,11 +102,7 @@ def send_certificate_issued_email(certificate) -> tuple[bool, str]:
         return False, "Certificate is not eligible for issuance email."
 
     owner = certificate.owner
-    recipient_email = ""
-    if owner and getattr(owner, "email", None):
-        recipient_email = owner.email.strip().lower()
-    elif certificate.recipient_email:
-        recipient_email = certificate.recipient_email.strip().lower()
+    recipient_email = resolve_certificate_email_recipient(certificate)
 
     if not recipient_email or "@" not in recipient_email:
         return False, "Recipient has no valid email address."
@@ -131,10 +124,23 @@ def send_certificate_issued_email(certificate) -> tuple[bool, str]:
     recipient_name = certificate.recipient_name or (owner.get_full_name() if owner else "") or (owner.username if owner else "Student")
     course_name = certificate.course_name or (certificate.course.name if certificate.course else certificate.title)
     course = certificate.course if certificate.course_id else None
-    start_disp = _format_date((course.start_date if course else None) or certificate.start_date)
-    end_disp = _format_date((course.end_date if course else None) or certificate.end_date)
+    start_disp = _format_date(certificate.start_date or (course.start_date if course else None))
+    end_disp = _format_date(certificate.end_date or (course.end_date if course else None))
 
     subject = f"Your OneSmarter Certificate of Completion — {certificate.certificate_number}"
+
+    # Certificate values are user/admin supplied; escape them in HTML output.
+    html_recipient_name = escape(recipient_name)
+    html_course_name = escape(course_name)
+    html_title = escape(certificate.title)
+    html_certificate_number = escape(certificate.certificate_number)
+    html_start_disp = escape(start_disp)
+    html_end_disp = escape(end_disp)
+    html_recipient_email = escape(recipient_email)
+    html_login_url = escape(login_url)
+    html_my_certificates_url = escape(my_certificates_url)
+    html_register_url = escape(register_url)
+    html_verification_url = escape(verification_url)
 
     # Build account instructions depending on account status
     if has_account:
@@ -148,8 +154,8 @@ def send_certificate_issued_email(certificate) -> tuple[bool, str]:
             You can sign in and view or download your certificate from My Certificates:
           </p>
           <p style="margin: 0 0 16px 0; font-size: 14px;">
-            <a href="{login_url}" style="color: #0d9488; font-weight: 600; text-decoration: underline; margin-right: 16px;">Sign In</a>
-            <a href="{my_certificates_url}" style="color: #0d9488; font-weight: 600; text-decoration: underline;">My Certificates</a>
+            <a href="{html_login_url}" style="color: #0d9488; font-weight: 600; text-decoration: underline; margin-right: 16px;">Sign In</a>
+            <a href="{html_my_certificates_url}" style="color: #0d9488; font-weight: 600; text-decoration: underline;">My Certificates</a>
           </p>
         """
     else:
@@ -164,10 +170,10 @@ def send_certificate_issued_email(certificate) -> tuple[bool, str]:
             If you already have a OneSmarter CertiVerify account, you can sign in and view or download your certificate from My Certificates.
           </p>
           <p style="margin: 0 0 10px 0; font-size: 14px; color: #334155;">
-            If you do not have an account yet, you can register using the same email address that received this certificate (<strong>{recipient_email}</strong>). After verifying your email and registering, your certificate will automatically be available in your account:
+            If you do not have an account yet, you can register using the same email address that received this certificate (<strong>{html_recipient_email}</strong>). After verifying your email and registering, your certificate will automatically be available in your account:
           </p>
           <p style="margin: 0 0 16px 0; font-size: 14px;">
-            <a href="{register_url}" style="color: #0d9488; font-weight: 600; text-decoration: underline;">Create Account & Claim Certificate</a>
+            <a href="{html_register_url}" style="color: #0d9488; font-weight: 600; text-decoration: underline;">Create Account & Claim Certificate</a>
           </p>
         """
 
@@ -191,9 +197,9 @@ def send_certificate_issued_email(certificate) -> tuple[bool, str]:
 
     html_message = f"""
       <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; color: #0f172a; line-height: 1.6; max-width: 600px; margin: 0 auto; padding: 20px;">
-        <h2 style="color: #0f172a; margin-top: 0;">Congratulations, {recipient_name}!</h2>
+        <h2 style="color: #0f172a; margin-top: 0;">Congratulations, {html_recipient_name}!</h2>
         <p style="font-size: 15px; color: #334155;">
-          Your certificate of completion for <strong>'{course_name}'</strong> has been officially issued and registered in OneSmarter CertiVerify.
+          Your certificate of completion for <strong>'{html_course_name}'</strong> has been officially issued and registered in OneSmarter CertiVerify.
         </p>
 
         <div style="background-color: #f8fafc; border: 1px solid #e2e8f0; border-radius: 12px; padding: 18px 20px; margin: 20px 0;">
@@ -201,11 +207,11 @@ def send_certificate_issued_email(certificate) -> tuple[bool, str]:
             Certificate Details
           </h3>
           <table style="width: 100%; font-size: 14px; border-collapse: collapse;">
-            <tr><td style="padding: 4px 0; color: #64748b; width: 140px;">Title:</td><td style="font-weight: 600;">{certificate.title}</td></tr>
-            <tr><td style="padding: 4px 0; color: #64748b;">Course:</td><td style="font-weight: 600;">{course_name}</td></tr>
-            <tr><td style="padding: 4px 0; color: #64748b;">Certificate ID:</td><td style="font-family: monospace; font-weight: 700; color: #0d9488;">{certificate.certificate_number}</td></tr>
-            <tr><td style="padding: 4px 0; color: #64748b;">Course Start Date:</td><td>{start_disp}</td></tr>
-            <tr><td style="padding: 4px 0; color: #64748b;">Course End Date:</td><td>{end_disp}</td></tr>
+            <tr><td style="padding: 4px 0; color: #64748b; width: 140px;">Title:</td><td style="font-weight: 600;">{html_title}</td></tr>
+            <tr><td style="padding: 4px 0; color: #64748b;">Course:</td><td style="font-weight: 600;">{html_course_name}</td></tr>
+            <tr><td style="padding: 4px 0; color: #64748b;">Certificate ID:</td><td style="font-family: monospace; font-weight: 700; color: #0d9488;">{html_certificate_number}</td></tr>
+            <tr><td style="padding: 4px 0; color: #64748b;">Course Start Date:</td><td>{html_start_disp}</td></tr>
+            <tr><td style="padding: 4px 0; color: #64748b;">Course End Date:</td><td>{html_end_disp}</td></tr>
           </table>
         </div>
 
@@ -217,7 +223,7 @@ def send_certificate_issued_email(certificate) -> tuple[bool, str]:
           <h4 style="margin: 0 0 8px 0; font-size: 14px; color: #0f172a;">Certificate Verification:</h4>
           <p style="margin: 0 0 16px 0; font-size: 14px;">
             Anyone can verify the authenticity of this credential directly at:<br/>
-            <a href="{verification_url}" style="color: #0d9488; font-weight: 600; text-decoration: underline; word-break: break-all;">{verification_url}</a>
+            <a href="{html_verification_url}" style="color: #0d9488; font-weight: 600; text-decoration: underline; word-break: break-all;">{html_verification_url}</a>
           </p>
         </div>
 
@@ -251,17 +257,25 @@ def send_certificate_issued_email(certificate) -> tuple[bool, str]:
             attachments=attachments,
         )
         logger.info(
-            "Certificate email with PDF attachment '%s' (%d bytes) sent to %s for %s",
+            "Certificate email with PDF attachment '%s' (%d bytes) sent for %s",
             attachment_filename,
             len(pdf_bytes),
-            recipient_email,
             certificate.certificate_number,
         )
         return True, ""
     except Exception as exc:
         err_msg = str(exc)
         logger.warning(
-            "Failed sending certificate email to %s for %s: %s",
-            recipient_email, certificate.certificate_number, err_msg
+            "Failed sending certificate email for %s: %s",
+            certificate.certificate_number, err_msg
         )
         return False, err_msg
+
+
+def resolve_certificate_email_recipient(certificate) -> str:
+    """Return the same normalized destination used by issuance and retry logs."""
+    stored_recipient = (getattr(certificate, "recipient_email", "") or "").strip().lower()
+    if stored_recipient:
+        return stored_recipient
+    owner = getattr(certificate, "owner", None)
+    return (getattr(owner, "email", "") or "").strip().lower()

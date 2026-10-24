@@ -29,10 +29,20 @@ def send_certificate_email_once(certificate, sender=None) -> tuple[bool, str]:
         )
         email_sent, email_error = False, "Email delivery failed. Use the existing retry action to try again."
 
+    if not email_sent:
+        # Keep transport details in server logs only; SMTP responses can expose
+        # hostnames, policy details, or mailbox configuration to API clients.
+        logger.warning(
+            "Certificate email delivery failed for %s: %s",
+            certificate.certificate_number,
+            email_error,
+        )
+        email_error = "Email delivery failed. An administrator can retry delivery."
+
     certificate.email_sent = bool(email_sent)
     certificate.email_error = (email_error or "")[:2000]
     try:
-        certificate.save(update_fields=["email_sent", "email_error"])
+        certificate.save(update_fields=["email_sent", "email_error", "updated_at"])
     except Exception:
         logger.exception(
             "Could not persist email status for certificate %s",
@@ -75,16 +85,14 @@ def claim_unclaimed_certificates_for_user(user) -> list:
     profile = getattr(user, "profile", None)
     if not profile or not getattr(profile, "email_verified", False):
         logger.debug(
-            "Skipping certificate claiming: user %s email is not verified.",
-            getattr(user, "username", ""),
+            "Skipping certificate claiming: account email is not verified.",
         )
         return []
 
     normalized_email = (user.email or "").strip().lower()
     if not normalized_email:
         logger.warning(
-            "Skipping certificate claiming: user %s has an empty email.",
-            getattr(user, "username", ""),
+            "Skipping certificate claiming: account email is empty.",
         )
         return []
 
@@ -136,7 +144,7 @@ def claim_unclaimed_certificates_for_user(user) -> list:
                 )
             except Exception as notif_err:
                 logger.warning(
-                    "Failed creating notification for claimed cert %s: %s",
+                    "Failed creating notification for claimed certificate %s: %s",
                     cert.certificate_number,
                     notif_err,
                 )
@@ -175,18 +183,16 @@ def claim_unclaimed_certificates_for_user(user) -> list:
             send_certificate_email_once(cert)
 
         logger.info(
-            "Successfully claimed %d certificate(s) for user %s (%s)",
+            "Successfully claimed %d certificate(s) for account id %s",
             len(claimed_certs),
-            user.username,
-            normalized_email,
+            user.pk,
         )
 
     if conflicts:
         logger.warning(
-            "Skipped %d certificate(s) due to concurrent claim conflicts for user %s (%s): %s",
+            "Skipped %d certificate(s) due to concurrent claim conflicts for account id %s: %s",
             len(conflicts),
-            user.username,
-            normalized_email,
+            user.pk,
             ", ".join(conflicts),
         )
 

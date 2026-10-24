@@ -7,7 +7,7 @@ import LoadingScreen from '../components/LoadingScreen';
 import { useAuth } from '../context/AuthContext';
 import { Brand, ThemeToggle } from '../lib/ui';
 import { homeFor } from '../lib/paths';
-import { ApiError, errMsg, tokens } from '../services';
+import { ApiError, errMsg } from '../services';
 
 /**
  * Login page.
@@ -17,12 +17,26 @@ import { ApiError, errMsg, tokens } from '../services';
  *  Step 2: challenge + 6-digit code → POST /accounts/login/
  */
 export default function Login() {
-  const { user, loading, login, verifyMfa, googleLogin } = useAuth();
+  const { user, loading, hasSession, login, verifyMfa, googleLogin } = useAuth();
   const navigate = useNavigate();
-  const locState = (useLocation().state as { registered?: boolean; verified?: boolean; message?: string } | null);
+  const location = useLocation();
+  const locState = location.state as {
+    registered?: boolean;
+    verified?: boolean;
+    message?: string;
+    from?: { pathname?: string; search?: string; hash?: string };
+  } | null;
   const registered = locState?.registered === true;
   const verified = locState?.verified === true;
   const infoMsg = locState?.message;
+  const destinationFor = (role: 'admin' | 'user') => {
+    const requested = locState?.from;
+    const prefix = role === 'admin' ? '/admin/' : '/user/';
+    if (requested?.pathname?.startsWith(prefix)) {
+      return `${requested.pathname}${requested.search ?? ''}${requested.hash ?? ''}`;
+    }
+    return homeFor(role);
+  };
 
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
@@ -32,7 +46,7 @@ export default function Login() {
   const [mfaError, setMfaError] = useState('');
 
   // While restoring an existing stored session, show loading screen to prevent UI flash
-  if (loading && tokens.has()) return <LoadingScreen />;
+  if (loading && hasSession()) return <LoadingScreen />;
 
   // Already signed in → redirect
   if (user) return <Navigate to={homeFor(user.role)} replace />;
@@ -61,7 +75,7 @@ export default function Login() {
         });
         setMfaError('');
       } else if (r.kind === 'success') {
-        navigate(homeFor(r.user.role), { replace: true });
+        navigate(destinationFor(r.user.role), { replace: true });
       }
     } catch (x) {
       setErrs({ form: errMsg(x) });
@@ -73,7 +87,7 @@ export default function Login() {
     setBusy(true); setMfaError('');
     try {
       const u = await verifyMfa(mfa.challenge, code);
-      navigate(homeFor(u.role), { replace: true });
+      navigate(destinationFor(u.role), { replace: true });
     } catch (x) {
       const m = errMsg(x);
       if (x instanceof ApiError && (x.status === 429 || /challenge/i.test(m))) {
@@ -87,8 +101,13 @@ export default function Login() {
   const handleGoogleSuccess = useCallback(async (cred: string) => {
     setBusy(true);
     try {
-      const u = await googleLogin(cred);
-      navigate(homeFor(u.role), { replace: true });
+      const result = await googleLogin(cred);
+      if (result.kind === 'mfa') {
+        setMfa({ challenge: result.challenge, detail: result.detail });
+        setMfaError('');
+      } else {
+        navigate(destinationFor(result.user.role), { replace: true });
+      }
     } catch (x) {
       setErrs({ form: errMsg(x) });
     } finally {
@@ -164,7 +183,7 @@ export default function Login() {
           />
 
           <p className="mu" style={{ textAlign: 'center', marginTop: 16 }}>
-            New here? <Link to="/register">Create account</Link> · <Link to="/">Home</Link>
+            <Link to="/verify-email">Verify email</Link> · New here? <Link to="/register">Create account</Link> · <Link to="/">Home</Link>
           </p>
         </form>
       )}

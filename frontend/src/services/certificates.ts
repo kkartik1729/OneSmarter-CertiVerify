@@ -1,7 +1,7 @@
 import type { Cert, NewCert, Verification } from '../types';
 import { EP } from './endpoints';
-import { ApiError, http, httpBlob } from './http';
-import { asList, mapCert, mapPublicRecord } from './mappers';
+import { API_BASE, ApiError, http, httpBlob } from './http';
+import { asList, mapCert, mapCourse, mapGenerationBatch, mapPublicRecord, mapTemplate } from './mappers';
 
 export const certificateService = {
   /** GET /certificates/ — a user gets their own, an admin gets everyone's (decided by the backend). */
@@ -11,9 +11,10 @@ export const certificateService = {
   get: async (key: string): Promise<Cert> => mapCert(await http<unknown>('GET', EP.certificate(key))),
 
   /** GET the protected certificate image with the active administrator's bearer token. */
-  imageBlob: async (key: string | number): Promise<Blob> => {
-    const blob = await httpBlob(EP.certificateImage(key));
-    if (!blob.type.startsWith('image/')) throw new ApiError(500, 'The server did not return a certificate image.');
+  imageBlob: async (key: string | number, thumbnailSize?: number): Promise<Blob> => {
+    const path = EP.certificateImage(key);
+    const blob = await httpBlob(thumbnailSize ? `${path}?thumb=${thumbnailSize}` : path);
+    if (!blob.type.startsWith('image/')) throw new Error('The server did not return a certificate image.');
     return blob;
   },
   pdfBlob: (key: string | number): Promise<Blob> => httpBlob(EP.certificatePdf(key)),
@@ -52,16 +53,16 @@ export const certificateService = {
 
 export const courseService = {
   list: async (): Promise<import('../types').Course[]> =>
-    asList(await http<unknown>('GET', EP.courses)) as unknown as import('../types').Course[],
+    asList(await http<unknown>('GET', EP.courses)).map(mapCourse),
 
   get: async (id: number | string): Promise<import('../types').Course> =>
-    http<import('../types').Course>('GET', EP.course(id)),
+    mapCourse(await http<unknown>('GET', EP.course(id))),
 
   create: async (data: Omit<import('../types').Course, 'id'>): Promise<import('../types').Course> =>
-    http<import('../types').Course>('POST', EP.courses, data),
+    mapCourse(await http<unknown>('POST', EP.courses, data)),
 
   update: async (id: number | string, data: Partial<import('../types').Course>): Promise<import('../types').Course> =>
-    http<import('../types').Course>('PATCH', EP.course(id), data),
+    mapCourse(await http<unknown>('PATCH', EP.course(id), data)),
 
   delete: async (id: number | string): Promise<void> =>
     http<void>('DELETE', EP.course(id)),
@@ -69,10 +70,10 @@ export const courseService = {
 
 export const templateService = {
   list: async (): Promise<import('../types').CertificateTemplate[]> =>
-    asList(await http<unknown>('GET', EP.templates)) as unknown as import('../types').CertificateTemplate[],
+    asList(await http<unknown>('GET', EP.templates)).map(mapTemplate),
 
   get: async (id: number | string): Promise<import('../types').CertificateTemplate> =>
-    http<import('../types').CertificateTemplate>('GET', EP.template(id)),
+    mapTemplate(await http<unknown>('GET', EP.template(id))),
 
   upload: async (name: string, file: File, description?: string): Promise<import('../types').CertificateTemplate> => {
     const f = new FormData();
@@ -80,7 +81,10 @@ export const templateService = {
     f.append('image', file);
     if (file.name.toLowerCase().endsWith('.pdf')) f.append('original_pdf', file);
     if (description) f.append('description', description);
-    return http<import('../types').CertificateTemplate>('POST', EP.templates, f);
+    return mapTemplate(await http<unknown>(
+      'POST', EP.templates, f, true,
+      Number(import.meta.env.VITE_TEMPLATE_UPLOAD_TIMEOUT_MS) || 60000,
+    ));
   },
 
   replace: async (id: number | string, file: File, name?: string, description?: string): Promise<import('../types').CertificateTemplate> => {
@@ -89,11 +93,14 @@ export const templateService = {
     if (file.name.toLowerCase().endsWith('.pdf')) f.append('original_pdf', file);
     if (name) f.append('name', name);
     if (description !== undefined) f.append('description', description);
-    return http<import('../types').CertificateTemplate>('PUT', EP.template(id), f);
+    return mapTemplate(await http<unknown>(
+      'PUT', EP.template(id), f, true,
+      Number(import.meta.env.VITE_TEMPLATE_UPLOAD_TIMEOUT_MS) || 60000,
+    ));
   },
 
-  saveLayout: async (id: number | string, layout_config: Record<string, any>): Promise<import('../types').CertificateTemplate> =>
-    http<import('../types').CertificateTemplate>('PATCH', EP.template(id), { layout_config }),
+  saveLayout: async (id: number | string, layout_config: Record<string, unknown>): Promise<import('../types').CertificateTemplate> =>
+    mapTemplate(await http<unknown>('PATCH', EP.template(id), { layout_config })),
 
   delete: async (id: number | string): Promise<void> =>
     http<void>('DELETE', EP.template(id)),
@@ -101,10 +108,7 @@ export const templateService = {
 
 export const generationService = {
   /** Download CSV template blob / direct trigger */
-  downloadCsvTemplateUrl: (): string => {
-    const base = import.meta.env.VITE_API_BASE_URL || '/api';
-    return `${base.replace(/\/$/, '')}${EP.csvTemplate}`;
-  },
+  downloadCsvTemplateUrl: (): string => `${API_BASE}${EP.csvTemplate}`,
 
   /** Validate CSV file against selected course and student accounts.
    *  batchDefaults: optional batch-level overrides for course_name / dates,
@@ -128,7 +132,10 @@ export const generationService = {
       if (batchDefaults.batch_end_date) f.append('batch_end_date', batchDefaults.batch_end_date);
       if (batchDefaults.batch_issue_date) f.append('batch_issue_date', batchDefaults.batch_issue_date);
     }
-    return http<import('../types').CSVValidationResult>('POST', EP.validateCsv, f);
+    return http<import('../types').CSVValidationResult>(
+      'POST', EP.validateCsv, f, true,
+      Number(import.meta.env.VITE_CSV_VALIDATION_TIMEOUT_MS) || 60000,
+    );
   },
 
   /** Bulk generation from validated rows */
@@ -141,16 +148,15 @@ export const generationService = {
       certificate_title?: string;
       issuer?: string;
       completion_description?: string;
-      output_format?: string;
       field_values?: Record<string, string>;
     }
   ): Promise<import('../types').GenerationBatch> => {
-    return http<import('../types').GenerationBatch>('POST', EP.bulkGenerate, {
+    return mapGenerationBatch(await http<unknown>('POST', EP.bulkGenerate, {
       course_id: courseId,
       template_id: templateId,
       rows,
       ...sharedFields,
-    }, true, Number(import.meta.env.VITE_BULK_GENERATION_TIMEOUT_MS) || 120000);
+    }, true, Number(import.meta.env.VITE_BULK_GENERATION_TIMEOUT_MS) || 120000));
   },
 
   /** Single manual certificate generation */
@@ -167,9 +173,7 @@ export const generationService = {
     start_date: string;
     end_date: string;
     issue_date: string;
-    output_format?: string;
     field_values?: Record<string, string>;
-    allow_reissue?: boolean;
   }): Promise<Cert> => {
     return mapCert(await http<unknown>(
       'POST',
@@ -182,7 +186,10 @@ export const generationService = {
 
   /** Preview certificate image */
   preview: async (payload: {
-    template_id: number;
+    template_id?: number;
+    template_file?: File;
+    template_name?: string;
+    template_description?: string;
     course_id?: number;
     student_name?: string;
     course_name?: string;
@@ -193,24 +200,53 @@ export const generationService = {
     completion_description?: string;
     field_values?: Record<string, string>;
   }): Promise<{ preview_url: string; file_size: number; sha256: string }> => {
+    if (payload.template_file) {
+      const form = new FormData();
+      Object.entries(payload).forEach(([key, value]) => {
+        if (value === undefined || value === null) return;
+        if (key === 'field_values') form.append(key, JSON.stringify(value));
+        else form.append(key, value as string | Blob);
+      });
+      return http<{ preview_url: string; file_size: number; sha256: string }>('POST', EP.previewCertificate, form);
+    }
     return http<{ preview_url: string; file_size: number; sha256: string }>('POST', EP.previewCertificate, payload);
   },
 
   /** List generation batches */
   listBatches: async (): Promise<import('../types').GenerationBatch[]> =>
-    asList(await http<unknown>('GET', EP.batches)) as unknown as import('../types').GenerationBatch[],
+    asList(await http<unknown>('GET', EP.batches)).map(mapGenerationBatch),
 
   /** Get generation batch detail */
   getBatch: async (id: number | string): Promise<import('../types').GenerationBatch> =>
-    http<import('../types').GenerationBatch>('GET', EP.batch(id)),
+    mapGenerationBatch(await http<unknown>('GET', EP.batch(id))),
 };
 
 export const verificationService = {
+  /** The shared status-aware public verification request used by both public pages. */
+  async getPublicCertificate(raw: string): Promise<{
+    certificate_number: string;
+    found: boolean;
+    verification_result: string;
+    status?: string;
+    preview_url?: string | null;
+    message: string;
+    title?: string;
+    issuer?: string;
+    issue_date?: string;
+    recipient_name?: string;
+    course_name?: string;
+    start_date?: string;
+    end_date?: string;
+  }> {
+    const number = raw.trim().toUpperCase();
+    return http('GET', EP.verify(number), undefined, false);
+  },
+
   /** GET /certificates/verify/<number>/ (public). 404 = no such certificate number. */
   async verify(raw: string): Promise<Verification> {
     const number = raw.trim().toUpperCase();
     try {
-      const record = mapPublicRecord(await http<unknown>('GET', EP.verify(number), undefined, false));
+      const record = mapPublicRecord(await this.getPublicCertificate(number));
       if (record.status === 'VERIFIED') return { kind: 'ok', title: 'Verified record', detail: `A record for ${number} exists and has been approved.`, record };
       if (record.status === 'REJECTED') return { kind: 'er', title: 'Record rejected', detail: `A record for ${number} exists but was rejected on review.`, record };
       if (record.status === 'PENDING') return { kind: 'wn', title: 'Record found, pending review', detail: `A record for ${number} exists but has not been verified yet.`, record };

@@ -43,6 +43,7 @@ async function finishLogin(d: LoginResponse): Promise<User> {
 let restoreInFlight: Promise<User | null> | null = null;
 
 export const authService = {
+  hasSession: (): boolean => tokens.has(),
   /** POST /accounts/login/ {username, password} */
   async login(username: string, password: string): Promise<LoginResult> {
     const d = await http<LoginResponse>('POST', EP.login, { username, password }, false);
@@ -67,10 +68,20 @@ export const authService = {
     return finishLogin(d);
   },
 
-  /** POST /accounts/google-login/ {id_token} - Directly authenticates via trusted Google OAuth without extra MFA prompt */
-  async googleLogin(idToken: string): Promise<User> {
+  /** POST /accounts/google-login/ {id_token}; MFA-configured accounts get a challenge. */
+  async googleLogin(idToken: string): Promise<LoginResult> {
     const d = await http<LoginResponse>('POST', EP.googleLogin, { id_token: idToken }, false);
-    return finishLogin(d);
+    if (d.mfa_required === true) {
+      if (typeof d.challenge !== 'string' || !d.challenge) {
+        throw new Error(typeof d.detail === 'string' ? d.detail : 'Continue sign-in with your password to set up two-factor authentication.');
+      }
+      return {
+        kind: 'mfa',
+        challenge: d.challenge,
+        detail: typeof d.detail === 'string' ? d.detail : 'Enter your authenticator code to finish signing in.',
+      };
+    }
+    return { kind: 'success', user: await finishLogin(d) };
   },
 
   /** POST /accounts/set-password/ {password, password_confirm} */
@@ -83,8 +94,13 @@ export const authService = {
   },
 
   /** POST /accounts/register/. The backend returns NO tokens, so the user must sign in afterwards. */
-  async register(p: { username: string; email: string; first_name: string; last_name: string; password: string; password_confirm: string }): Promise<void> {
-    await http('POST', EP.register, p, false);
+  async register(p: { username: string; email: string; first_name: string; last_name: string; password: string; password_confirm: string }): Promise<{ message: string }> {
+    const response = await http<{ detail?: unknown }>('POST', EP.register, p, false);
+    return {
+      message: typeof response.detail === 'string'
+        ? response.detail
+        : 'If registration can be completed, verification instructions will be sent to the matching email.',
+    };
   },
 
   /** POST /accounts/verify-email/ {email, otp, token} */
@@ -124,7 +140,11 @@ export const authService = {
   },
 
   logout(): void {
+    const refresh = tokens.refresh;
     tokens.clear();
+    if (refresh) {
+      void http('POST', EP.logout, { refresh }, false, 5000).catch(() => undefined);
+    }
   },
 };
 
@@ -206,11 +226,6 @@ export const passwordResetService = {
       : 'If an account exists with that email, a password reset link has been sent.';
   },
 
-  /** Alias requestOtp -> requestReset for backward compatibility */
-  async requestOtp(email: string): Promise<string> {
-    return this.requestReset(email);
-  },
-
   /** POST /accounts/password-reset/validate/ {token} */
   async validateToken(token: string): Promise<{ valid: boolean; email?: string; detail: string }> {
     const d = await http<{ valid?: unknown; email?: unknown; detail?: unknown }>(
@@ -223,24 +238,6 @@ export const passwordResetService = {
       valid: Boolean(d.valid),
       email: typeof d.email === 'string' ? d.email : undefined,
       detail: typeof d.detail === 'string' ? d.detail : 'Password reset link is valid.',
-    };
-  },
-
-  /** POST /accounts/password-reset/verify/ {email, otp} */
-  async verifyOtp(email: string, otp: string): Promise<{ resetToken: string; detail: string }> {
-    const d = await http<{ reset_token?: unknown; detail?: unknown }>(
-      'POST',
-      EP.passwordResetVerify,
-      { email, otp },
-      false,
-    );
-    const resetToken = typeof d.reset_token === 'string' ? d.reset_token : '';
-    if (!resetToken) {
-      throw new Error('Verification failed. Invalid response from server.');
-    }
-    return {
-      resetToken,
-      detail: typeof d.detail === 'string' ? d.detail : 'Verification code accepted.',
     };
   },
 

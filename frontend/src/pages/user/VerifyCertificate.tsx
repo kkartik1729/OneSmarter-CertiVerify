@@ -8,6 +8,7 @@ export default function VerifyCertificate() {
   const [certNumber, setCertNumber] = useState('');
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState<VerificationCheckResponse | null>(null);
+  const [checkedAt, setCheckedAt] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const handleVerify = async (e: FormEvent) => {
@@ -21,11 +22,13 @@ export default function VerifyCertificate() {
     setLoading(true);
     setError(null);
     setResult(null);
+    setCheckedAt(null);
 
     try {
       // Calls POST /api/verification/check/ which checks database & logs a persistent attempt
       const res = await verificationHistoryService.check(query);
       setResult(res);
+      setCheckedAt(new Date().toISOString());
     } catch (err) {
       setError(errMsg(err));
     } finally {
@@ -44,13 +47,14 @@ export default function VerifyCertificate() {
       {/* Verification Query Form */}
       <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl p-6 sm:p-8 shadow-sm">
         <form onSubmit={handleVerify} className="space-y-4">
-          <label className="block text-xs font-semibold uppercase tracking-wider text-slate-700 dark:text-slate-300">
+          <label htmlFor="verify-certificate-number" className="block text-xs font-semibold uppercase tracking-wider text-slate-700 dark:text-slate-300">
             Certificate Number or Unique ID
           </label>
           <div className="flex flex-col sm:flex-row gap-3">
             <div className="relative flex-1">
               <Search className="w-5 h-5 absolute left-3.5 top-3 text-slate-400" />
               <input
+                id="verify-certificate-number"
                 type="text"
                 required
                 value={certNumber}
@@ -88,7 +92,7 @@ export default function VerifyCertificate() {
           title={result.certificate?.title}
           issuer={result.certificate?.issuer}
           issueDate={result.certificate?.issue_date}
-          timestamp={new Date().toISOString()}
+          timestamp={checkedAt ?? undefined}
         />
       )}
     </div>

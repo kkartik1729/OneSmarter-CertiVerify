@@ -10,8 +10,8 @@
  * The certificate number is read from the URL and verified automatically on mount.
  * If no number is in the URL, a manual search form is presented instead.
  */
-import { useEffect, useState, type FormEvent } from 'react';
-import { useParams, useSearchParams, Link } from 'react-router-dom';
+import { useEffect, useRef, useState, type FormEvent } from 'react';
+import { useParams, useSearchParams, Link, useNavigate } from 'react-router-dom';
 import {
   Shield,
   CheckCircle2,
@@ -27,8 +27,8 @@ import {
   ArrowLeft,
   Loader2,
 } from 'lucide-react';
-import { EP } from '../services/endpoints';
-import { API_BASE, http, ApiError } from '../services/http';
+import { API_BASE, ApiError } from '../services/http';
+import { verificationService } from '../services/certificates';
 import ZoomableCertificateViewer from '../components/ZoomableCertificateViewer';
 
 // ---------------------------------------------------------------------------
@@ -79,12 +79,15 @@ function formatDate(d: string | undefined): string {
 export default function PublicVerify() {
   const { certificateNumber: urlParam } = useParams<{ certificateNumber?: string }>();
   const [searchParams] = useSearchParams();
+  const navigate = useNavigate();
 
   // Seed the input from URL param or ?number= query param
   const seedNumber = (urlParam || searchParams.get('number') || '').trim().toUpperCase();
 
   const [inputValue, setInputValue] = useState(seedNumber);
   const [state, setState] = useState<VerifyState>({ kind: 'idle' });
+  const requestSequence = useRef(0);
+  const lastAutoVerified = useRef('');
 
   // ---------------------------------------------------------------------------
   // Verify against the public GET endpoint
@@ -93,20 +96,18 @@ export default function PublicVerify() {
     const normalized = number.trim().toUpperCase();
     if (!normalized) return;
 
+    const sequence = ++requestSequence.current;
     setState({ kind: 'loading', number: normalized });
     try {
-      const data = await http<PublicCertRecord>(
-        'GET',
-        EP.verify(normalized),
-        undefined,
-        false, // no auth token required
-      );
+      const data = await verificationService.getPublicCertificate(normalized);
+      if (sequence !== requestSequence.current) return;
       if (data.found) {
         setState({ kind: 'found', data });
       } else {
         setState({ kind: 'not_found', number: normalized });
       }
     } catch (e) {
+      if (sequence !== requestSequence.current) return;
       if (e instanceof ApiError && e.status === 404) {
         setState({ kind: 'not_found', number: normalized });
       } else {
@@ -121,10 +122,15 @@ export default function PublicVerify() {
 
   // Auto-verify when a certificate number is present in the URL
   useEffect(() => {
-    if (seedNumber) {
-      verify(seedNumber);
+    setInputValue(seedNumber);
+    if (!seedNumber) {
+      lastAutoVerified.current = '';
+      setState({ kind: 'idle' });
+      return;
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    if (lastAutoVerified.current === seedNumber) return;
+    lastAutoVerified.current = seedNumber;
+    void verify(seedNumber);
   }, [seedNumber]);
 
   const handleSubmit = (e: FormEvent) => {
@@ -135,7 +141,9 @@ export default function PublicVerify() {
   const handleReset = () => {
     setInputValue('');
     setState({ kind: 'idle' });
-    window.history.replaceState({}, '', '/verify-certificate');
+    requestSequence.current += 1;
+    lastAutoVerified.current = '';
+    navigate('/verify-certificate', { replace: true });
   };
 
   // ---------------------------------------------------------------------------
@@ -184,7 +192,7 @@ export default function PublicVerify() {
         {/* ── Search form ── */}
         <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl p-6 shadow-sm">
           <form onSubmit={handleSubmit} className="space-y-4">
-            <label className="block text-xs font-semibold uppercase tracking-wider text-slate-600 dark:text-slate-400">
+            <label htmlFor="public-cert-number-input" className="block text-xs font-semibold uppercase tracking-wider text-slate-600 dark:text-slate-400">
               Enter Credential ID / Certificate Number
             </label>
             <div className="flex flex-col sm:flex-row gap-3">
@@ -269,7 +277,7 @@ export default function PublicVerify() {
 // Sub-components
 // ---------------------------------------------------------------------------
 
-function Field({
+function VerifyInfoField({
   icon: Icon,
   label,
   value,
@@ -358,21 +366,21 @@ function VerifiedCard({
 
       {/* Fields grid */}
       {isVerified && <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
-        <Field icon={Award} label="Certificate Title" value={data.title || ''} />
-        <Field icon={Building} label="Issuing Organization" value={data.issuer || ''} />
-        <Field icon={Hash} label="Credential ID" value={data.certificate_number} />
+        <VerifyInfoField icon={Award} label="Certificate Title" value={data.title || ''} />
+        <VerifyInfoField icon={Building} label="Issuing Organization" value={data.issuer || ''} />
+        <VerifyInfoField icon={Hash} label="Credential ID" value={data.certificate_number} />
         {data.recipient_name && (
-          <Field icon={User} label="Recipient Name" value={data.recipient_name} />
+          <VerifyInfoField icon={User} label="Recipient Name" value={data.recipient_name} />
         )}
         {data.course_name && (
-          <Field icon={BookOpen} label="Course / Program" value={data.course_name} />
+          <VerifyInfoField icon={BookOpen} label="Course / Program" value={data.course_name} />
         )}
-        <Field icon={Calendar} label="Issue Date" value={formatDate(data.issue_date)} />
+        <VerifyInfoField icon={Calendar} label="Issue Date" value={formatDate(data.issue_date)} />
         {data.start_date && (
-          <Field icon={Calendar} label="Course Start Date" value={formatDate(data.start_date)} />
+          <VerifyInfoField icon={Calendar} label="Course Start Date" value={formatDate(data.start_date)} />
         )}
         {data.end_date && (
-          <Field icon={Calendar} label="Course End Date" value={formatDate(data.end_date)} />
+          <VerifyInfoField icon={Calendar} label="Course End Date" value={formatDate(data.end_date)} />
         )}
       </div>}
 

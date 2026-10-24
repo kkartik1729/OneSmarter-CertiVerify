@@ -1,12 +1,15 @@
 import hashlib
 import json
+import re
 from datetime import timedelta
-from unittest.mock import patch
+from unittest import skipUnless
+from unittest.mock import Mock, patch
 
 import pyotp
 from django.contrib.auth import get_user_model
 from django.core import mail
 from django.core.cache import cache
+from django.db import connection
 from django.test import TestCase, override_settings
 from django.utils import timezone
 from rest_framework import status
@@ -32,6 +35,9 @@ class AccountsAuthAndMFATestCase(TestCase):
             first_name="Normal",
             last_name="User",
         )
+        self.user.profile.email_verified = True
+        self.user.profile.email_verified_at = timezone.now()
+        self.user.profile.save(update_fields=["email_verified", "email_verified_at", "updated_at"])
 
         # Create admin user
         self.admin = User.objects.create_superuser(
@@ -41,6 +47,9 @@ class AccountsAuthAndMFATestCase(TestCase):
             first_name="Super",
             last_name="Admin",
         )
+        self.admin.profile.email_verified = True
+        self.admin.profile.email_verified_at = timezone.now()
+        self.admin.profile.save(update_fields=["email_verified", "email_verified_at", "updated_at"])
 
         # Create staff user
         self.staff = User.objects.create_user(
@@ -51,9 +60,13 @@ class AccountsAuthAndMFATestCase(TestCase):
             first_name="Staff",
             last_name="Admin",
         )
+        self.staff.profile.email_verified = True
+        self.staff.profile.email_verified_at = timezone.now()
+        self.staff.profile.save(update_fields=["email_verified", "email_verified_at", "updated_at"])
 
-    def tear_buffer(self):
+    def tearDown(self):
         cache.clear()
+        super().tearDown()
 
     # -------------------------------------------------------------------------
     # 1. ROLE DETECTION TESTS
@@ -219,6 +232,52 @@ class AccountsAuthAndMFATestCase(TestCase):
         self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
         self.assertEqual(response.data["detail"], "Session expired. Please log in again.")
 
+    def test_unverified_user_cannot_login_or_refresh_or_access_protected_api(self):
+        user = User.objects.create_user(
+            username="unverified-access@example.com",
+            email="unverified-access@example.com",
+            password="Password@123",
+        )
+        user.profile.email_verified = False
+        user.profile.email_verified_at = None
+        user.profile.save(update_fields=["email_verified", "email_verified_at", "updated_at"])
+
+        login = self.client.post("/api/accounts/login/", {
+            "username": user.email,
+            "password": "Password@123",
+        })
+        self.assertEqual(login.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertTrue(login.data["email_verification_required"])
+
+        refresh = RefreshToken.for_user(user)
+        me = self.client.get(
+            "/api/accounts/me/",
+            HTTP_AUTHORIZATION=f"Bearer {refresh.access_token}",
+        )
+        self.assertEqual(me.status_code, status.HTTP_401_UNAUTHORIZED)
+
+        refresh_response = self.client.post(
+            "/api/accounts/token/refresh/", {"refresh": str(refresh)}, format="json"
+        )
+        self.assertEqual(refresh_response.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    @override_settings(EMAIL_BACKEND="django.core.mail.backends.locmem.EmailBackend")
+    @patch("apps.accounts.views.send_email_verification_otp_email", return_value=True)
+    def test_unverified_user_without_certificate_can_resend_verification(self, send_email):
+        user = User.objects.create_user(
+            username="resend-no-cert@example.com",
+            email="resend-no-cert@example.com",
+            password="Password@123",
+        )
+        response = self.client.post(
+            "/api/accounts/resend-verification/", {"email": user.email}
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        send_email.assert_called_once()
+        self.assertTrue(
+            EmailVerificationToken.objects.filter(user=user, is_used=False).exists()
+        )
+
     def test_refresh_rejects_invalid_and_expired_tokens(self):
         invalid = self.client.post("/api/accounts/token/refresh/", {"refresh": "not-a-jwt"}, format="json")
         self.assertEqual(invalid.status_code, status.HTTP_401_UNAUTHORIZED)
@@ -234,11 +293,9 @@ class AccountsAuthAndMFATestCase(TestCase):
 
     @override_settings(EMAIL_BACKEND="django.core.mail.backends.locmem.EmailBackend")
     def test_registration_creates_user_with_user_role(self):
-        """Users without an issued certificate can register and sign in without OTP email."""
+        """Every registration sends verification, even when no certificate exists."""
         mail.outbox = []
-        with patch("apps.accounts.views.send_email_verification_otp_email") as verification_email, patch(
-            "apps.certificates.emails.send_certificate_issued_email"
-        ) as certificate_email:
+        with patch("apps.certificates.emails.send_certificate_issued_email") as certificate_email:
             res = self.client.post("/api/accounts/register/", {
                 "username": "newbie",
                 "email": "newbie@example.com",
@@ -247,18 +304,21 @@ class AccountsAuthAndMFATestCase(TestCase):
                 "password": "NewPassword@123",
                 "password_confirm": "NewPassword@123",
             })
-        self.assertEqual(res.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(res.status_code, status.HTTP_202_ACCEPTED)
         certificate_email.assert_not_called()
-        verification_email.assert_not_called()
-        self.assertFalse(res.data["verification_email_sent"])
-        self.assertIn("No email verification is required", res.data["message"])
-        self.assertFalse(EmailVerificationToken.objects.filter(user__username="newbie").exists())
-        self.assertEqual(len(mail.outbox), 0)
-        resend = self.client.post("/api/accounts/resend-verification/", {"email": "newbie@example.com"})
-        self.assertEqual(resend.status_code, status.HTTP_200_OK)
-        self.assertIn("No email verification is required", resend.data["detail"])
-        verification_email.assert_not_called()
-        self.assertEqual(len(mail.outbox), 0)
+        self.assertNotIn("verification_email_sent", res.data)
+        self.assertIn("If registration can be completed", res.data["detail"])
+        self.assertTrue(EmailVerificationToken.objects.filter(user__username="newbie", is_used=False).exists())
+        self.assertEqual(len(mail.outbox), 1)
+        self.assertEqual(mail.outbox[0].to, ["newbie@example.com"])
+        self.assertIn("Verify Your Email Address", mail.outbox[0].subject)
+        otp_match = re.search(r"\b(\d{6})\b", mail.outbox[0].body)
+        self.assertIsNotNone(otp_match)
+        verification = self.client.post("/api/accounts/verify-email/", {
+            "email": "newbie@example.com", "otp": otp_match.group(1),
+        })
+        self.assertEqual(verification.status_code, status.HTTP_200_OK)
+        self.assertTrue(verification.data["email_verified"])
         new_user = User.objects.get(username="newbie")
         self.assertFalse(new_user.is_staff)
         self.assertFalse(new_user.is_superuser)
@@ -273,7 +333,7 @@ class AccountsAuthAndMFATestCase(TestCase):
 
     @override_settings(EMAIL_BACKEND="django.core.mail.backends.locmem.EmailBackend")
     def test_registration_verification_email_is_independent_of_existing_certificate(self):
-        """An eligible unclaimed certificate triggers the verification email used for claiming."""
+        """Verification email is sent independently of a pre-existing certificate."""
         mail.outbox = []
         Certificate.objects.create(
             owner=None,
@@ -295,8 +355,8 @@ class AccountsAuthAndMFATestCase(TestCase):
             "password_confirm": "NewPassword@123",
         })
 
-        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
-        self.assertTrue(response.data["verification_email_sent"])
+        self.assertEqual(response.status_code, status.HTTP_202_ACCEPTED)
+        self.assertNotIn("verification_email_sent", response.data)
         self.assertEqual(len(mail.outbox), 1)
         self.assertEqual(mail.outbox[0].to, ["claimed-later@example.com"])
         self.assertIn("Verify Your Email Address", mail.outbox[0].subject)
@@ -327,9 +387,8 @@ class AccountsAuthAndMFATestCase(TestCase):
                 "password_confirm": "NewPassword@123",
             })
 
-        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
-        self.assertFalse(response.data["verification_email_sent"])
-        self.assertIn("could not be sent", response.data["message"])
+        self.assertEqual(response.status_code, status.HTTP_202_ACCEPTED)
+        self.assertNotIn("verification_email_sent", response.data)
         failed_token = EmailVerificationToken.objects.get(user__email="retry-verification@example.com")
         self.assertTrue(failed_token.is_used)
 
@@ -349,6 +408,63 @@ class AccountsAuthAndMFATestCase(TestCase):
             ).exists()
         )
 
+    @override_settings(EMAIL_BACKEND="django.core.mail.backends.locmem.EmailBackend")
+    def test_email_verification_otp_expires_and_locks_after_five_failures(self):
+        Certificate.objects.create(
+            owner=None,
+            recipient_email="otp-lock@example.com",
+            title="Issued credential",
+            issuer="OneSmarter",
+            certificate_number="OSCV-2026-OTPLOCK01",
+            recipient_name="OTP Lock",
+            issue_date=timezone.now().date(),
+            status=Certificate.Status.VERIFIED,
+        )
+        response = self.client.post("/api/accounts/register/", {
+            "username": "otp-lock@example.com",
+            "email": "otp-lock@example.com",
+            "first_name": "OTP",
+            "last_name": "Lock",
+            "password": "NewPassword@123",
+            "password_confirm": "NewPassword@123",
+        })
+        self.assertEqual(response.status_code, status.HTTP_202_ACCEPTED)
+        token = EmailVerificationToken.objects.get(user__email="otp-lock@example.com")
+        token.otp_hash = hashlib.sha256(b"111111").hexdigest()
+        token.save(update_fields=["otp_hash"])
+        self.assertLessEqual(token.expires_at - timezone.now(), timedelta(minutes=10))
+        for _ in range(5):
+            failed = self.client.post("/api/accounts/verify-email/", {
+                "email": "otp-lock@example.com", "otp": "000000",
+            })
+            self.assertEqual(failed.status_code, status.HTTP_400_BAD_REQUEST)
+        token.refresh_from_db()
+        self.assertEqual(token.attempts, 5)
+        self.assertTrue(token.is_used)
+
+    def test_email_verification_expired_otp_cannot_be_used(self):
+        user = User.objects.create_user(
+            username="expired-otp@example.com",
+            email="expired-otp@example.com",
+            password="Password@123",
+        )
+        user.profile.email_verified = False
+        user.profile.save()
+        token = EmailVerificationToken.objects.create(
+            user=user,
+            token_hash=hashlib.sha256(b"link").hexdigest(),
+            otp_hash=hashlib.sha256(b"123456").hexdigest(),
+            expires_at=timezone.now() - timedelta(seconds=1),
+        )
+        response = self.client.post("/api/accounts/verify-email/", {
+            "email": user.email, "otp": "123456",
+        })
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        user.profile.refresh_from_db()
+        self.assertFalse(user.profile.email_verified)
+        token.refresh_from_db()
+        self.assertTrue(token.is_used)
+
     def test_duplicate_email_registration_rejected(self):
         """Registration with an already registered email must be rejected."""
         res = self.client.post("/api/accounts/register/", {
@@ -359,8 +475,10 @@ class AccountsAuthAndMFATestCase(TestCase):
             "password": "Password@123",
             "password_confirm": "Password@123",
         })
-        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
-        self.assertIn("email", res.data)
+        self.assertEqual(res.status_code, status.HTTP_202_ACCEPTED)
+        self.assertNotIn("email", res.data)
+        self.assertNotIn("verification_email_sent", res.data)
+        self.assertIn("If registration can be completed", res.data["detail"])
 
     # -------------------------------------------------------------------------
     # 3. MFA SETUP, VERIFICATION, AND REPLAY TESTS
@@ -376,12 +494,17 @@ class AccountsAuthAndMFATestCase(TestCase):
 
         # Confirm with valid TOTP code
         code = pyotp.TOTP(secret).now()
-        confirm_res = self.client.post("/api/accounts/mfa/confirm/", {"code": code})
+        mail.outbox = []
+        with self.captureOnCommitCallbacks(execute=True):
+            confirm_res = self.client.post("/api/accounts/mfa/confirm/", {"code": code})
         self.assertEqual(confirm_res.status_code, status.HTTP_200_OK)
 
         profile = UserProfile.objects.get(user=self.user)
         self.assertTrue(profile.mfa_enabled)
         self.assertEqual(profile.totp_secret, secret)
+        self.assertEqual(len(mail.outbox), 1)
+        from apps.audit.models import AuditLog
+        self.assertTrue(AuditLog.objects.filter(actor=self.user, action=AuditLog.Action.MFA_ENABLED).exists())
 
     def test_mfa_invalid_otp_rejected(self):
         """Submitting an invalid OTP must be rejected with 401."""
@@ -635,7 +758,7 @@ class AccountsAuthAndMFATestCase(TestCase):
         self.assertIn("reset", res1.data["detail"].lower())
         self.assertEqual(len(mail.outbox), 1)
         self.assertIn("Reset Your OneSmarter-CertiVerify Password", mail.outbox[0].subject)
-        self.assertIn("/reset-password?token=", mail.outbox[0].body)
+        self.assertIn("/reset-password#token=", mail.outbox[0].body)
 
         # Unknown email request (clear cache cooldown first for testing)
         cache.clear()
@@ -647,234 +770,123 @@ class AccountsAuthAndMFATestCase(TestCase):
         # No extra email sent
         self.assertEqual(len(mail.outbox), 1)
 
-    def test_password_reset_cooldown(self):
-        """Requesting password reset twice in under 60 seconds triggers cooldown."""
-        res1 = self.client.post("/api/accounts/password-reset/request/", {
-            "email": "normaluser@example.com",
-        })
-        self.assertEqual(res1.status_code, status.HTTP_200_OK)
+    def test_password_reset_cooldown_is_generic(self):
+        first = self.client.post("/api/accounts/password-reset/request/", {"email": "normaluser@example.com"})
+        second = self.client.post("/api/accounts/password-reset/request/", {"email": "normaluser@example.com"})
+        self.assertEqual(first.status_code, status.HTTP_200_OK)
+        self.assertEqual(second.status_code, status.HTTP_200_OK)
+        self.assertEqual(first.data["detail"], second.data["detail"])
 
-        res2 = self.client.post("/api/accounts/password-reset/request/", {
-            "email": "normaluser@example.com",
-        })
-        self.assertEqual(res2.status_code, status.HTTP_429_TOO_MANY_REQUESTS)
-
-    def test_full_password_reset_workflow(self):
-        """End-to-end flow: request OTP -> verify OTP -> set new password -> sign in with new password."""
+    def test_full_password_reset_link_workflow_and_session_revocation(self):
         mail.outbox = []
         user = self.user
-
-        # Ensure user has MFA enabled to verify MFA preservation
         user.profile.mfa_enabled = True
         user.profile.totp_secret = pyotp.random_base32()
         user.profile.save()
+        from apps.accounts.authentication import issue_user_refresh_token
+        old_access = str(issue_user_refresh_token(user).access_token)
 
-        # Step 1: Request OTP
-        req_res = self.client.post("/api/accounts/password-reset/request/", {
-            "email": "normaluser@example.com",
+        request = self.client.post("/api/accounts/password-reset/request/", {
+            "email": user.email,
         })
-        self.assertEqual(req_res.status_code, status.HTTP_200_OK)
+        self.assertEqual(request.status_code, status.HTTP_200_OK)
         self.assertEqual(len(mail.outbox), 1)
+        match = re.search(r"/reset-password#token=([^\s\"<&]+)", mail.outbox[0].body)
+        self.assertIsNotNone(match)
+        raw_token = match.group(1)
+        self.assertTrue(PasswordResetToken.objects.filter(
+            user=user, token_hash=hashlib.sha256(raw_token.encode()).hexdigest(), is_used=False
+        ).exists())
+        self.assertFalse(PasswordResetRequest.objects.filter(user=user, is_completed=False).exists())
 
-        # Retrieve request record and set deterministic OTP
-        reset_req = PasswordResetRequest.objects.filter(user=user, is_completed=False).first()
-        self.assertIsNotNone(reset_req)
-        test_otp = "852963"
-        reset_req.otp_hash = hashlib.sha256(test_otp.encode("utf-8")).hexdigest()
-        reset_req.save()
-
-        # Step 2: Verify OTP
-        verify_res = self.client.post("/api/accounts/password-reset/verify/", {
-            "email": "normaluser@example.com",
-            "otp": test_otp,
-        })
-        self.assertEqual(verify_res.status_code, status.HTTP_200_OK)
-        self.assertIn("reset_token", verify_res.data)
-        reset_token = verify_res.data["reset_token"]
-
-        # Step 3: Complete password reset
+        self.client.credentials(HTTP_AUTHORIZATION=f"Bearer {old_access}")
         new_password = "BrandNewStrongPassword@2026"
-        complete_res = self.client.post("/api/accounts/password-reset/complete/", {
-            "reset_token": reset_token,
+        completed = self.client.post("/api/accounts/password-reset/complete/", {
+            "token": raw_token,
             "password": new_password,
             "password_confirm": new_password,
         })
-        self.assertEqual(complete_res.status_code, status.HTTP_200_OK)
-        self.assertIn("changed successfully", complete_res.data["detail"].lower())
+        self.assertEqual(completed.status_code, status.HTTP_200_OK)
+        self.assertEqual(self.client.get("/api/accounts/me/").status_code, status.HTTP_401_UNAUTHORIZED)
+        self.client.credentials()
 
-        # Reset record is marked completed
-        reset_req.refresh_from_db()
-        self.assertTrue(reset_req.is_completed)
-
-        # Confirmation email sent
-        self.assertEqual(len(mail.outbox), 2)
-        self.assertIn("Password Has Been Changed", mail.outbox[1].subject)
-
-        # Old password no longer works
-        old_login = self.client.post("/api/accounts/login/", {
-            "username": "normaluser@example.com",
-            "password": "Password@123",
-        })
-        self.assertEqual(old_login.status_code, status.HTTP_401_UNAUTHORIZED)
-
-        # New password works and still requires MFA!
-        new_login = self.client.post("/api/accounts/login/", {
-            "username": "normaluser@example.com",
+        replay = self.client.post("/api/accounts/password-reset/complete/", {
+            "token": raw_token,
             "password": new_password,
+            "password_confirm": new_password,
         })
-        self.assertEqual(new_login.status_code, status.HTTP_200_OK)
-        self.assertTrue(new_login.data["mfa_required"])
-        self.user.profile.refresh_from_db()
-        self.assertTrue(self.user.profile.mfa_enabled)
+        self.assertEqual(replay.status_code, status.HTTP_400_BAD_REQUEST)
+        user.refresh_from_db()
+        self.assertTrue(user.check_password(new_password))
+        user.profile.refresh_from_db()
+        self.assertTrue(user.profile.mfa_enabled)
 
-    def test_password_reset_otp_attempt_limits(self):
-        """Entering incorrect OTP reaches maximum attempt limit and locks request."""
-        # Create reset request
-        test_otp = "123456"
-        reset_req = PasswordResetRequest.objects.create(
-            user=self.user,
-            otp_hash=hashlib.sha256(test_otp.encode("utf-8")).hexdigest(),
-            otp_expires_at=timezone.now() + timedelta(minutes=10),
-            attempts=0,
-            max_attempts=3,
-        )
-
-        for attempt in range(1, 3):
-            res = self.client.post("/api/accounts/password-reset/verify/", {
-                "email": "normaluser@example.com",
-                "otp": "000000",
-            })
-            self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
-            self.assertIn("remaining", res.data["detail"].lower())
-
-        # 3rd failed attempt blocks the request
-        res_final = self.client.post("/api/accounts/password-reset/verify/", {
-            "email": "normaluser@example.com",
+    def test_password_reset_otp_endpoint_is_removed(self):
+        response = self.client.post("/api/accounts/password-reset/verify/", {
+            "email": self.user.email,
             "otp": "000000",
         })
-        self.assertEqual(res_final.status_code, status.HTTP_400_BAD_REQUEST)
-        self.assertIn("maximum verification attempts exceeded", res_final.data["detail"].lower())
-        reset_req.refresh_from_db()
-        self.assertTrue(reset_req.is_completed)
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+        self.assertTrue(self.user.check_password("Password@123"))
 
-    def test_password_reset_expired_otp_rejected(self):
-        """Expired OTP is rejected."""
-        test_otp = "123456"
-        PasswordResetRequest.objects.create(
+    def test_password_reset_expired_link_is_rejected(self):
+        raw_token = "expired-reset-link-token"
+        PasswordResetToken.objects.create(
             user=self.user,
-            otp_hash=hashlib.sha256(test_otp.encode("utf-8")).hexdigest(),
-            otp_expires_at=timezone.now() - timedelta(minutes=1),
-            attempts=0,
+            token_hash=hashlib.sha256(raw_token.encode()).hexdigest(),
+            expires_at=timezone.now() - timedelta(minutes=1),
         )
-
-        res = self.client.post("/api/accounts/password-reset/verify/", {
-            "email": "normaluser@example.com",
-            "otp": test_otp,
-        })
-        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
-        self.assertIn("expired", res.data["detail"].lower())
-
-    def test_password_reset_mismatched_passwords_rejected(self):
-        """Mismatched passwords in completion step must be rejected."""
-        raw_token = "valid_reset_token"
-        PasswordResetRequest.objects.create(
-            user=self.user,
-            otp_hash="dummy_hash",
-            reset_token_hash=hashlib.sha256(raw_token.encode("utf-8")).hexdigest(),
-            otp_expires_at=timezone.now() + timedelta(minutes=10),
-            reset_token_expires_at=timezone.now() + timedelta(minutes=15),
-            otp_verified=True,
-            is_completed=False,
-        )
-
-        res = self.client.post("/api/accounts/password-reset/complete/", {
-            "reset_token": raw_token,
-            "password": "Password1@Strong",
-            "password_confirm": "DifferentPassword2@Strong",
-        })
-        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
-        self.assertIn("password_confirm", res.data)
-
-    def test_password_reset_reused_token_rejected(self):
-        """Reusing an already consumed reset token is rejected."""
-        raw_token = "already_consumed_token"
-        PasswordResetRequest.objects.create(
-            user=self.user,
-            otp_hash="dummy_hash",
-            reset_token_hash=hashlib.sha256(raw_token.encode("utf-8")).hexdigest(),
-            otp_expires_at=timezone.now() + timedelta(minutes=10),
-            reset_token_expires_at=timezone.now() + timedelta(minutes=15),
-            otp_verified=True,
-            is_completed=True,
-        )
-
-        res = self.client.post("/api/accounts/password-reset/complete/", {
-            "reset_token": raw_token,
+        response = self.client.post("/api/accounts/password-reset/complete/", {
+            "token": raw_token,
             "password": "ValidNewPassword@123",
             "password_confirm": "ValidNewPassword@123",
         })
-        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertTrue(self.user.check_password("Password@123"))
+
+    def test_password_reset_mismatched_and_weak_passwords_rejected(self):
+        raw_token = "valid-reset-link-token"
+        PasswordResetToken.objects.create(
+            user=self.user,
+            token_hash=hashlib.sha256(raw_token.encode()).hexdigest(),
+            expires_at=timezone.now() + timedelta(minutes=15),
+        )
+        mismatch = self.client.post("/api/accounts/password-reset/complete/", {
+            "token": raw_token,
+            "password": "Password1@Strong",
+            "password_confirm": "DifferentPassword2@Strong",
+        })
+        self.assertEqual(mismatch.status_code, status.HTTP_400_BAD_REQUEST)
+        weak = self.client.post("/api/accounts/password-reset/complete/", {
+            "token": raw_token,
+            "password": "123",
+            "password_confirm": "123",
+        })
+        self.assertEqual(weak.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("password", weak.data)
 
     def test_admin_password_reset_preserves_admin_role_and_mfa(self):
-        """Admin user can reset password, ADMIN role and MFA status remain fully preserved."""
         mail.outbox = []
         admin = self.admin
         admin.profile.mfa_enabled = True
         admin.profile.totp_secret = pyotp.random_base32()
         admin.profile.save()
-
-        # Step 1: Request
-        self.client.post("/api/accounts/password-reset/request/", {
-            "email": "superadmin@example.com",
-        })
-        req = PasswordResetRequest.objects.filter(user=admin, is_completed=False).first()
-        self.assertIsNotNone(req)
-        test_otp = "777888"
-        req.otp_hash = hashlib.sha256(test_otp.encode("utf-8")).hexdigest()
-        req.save()
-
-        # Step 2: Verify
-        v_res = self.client.post("/api/accounts/password-reset/verify/", {
-            "email": "superadmin@example.com",
-            "otp": test_otp,
-        })
-        token = v_res.data["reset_token"]
-
-        # Step 3: Complete
+        self.client.post("/api/accounts/password-reset/request/", {"email": admin.email})
+        self.assertEqual(len(mail.outbox), 1)
+        match = re.search(r"/reset-password#token=([^\s\"<&]+)", mail.outbox[0].body)
+        self.assertIsNotNone(match)
         new_pass = "SuperAdminNewPass@999"
-        c_res = self.client.post("/api/accounts/password-reset/complete/", {
-            "reset_token": token,
+        response = self.client.post("/api/accounts/password-reset/complete/", {
+            "token": match.group(1),
             "password": new_pass,
             "password_confirm": new_pass,
         })
-        self.assertEqual(c_res.status_code, status.HTTP_200_OK)
-
-        # Admin status and role preserved
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
         admin.refresh_from_db()
+        admin.profile.refresh_from_db()
         self.assertTrue(admin.is_superuser)
         self.assertEqual(admin.profile.role, "ADMIN")
         self.assertTrue(admin.profile.mfa_enabled)
-
-    def test_password_reset_weak_password_rejected_by_validators(self):
-        """Common or numeric passwords must be rejected by Django's password validators."""
-        raw_token = "valid_weak_test_token"
-        PasswordResetRequest.objects.create(
-            user=self.user,
-            otp_hash="dummy_hash",
-            reset_token_hash=hashlib.sha256(raw_token.encode("utf-8")).hexdigest(),
-            otp_expires_at=timezone.now() + timedelta(minutes=10),
-            reset_token_expires_at=timezone.now() + timedelta(minutes=15),
-            otp_verified=True,
-            is_completed=False,
-        )
-
-        res = self.client.post("/api/accounts/password-reset/complete/", {
-            "reset_token": raw_token,
-            "password": "123",
-            "password_confirm": "123",
-        })
-        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
-        self.assertIn("password", res.data)
 
     def test_mfa_recovery_email_contains_configured_frontend_url(self):
         """Recovery email must contain FRONTEND_URL and a secure token."""
@@ -888,30 +900,19 @@ class AccountsAuthAndMFATestCase(TestCase):
         self.assertIn("/mfa-recovery?token=", email_body)
         self.assertIn("15 minutes", email_body)
 
-    def test_duplicate_email_accounts_safety_prevented(self):
-        """If database contains duplicate active accounts with same email, recovery and reset do not arbitrarily pick one."""
-        # Create a second user with the same email
-        User.objects.create_user(
-            username="second_dup_user",
-            email="normaluser@example.com",
-            password="OtherPassword@123",
-        )
-        mail.outbox = []
+    @skipUnless(connection.vendor == "postgresql", "normalized email index is PostgreSQL-specific")
+    def test_database_prevents_duplicate_normalized_email_accounts(self):
+        """The database constraint closes the registration email race."""
+        from django.db import IntegrityError, transaction
 
-        # MFA recovery request returns generic 200 but sends no email for safety
-        res_mfa = self.client.post("/api/accounts/mfa/recovery/request/", {
-            "email": "normaluser@example.com",
-        })
-        self.assertEqual(res_mfa.status_code, status.HTTP_200_OK)
-        self.assertEqual(len(mail.outbox), 0)
-
-        # Password reset request also sends no email
-        cache.clear()
-        res_pw = self.client.post("/api/accounts/password-reset/request/", {
-            "email": "normaluser@example.com",
-        })
-        self.assertEqual(res_pw.status_code, status.HTTP_200_OK)
-        self.assertEqual(len(mail.outbox), 0)
+        with self.assertRaises(IntegrityError):
+            with transaction.atomic():
+                User.objects.create_user(
+                    username="second_dup_user",
+                    email=" NORMALUSER@example.com ",
+                    password="OtherPassword@123",
+                )
+        self.assertEqual(User.objects.filter(email__iexact="normaluser@example.com").count(), 1)
 
     def test_password_reset_via_email_link_end_to_end(self):
         """
@@ -936,7 +937,7 @@ class AccountsAuthAndMFATestCase(TestCase):
         self.assertEqual(req_res.status_code, status.HTTP_200_OK)
         self.assertEqual(len(mail.outbox), 1)
         self.assertIn("Reset Your OneSmarter-CertiVerify Password", mail.outbox[0].subject)
-        self.assertIn("/reset-password?token=", mail.outbox[0].body)
+        self.assertIn("/reset-password#token=", mail.outbox[0].body)
 
         # Retrieve token from database
         token_record = PasswordResetToken.objects.filter(user=user, is_used=False).first()
@@ -1064,10 +1065,11 @@ class AccountsAuthAndMFATestCase(TestCase):
         totp = pyotp.TOTP(new_secret)
         valid_code = totp.now()
 
-        complete_res = self.client.post("/api/accounts/mfa/recovery/complete/", {
-            "challenge": challenge,
-            "code": valid_code,
-        })
+        with self.captureOnCommitCallbacks(execute=True):
+            complete_res = self.client.post("/api/accounts/mfa/recovery/complete/", {
+                "challenge": challenge,
+                "code": valid_code,
+            })
         self.assertEqual(complete_res.status_code, status.HTTP_200_OK)
         self.assertTrue(complete_res.data.get("success"))
         self.assertIn("recovery complete", complete_res.data.get("detail", "").lower())
@@ -1152,6 +1154,150 @@ class AccountsAuthAndMFATestCase(TestCase):
 
     @override_settings(GOOGLE_OAUTH_CLIENT_ID="test-google-client-id")
     @patch("google.oauth2.id_token.verify_oauth2_token")
+    def test_google_login_rejects_inactive_linked_account(self, mock_verify):
+        user = User.objects.create_user(
+            username="inactive_google",
+            email="inactive_google@example.com",
+            is_active=False,
+        )
+        user.profile.google_sub = "google-sub-inactive"
+        user.profile.email_verified = True
+        user.profile.save()
+        mock_verify.return_value = {
+            "iss": "https://accounts.google.com",
+            "sub": "google-sub-inactive",
+            "email": "inactive_google@example.com",
+            "email_verified": True,
+        }
+
+        response = self.client.post("/api/accounts/google-login/", {"id_token": "valid-token"})
+
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+        self.assertNotIn("access", response.data)
+
+    @skipUnless(connection.vendor == "postgresql", "identity constraints are verified on PostgreSQL")
+    def test_database_rejects_duplicate_nonempty_google_subjects(self):
+        from django.db import IntegrityError, transaction
+
+        User.objects.create_user(
+            username="normalized_email_first",
+            email=" Duplicate.Email@example.com ",
+        )
+        with self.assertRaises(IntegrityError), transaction.atomic():
+            User.objects.create_user(
+                username="normalized_email_second",
+                email="duplicate.email@example.com",
+            )
+
+        first = User.objects.create_user(username="google_sub_first", email="google-sub-first@example.com")
+        second = User.objects.create_user(username="google_sub_second", email="google-sub-second@example.com")
+        first.profile.google_sub = "google-sub-unique"
+        first.profile.save(update_fields=["google_sub", "updated_at"])
+
+        second.profile.google_sub = "google-sub-unique"
+        with self.assertRaises(IntegrityError), transaction.atomic():
+            second.profile.save(update_fields=["google_sub", "updated_at"])
+
+
+    @override_settings(
+        EMAIL_BACKEND="django.core.mail.backends.smtp.EmailBackend",
+        EMAIL_HOST="smtp.example.test",
+        EMAIL_HOST_USER="sender@example.test",
+        EMAIL_HOST_PASSWORD="test-password",
+        EMAIL_USE_TLS=True,
+        EMAIL_USE_SSL=False,
+    )
+    def test_smtp_preflight_reconnects_before_sending_once(self):
+        import smtplib
+        from types import SimpleNamespace
+        from django.core.mail.backends.smtp import EmailBackend
+        from apps.accounts.services.email_service import send_account_email
+
+        connection = EmailBackend()
+        first_protocol = Mock()
+        first_protocol.noop.side_effect = smtplib.SMTPServerDisconnected("Server not connected")
+        second_protocol = Mock()
+        second_protocol.noop.return_value = (250, b"OK")
+        open_calls = 0
+
+        def open_connection():
+            nonlocal open_calls
+            open_calls += 1
+            connection.connection = SimpleNamespace(
+                close=Mock(),
+                protocol=first_protocol if open_calls == 1 else second_protocol,
+            )
+            connection.connection.noop = connection.connection.protocol.noop
+            return True
+
+        with patch("apps.accounts.services.email_service.get_connection", return_value=connection), \
+             patch.object(connection, "open", side_effect=open_connection), \
+             patch.object(connection, "close", side_effect=lambda: setattr(connection, "connection", None)), \
+             patch("apps.accounts.services.email_service.EmailMultiAlternatives.send", return_value=1) as send:
+            self.assertTrue(send_account_email("recipient@example.test", "Subject", "Body"))
+
+        self.assertEqual(open_calls, 2)
+        send.assert_called_once_with(fail_silently=False)
+
+    @override_settings(EMAIL_BACKEND="django.core.mail.backends.locmem.EmailBackend")
+    def test_email_backend_failure_is_reported_without_claiming_success(self):
+        from apps.accounts.services.email_service import EmailDeliveryError, send_account_email
+
+        with patch("apps.accounts.services.email_service.EmailMultiAlternatives.send", side_effect=RuntimeError("mock transport error")):
+            with self.assertRaises(EmailDeliveryError):
+                send_account_email("recipient@example.com", "Test", "Body")
+
+    @override_settings(GOOGLE_OAUTH_CLIENT_ID="test-google-client-id")
+    @patch("google.oauth2.id_token.verify_oauth2_token")
+    def test_google_login_syncs_changed_verified_email_for_existing_identity(self, mock_verify):
+        user = User.objects.create_user(
+            username="google_email_change",
+            email="old-google-email@example.com",
+            password="Password@123",
+        )
+        user.profile.google_sub = "google-sub-email-change"
+        user.profile.email_verified = True
+        user.profile.save()
+        mock_verify.return_value = {
+            "iss": "https://accounts.google.com",
+            "sub": "google-sub-email-change",
+            "email": "new-google-email@example.com",
+            "email_verified": True,
+        }
+
+        response = self.client.post("/api/accounts/google-login/", {"id_token": "valid-token"})
+
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertTrue(response.data["mfa_required"])
+        self.assertNotIn("access", response.data)
+        user.refresh_from_db()
+        self.assertEqual(user.email, "new-google-email@example.com")
+
+    @override_settings(GOOGLE_OAUTH_CLIENT_ID="test-google-client-id")
+    @patch("google.oauth2.id_token.verify_oauth2_token")
+    def test_google_login_does_not_link_inactive_password_account(self, mock_verify):
+        user = User.objects.create_user(
+            username="inactive_manual",
+            email="inactive_manual@example.com",
+            password="Password@123",
+            is_active=False,
+        )
+        mock_verify.return_value = {
+            "iss": "https://accounts.google.com",
+            "sub": "google-sub-inactive-manual",
+            "email": "inactive_manual@example.com",
+            "email_verified": True,
+        }
+
+        response = self.client.post("/api/accounts/google-login/", {"id_token": "valid-token"})
+
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+        user.profile.refresh_from_db()
+        self.assertFalse(user.profile.email_verified)
+        self.assertFalse(user.profile.google_sub)
+
+    @override_settings(GOOGLE_OAUTH_CLIENT_ID="test-google-client-id")
+    @patch("google.oauth2.id_token.verify_oauth2_token")
     def test_google_login_links_existing_verified_password_account_without_duplicate(self, mock_verify):
         """Verified manual account keeps its identity and data when linked to Google, including repeat login."""
         user = User.objects.create_user(
@@ -1172,6 +1318,7 @@ class AccountsAuthAndMFATestCase(TestCase):
             status=Certificate.Status.VERIFIED,
         )
         original_user_id = user.pk
+        original_profile_id = user.profile.pk
         mock_verify.return_value = {
             "iss": "https://accounts.google.com",
             "sub": "google-sub-manual-verified",
@@ -1181,8 +1328,11 @@ class AccountsAuthAndMFATestCase(TestCase):
 
         for _ in range(2):
             response = self.client.post("/api/accounts/google-login/", {"id_token": "verified-token"})
-            self.assertEqual(response.status_code, status.HTTP_200_OK)
-            self.assertEqual(response.data["user"]["id"], original_user_id)
+            self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+            self.assertTrue(response.data["mfa_required"])
+            self.assertTrue(response.data["mfa_setup_required"])
+            self.assertNotIn("access", response.data)
+            self.assertNotIn("refresh", response.data)
 
         user.refresh_from_db()
         user.profile.refresh_from_db()
@@ -1195,8 +1345,9 @@ class AccountsAuthAndMFATestCase(TestCase):
         self.assertEqual(mock_verify.call_args.kwargs["audience"], "test-google-client-id")
 
     @override_settings(GOOGLE_OAUTH_CLIENT_ID="test-google-client-id")
+    @patch("apps.accounts.views.send_email_verification_otp_email", return_value=True)
     @patch("google.oauth2.id_token.verify_oauth2_token")
-    def test_google_verified_email_can_securely_link_unverified_no_certificate_registration(self, mock_verify):
+    def test_google_verified_email_can_securely_link_unverified_no_certificate_registration(self, mock_verify, mock_verification_email):
         registration = self.client.post("/api/accounts/register/", {
             "username": "unverified.manual@example.com",
             "email": "unverified.manual@example.com",
@@ -1205,10 +1356,11 @@ class AccountsAuthAndMFATestCase(TestCase):
             "password": "Password@123",
             "password_confirm": "Password@123",
         }, format="json")
-        self.assertEqual(registration.status_code, status.HTTP_201_CREATED)
-        self.assertFalse(registration.data["verification_email_sent"])
+        self.assertEqual(registration.status_code, status.HTTP_202_ACCEPTED)
+        self.assertNotIn("verification_email_sent", registration.data)
         user = User.objects.get(email="unverified.manual@example.com")
         original_id = user.pk
+        original_profile_id = user.profile.pk
         mock_verify.return_value = {
             "iss": "https://accounts.google.com",
             "sub": "google-sub-unverified-manual",
@@ -1218,8 +1370,11 @@ class AccountsAuthAndMFATestCase(TestCase):
 
         response = self.client.post("/api/accounts/google-login/", {"id_token": "verified-token"})
 
-        self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(response.data["user"]["id"], original_id)
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertTrue(response.data["mfa_required"])
+        self.assertTrue(response.data["mfa_setup_required"])
+        self.assertNotIn("access", response.data)
+        self.assertNotIn("refresh", response.data)
         self.assertEqual(User.objects.filter(email__iexact=user.email).count(), 1)
         user.refresh_from_db()
         user.profile.refresh_from_db()
@@ -1303,6 +1458,11 @@ class AccountsAuthAndMFATestCase(TestCase):
         self.assertTrue(google_user.has_usable_password())
         self.assertTrue(google_user.check_password("NewSecurePassword@123"))
 
+        # A Google-only account still follows the existing email-verification
+        # gate before password login can enroll MFA.
+        google_user.profile.email_verified = True
+        google_user.profile.save(update_fields=["email_verified", "updated_at"])
+
         # Cannot overwrite existing password silently
         res_repeat = self.client.post("/api/accounts/set-password/", {
             "password": "AnotherPassword@123",
@@ -1376,6 +1536,7 @@ class AccountsAuthAndMFATestCase(TestCase):
             recipient_email="unclaimedcheck@example.com",
             issue_date=timezone.now().date(),
             owner=None,
+            status=Certificate.Status.VERIFIED,
         )
 
         data_with_unclaimed = UserProfileSerializer(profile).data

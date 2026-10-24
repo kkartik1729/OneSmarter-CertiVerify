@@ -15,6 +15,14 @@ import { generationService, errMsg } from '../../services';
 import type { GenerationBatch } from '../../types';
 import ErrorMessage from '../../components/ErrorMessage';
 import LoadingSkeleton from '../../components/LoadingSkeleton';
+import { useAccessibleDialog } from '../../lib/dialog';
+import { downloadBlob } from '../../lib/download';
+
+function csvCell(value: unknown): string {
+  let text = String(value ?? '').replace(/"/g, '""');
+  if (/^[\s\u0000-\u001f]*[=+\-@]/.test(text)) text = `'${text}`;
+  return `"${text}"`;
+}
 
 export default function GenerationHistory() {
   const [batches, setBatches] = useState<GenerationBatch[]>([]);
@@ -23,6 +31,7 @@ export default function GenerationHistory() {
 
   // Detail Modal
   const [selectedBatch, setSelectedBatch] = useState<GenerationBatch | null>(null);
+  const batchDialogRef = useAccessibleDialog(Boolean(selectedBatch), () => setSelectedBatch(null));
   const [actionMessage, setActionMessage] = useState<string | null>(null);
 
   const fetchBatches = async () => {
@@ -44,20 +53,10 @@ export default function GenerationHistory() {
 
   const downloadErrorReportCsv = (batch: GenerationBatch) => {
     if (!batch.error_report || batch.error_report.length === 0) return;
-    const header = 'Row Number,Student Name,Student Email,Error Reason\n';
-    const rows = batch.error_report
-      .map(
-        (e) =>
-          `"${e.row_number}","${e.student_name.replace(/"/g, '""')}","${e.student_email.replace(/"/g, '""')}","${e.error.replace(/"/g, '""')}"`
-      )
-      .join('\n');
-    const blob = new Blob([header + rows], { type: 'text/csv;charset=utf-8;' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `batch_${batch.id}_error_report.csv`;
-    a.click();
-    URL.revokeObjectURL(url);
+    const header = ['Row Number', 'Student Name', 'Student Email', 'Error Reason'].map(csvCell).join(',');
+    const rows = batch.error_report.map(e => [e.row_number, e.student_name, e.student_email, e.error].map(csvCell).join(','));
+    const blob = new Blob([[header, ...rows].join('\r\n')], { type: 'text/csv;charset=utf-8;' });
+    downloadBlob(blob, `batch_${batch.id}_error_report.csv`);
   };
 
   return (
@@ -177,7 +176,7 @@ export default function GenerationHistory() {
                       {b.failed}
                     </td>
                     <td className="py-3.5 px-4 text-slate-500 whitespace-nowrap text-[11px]">
-                      {b.emails_sent} sent / {b.emails_failed} pending
+                      {b.emails_sent} sent / {b.emails_failed} failed
                     </td>
                     <td className="py-3.5 px-4 text-slate-500 whitespace-nowrap text-[11px]">
                       {b.created_at ? new Date(b.created_at).toLocaleString() : '—'}
@@ -202,7 +201,7 @@ export default function GenerationHistory() {
 
       {/* Batch Details Inspection Modal */}
       {selectedBatch && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/70 backdrop-blur-sm animate-in fade-in">
+        <div ref={batchDialogRef} role="dialog" aria-modal="true" aria-label={`Batch ${selectedBatch.id} audit report`} tabIndex={-1} className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/70 backdrop-blur-sm animate-in fade-in">
           <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl max-w-3xl w-full p-6 shadow-2xl space-y-5 max-h-[90vh] overflow-y-auto">
             <div className="flex items-center justify-between border-b border-slate-200 dark:border-slate-800 pb-4">
               <div>
@@ -217,6 +216,7 @@ export default function GenerationHistory() {
               <button
                 type="button"
                 onClick={() => setSelectedBatch(null)}
+                aria-label="Close batch audit report"
                 className="text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 font-bold"
               >
                 ✕
@@ -259,7 +259,7 @@ export default function GenerationHistory() {
                   <span>Email Notification Delivery Status</span>
                 </div>
                 <span className="font-mono text-indigo-700 dark:text-indigo-300">
-                  {selectedBatch.emails_sent} sent / {selectedBatch.emails_failed} pending
+                  {selectedBatch.emails_sent} sent / {selectedBatch.emails_failed} failed
                 </span>
               </div>
               <p className="text-slate-500 text-[11px]">

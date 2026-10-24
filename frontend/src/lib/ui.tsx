@@ -21,7 +21,7 @@ export const toast = (m: string, k: 'ok' | 'er' = 'ok') => window.dispatchEvent(
 export function Toaster() {
   const [t, setT] = useState<{ m: string; k: string } | null>(null);
   useEffect(() => { let id = 0; const h = (e: Event) => { setT((e as CustomEvent).detail); clearTimeout(id); id = window.setTimeout(() => setT(null), 3500); }; window.addEventListener('toast', h); return () => window.removeEventListener('toast', h); }, []);
-  return <div id="toast" aria-live="polite">{t && <div className={`tt2 ${t.k}`}>{t.m}</div>}</div>;
+  return <div id="toast" aria-live={t?.k === 'er' ? 'assertive' : 'polite'}>{t && <div className={`tt2 ${t.k}`} role={t.k === 'er' ? 'alert' : 'status'}>{t.m}</div>}</div>;
 }
 export const ask = (msg: string) => new Promise<boolean>(res => {
   const d = document.createElement('dialog'), f = document.createElement('form'), p = document.createElement('p'), r = document.createElement('div');

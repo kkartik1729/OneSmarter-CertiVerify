@@ -8,13 +8,11 @@ export default function LoadingSkeleton({
   className?: string;
 }) {
   return (
-    <div className={`space-y-3 animate-pulse ${className}`} aria-label="Loading content">
+    <div className={`space-y-3 animate-pulse ${className}`} aria-label="Loading content" aria-busy="true">
       {Array.from({ length: lines }).map((_, i) => (
         <div
           key={i}
-          className={`${height} bg-slate-200 dark:bg-slate-800 rounded-lg w-full ${
-            i === lines - 1 ? 'w-4/5' : ''
-          }`}
+          className={`${height} bg-slate-200 dark:bg-slate-800 rounded-lg ${i === lines - 1 ? 'w-4/5' : 'w-full'}`}
         />
       ))}
     </div>

@@ -1,4 +1,4 @@
-import { createContext, useCallback, useContext, useEffect, useRef, useState, type ReactNode } from 'react';
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { useNavigate } from 'react-router-dom';
 import type { User } from '../types';
 import { ApiError, authService, mfaService, errMsg, profileService, type LoginResult } from '../services';
@@ -12,7 +12,7 @@ interface AuthValue {
   /** Set when the session could not be restored because the server was unreachable. */
   bootError: string | null;
   login: (username: string, password: string) => Promise<LoginResult>;
-  googleLogin: (idToken: string) => Promise<User>;
+  googleLogin: (idToken: string) => Promise<LoginResult>;
   verifyMfa: (challenge: string, code: string) => Promise<User>;
   recoverMfa: (challenge: string, code: string) => Promise<{ detail: string; success: boolean }>;
   register: typeof authService.register;
@@ -23,6 +23,7 @@ interface AuthValue {
   logout: () => void;
   updateProfile: (p: { organization: string; phone: string }) => Promise<void>;
   retryRestore: () => void;
+  hasSession: () => boolean;
 }
 
 const Ctx = createContext<AuthValue | null>(null);
@@ -39,10 +40,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUserState] = useState<User | null>(null);
   const [loading, setLoading] = useState(true);
   const [bootError, setBootError] = useState<string | null>(null);
-  const userRef = useRef<User | null>(null);
+  const restoreCleanup = useRef<(() => void) | null>(null);
 
   const setUser = useCallback((u: User | null) => {
-    userRef.current = u;
     setUserState(u);
   }, []);
 
@@ -65,7 +65,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     return () => { live = false; };
   }, [setUser]);
 
-  useEffect(() => restore(), [restore]);
+  useEffect(() => {
+    restoreCleanup.current = restore();
+    return () => restoreCleanup.current?.();
+  }, [restore]);
 
   // The API client fires this when the refresh token no longer works.
   useEffect(() => {
@@ -79,7 +82,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     return () => window.removeEventListener('auth:expired', onExpired);
   }, [navigate, setUser]);
 
-  const value: AuthValue = {
+  const value = useMemo<AuthValue>(() => ({
     user,
     loading,
     bootError,
@@ -89,9 +92,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       return r;
     },
     googleLogin: async (idToken: string) => {
-      const u = await authService.googleLogin(idToken);
-      setUser(u);
-      return u;
+      const result = await authService.googleLogin(idToken);
+      if (result.kind === 'success') setUser(result.user);
+      return result;
     },
     verifyMfa: async (challenge, code) => {
       const u = await authService.verifyMfa(challenge, code);
@@ -105,11 +108,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     register: authService.register,
     verifyEmail: async data => {
       const res = await authService.verifyEmail(data);
-      try {
-        const u = await authService.me();
-        setUser(u);
-      } catch {
-        // ignore if not logged in
+      if (authService.hasSession()) {
+        try {
+          const u = await authService.me();
+          setUser(u);
+        } catch {
+          // Email verification is also available before the first login.
+        }
       }
       return res;
     },
@@ -135,8 +140,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     updateProfile: async p => {
       setUser(await profileService.update(p));
     },
-    retryRestore: () => { restore(); },
-  };
+    retryRestore: () => {
+      restoreCleanup.current?.();
+      restoreCleanup.current = restore();
+    },
+    hasSession: authService.hasSession,
+  }), [user, loading, bootError, navigate, restore, setUser]);
 
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
 }

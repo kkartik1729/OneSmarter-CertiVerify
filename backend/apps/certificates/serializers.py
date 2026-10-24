@@ -27,6 +27,8 @@ def _pdf_download_url(obj: Certificate, request) -> str | None:
 # ---------------------------------------------------------------------------
 
 class CertificateSerializer(serializers.ModelSerializer):
+    # Accept uploads, but never expose a guessable MEDIA_URL for private files.
+    file = serializers.FileField(required=False, allow_null=True, write_only=True)
     owner = serializers.PrimaryKeyRelatedField(
         queryset=User.objects.all(),
         required=False,
@@ -76,7 +78,6 @@ class CertificateSerializer(serializers.ModelSerializer):
             "pdf_download_url",  # download URL when has_pdf is True
             "image_url",
             "download_url",
-            "verification_code",
             "status",
             "rejection_reason",
             "created_at",
@@ -91,19 +92,36 @@ class CertificateSerializer(serializers.ModelSerializer):
             "pdf_download_url",
             "image_url",
             "download_url",
-            "verification_code",
             "status",
             "rejection_reason",
             "created_at",
             "updated_at",
         ]
 
+    def get_fields(self):
+        fields = super().get_fields()
+        request = self.context.get("request")
+        if request and request.method in {"PUT", "PATCH"}:
+            # An issued credential's identity and rendered content are
+            # immutable through the generic detail endpoint. Reassignment is
+            # the only supported edit here; status has its own review route.
+            immutable = {
+                "recipient_email", "title", "issuer", "certificate_number",
+                "recipient_name", "issue_date", "course", "course_name",
+                "template", "completion_description", "start_date", "end_date",
+                "generation_batch", "email_sent", "email_error", "file",
+            }
+            for name in immutable:
+                if name in fields:
+                    fields[name].read_only = True
+        return fields
+
     def to_internal_value(self, data):
         # Allow either owner_id or owner in the incoming data
-        if hasattr(data, "copy"):
-            data = data.copy()
-        else:
-            data = dict(data)
+        # QueryDict.copy() deep-copies uploaded file objects. Large multipart
+        # uploads become TemporaryUploadedFile instances, whose OS handles
+        # cannot be pickled. A shallow mapping copy preserves those objects.
+        data = dict(data)
         if "owner_id" in data and "owner" not in data:
             data["owner"] = data["owner_id"]
         return super().to_internal_value(data)
@@ -128,6 +146,8 @@ class CertificateSerializer(serializers.ModelSerializer):
 
     def get_image_url(self, obj: Certificate) -> str | None:
         if not obj.file:
+            return None
+        if obj.file.name.lower().endswith(".pdf"):
             return None
         request = self.context.get("request")
         path = f"/api/certificates/{obj.pk}/image/"
@@ -186,6 +206,20 @@ class CertificateSerializer(serializers.ModelSerializer):
         return value
 
     def validate(self, attrs):
+        request = self.context.get("request")
+        if request and request.method in {"PUT", "PATCH"}:
+            immutable = {
+                "recipient_email", "title", "issuer", "certificate_number",
+                "recipient_name", "issue_date", "course", "course_name",
+                "template", "completion_description", "start_date", "end_date",
+                "generation_batch", "email_sent", "email_error", "file",
+            }
+            attempted = immutable.intersection(getattr(self, "initial_data", {}))
+            if attempted:
+                raise serializers.ValidationError({
+                    "detail": "Issued certificate content is immutable. Create a reissue to change it."
+                })
+
         # 1. Date validation: end_date >= start_date
         start_date = attrs.get("start_date") or (self.instance.start_date if self.instance else None)
         end_date = attrs.get("end_date") or (self.instance.end_date if self.instance else None)
@@ -230,68 +264,6 @@ class CertificateSerializer(serializers.ModelSerializer):
                 if not attrs.get("recipient_email") and user.email:
                     attrs["recipient_email"] = user.email.lower()
         return attrs
-
-
-# ---------------------------------------------------------------------------
-# Review serializer (unchanged)
-# ---------------------------------------------------------------------------
-
-class CertificateReviewSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = Certificate
-        fields = ["status", "rejection_reason"]
-
-    def validate(self, attrs):
-        new_status = attrs.get("status")
-
-        if new_status not in (
-            Certificate.Status.VERIFIED,
-            Certificate.Status.REJECTED,
-        ):
-            raise serializers.ValidationError({
-                "status": "Choose VERIFIED or REJECTED."
-            })
-
-        if (
-            new_status == Certificate.Status.REJECTED
-            and not attrs.get("rejection_reason", "").strip()
-        ):
-            raise serializers.ValidationError({
-                "rejection_reason": "A reason is required for rejection."
-            })
-
-        return attrs
-
-
-# ---------------------------------------------------------------------------
-# Public verification serializer (unchanged)
-# ---------------------------------------------------------------------------
-
-class PublicCertificateVerificationSerializer(serializers.ModelSerializer):
-    found = serializers.SerializerMethodField()
-    verification_result = serializers.SerializerMethodField()
-    message = serializers.SerializerMethodField()
-
-    class Meta:
-        model = Certificate
-        fields = [
-            "certificate_number",
-            "found",
-            "verification_result",
-            "message",
-            "title",
-            "issuer",
-            "issue_date",
-        ]
-
-    def get_found(self, obj):
-        return True
-
-    def get_verification_result(self, obj):
-        return "FOUND"
-
-    def get_message(self, obj):
-        return "Certificate found in the database."
 
 
 # ---------------------------------------------------------------------------
@@ -485,8 +457,10 @@ class CertificateTemplateSerializer(serializers.ModelSerializer):
                 # Keep the original uploaded source unchanged; validation and
                 # generation both apply the bounded working-raster policy.
                 pil_img.close()
-                value.seek(0)
-                return value
+                extension = "png" if is_png else "jpg"
+                preserved = ContentFile(content, name=f"{safe_base}.{extension}")
+                preserved._template_format = "PNG" if is_png else "JPEG"
+                return preserved
 
             supported_modes = {"RGB", "RGBA", "P", "PA", "L", "LA", "CMYK", "1"}
             if pil_img.mode not in supported_modes:
@@ -543,6 +517,17 @@ class CertificateTemplateSerializer(serializers.ModelSerializer):
             if isinstance(exc, TemplateImageError):
                 raise serializers.ValidationError(str(exc))
             raise serializers.ValidationError(f"Invalid or unreadable template image: {exc}")
+
+    def validate_original_pdf(self, value):
+        if value is None:
+            return value
+        if value.size > 25 * 1024 * 1024:
+            raise serializers.ValidationError("Original PDF must not exceed 25 MB.")
+        header = value.read(5)
+        value.seek(0)
+        if header != b"%PDF-":
+            raise serializers.ValidationError("Original file must be a valid PDF.")
+        return value
 
 
 # ---------------------------------------------------------------------------

@@ -1,4 +1,3 @@
-import sys
 from django.core.management.base import BaseCommand, CommandError
 from django.contrib.auth import get_user_model
 from apps.certificates.models import Certificate
@@ -51,19 +50,20 @@ class Command(BaseCommand):
             raise CommandError(f"Registered user '{user_ident}' not found in PostgreSQL.")
 
         old_owner = cert.owner
+        old_owner_name = old_owner.username if old_owner else "(unassigned)"
         cert.owner = user
-        cert.save(update_fields=["owner"])
+        cert.save(update_fields=["owner", "updated_at"])
 
         log_action(
             action=AuditLog.Action.OTHER,
             actor=None,
             target_type="Certificate",
             target_id=cert.id,
-            description=f"Admin CLI reassigned certificate owner from {old_owner.username} to {user.username}",
+            description=f"Admin CLI reassigned certificate owner from {old_owner_name} to {user.username}",
             metadata={
                 "certificate_number": cert.certificate_number,
-                "old_owner_id": old_owner.id,
-                "old_owner_username": old_owner.username,
+                "old_owner_id": old_owner.id if old_owner else None,
+                "old_owner_username": old_owner_name,
                 "new_owner_id": user.id,
                 "new_owner_username": user.username,
             },
@@ -72,6 +72,6 @@ class Command(BaseCommand):
         self.stdout.write(
             self.style.SUCCESS(
                 f"Successfully reassigned certificate {cert.certificate_number} (ID: {cert.id}) "
-                f"from '{old_owner.username}' to '{user.username}' (ID: {user.id}, Email: {user.email})."
+                f"from '{old_owner_name}' to '{user.username}' (ID: {user.id})."
             )
         )

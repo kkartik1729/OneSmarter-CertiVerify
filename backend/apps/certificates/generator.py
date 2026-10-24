@@ -24,7 +24,7 @@ import re
 import threading
 from pathlib import Path
 
-from PIL import Image, ImageDraw, ImageFont, ImageOps
+from PIL import Image, ImageColor, ImageDraw, ImageFont, ImageOps
 
 logger = logging.getLogger(__name__)
 
@@ -140,6 +140,8 @@ def _safe_open_raster(path_or_file):
 # ---------------------------------------------------------------------------
 
 _FONT_CACHE: dict[tuple[str, int], ImageFont.FreeTypeFont] = {}
+_FONT_CACHE_LIMIT = 128
+_MAX_TEMPLATE_FONT_SIZE = 2048
 _BUNDLED_FONT_DIR = Path(__file__).resolve().parent / "fonts"
 
 _BOLD_CANDIDATES = [
@@ -161,12 +163,15 @@ _REGULAR_CANDIDATES = [
 
 def _try_load_font(candidates: list[str], size: int):
     """Attempt to load the first available font from *candidates*."""
+    size = max(1, min(int(size), _MAX_TEMPLATE_FONT_SIZE))
     for name in candidates:
         cache_key = (name, size)
         if cache_key in _FONT_CACHE:
             return _FONT_CACHE[cache_key]
         try:
             font = ImageFont.truetype(name, size)
+            if len(_FONT_CACHE) >= _FONT_CACHE_LIMIT:
+                _FONT_CACHE.pop(next(iter(_FONT_CACHE)))
             _FONT_CACHE[cache_key] = font
             return font
         except (OSError, IOError):
@@ -176,6 +181,7 @@ def _try_load_font(candidates: list[str], size: int):
 
 def _get_font(size: int, bold: bool = False, family: str = "Arial"):
     """Load a scalable font at the requested pixel size, preserving size on fallback."""
+    size = max(1, min(int(size), _MAX_TEMPLATE_FONT_SIZE))
     bundled_families = {
         "Caladea": (_BUNDLED_FONT_DIR / "Caladea-Bold.ttf", _BUNDLED_FONT_DIR / "Caladea-Regular.ttf"),
         "Amiri": (_BUNDLED_FONT_DIR / "Amiri-Bold.ttf", _BUNDLED_FONT_DIR / "Amiri-Regular.ttf"),
@@ -234,7 +240,7 @@ def _template_font_size(element: dict, width: int, height: int) -> int:
         size = int(element.get("fontSize", default_size))
     except (TypeError, ValueError, OverflowError):
         size = default_size
-    return size
+    return max(1, min(size, _MAX_TEMPLATE_FONT_SIZE))
 
 
 def _draw_centered(
@@ -285,12 +291,18 @@ def _fmt_date(d) -> str:
     return s
 
 
-def load_template_image(template_path: str) -> Image.Image:
+def load_template_image(template_path) -> Image.Image:
     """Decode a template once so bulk generation can reuse its pristine background."""
-    if str(template_path).lower().endswith(".pdf"):
+    source_name = getattr(template_path, "name", str(template_path))
+    source = template_path
+    if hasattr(template_path, "storage") and hasattr(template_path, "open"):
+        # Storage backends are not required to expose a local filesystem path.
+        with template_path.open("rb") as stored_file:
+            source = stored_file.read()
+    if str(source_name).lower().endswith(".pdf"):
         try:
             import pypdfium2 as pdfium
-            pdf = pdfium.PdfDocument(template_path)
+            pdf = pdfium.PdfDocument(source)
             try:
                 if len(pdf) < 1:
                     raise TemplateImageError("PDF template must contain at least one page.")
@@ -310,9 +322,9 @@ def load_template_image(template_path: str) -> Image.Image:
         except Exception as exc:
             if isinstance(exc, TemplateImageError):
                 raise
-            logger.warning("Could not render PDF template %s: %s", template_path, exc)
+            logger.warning("Could not render PDF template: %s", type(exc).__name__)
             raise TemplateImageError(f"PDF template could not be rendered safely: {exc}") from exc
-    return _safe_open_raster(template_path)
+    return _safe_open_raster(io.BytesIO(source) if isinstance(source, bytes) else source)
 
 
 def _scale_layout_to_working_image(layout: dict, scale: float) -> dict:
@@ -513,6 +525,16 @@ def generate_certificate_image(
     right_x        = layout.get("right_margin", int(w * 0.90))
     sig_top        = layout.get("sig_top", int(h * 0.80))
     bg_color       = layout.get("bg_color", (255, 255, 255))
+    try:
+        if isinstance(bg_color, str):
+            bg_color = ImageColor.getrgb(bg_color)
+        elif isinstance(bg_color, (list, tuple)):
+            bg_color = tuple(int(channel) for channel in bg_color[:3])
+        if len(bg_color) != 3:
+            raise ValueError("background color must have three channels")
+        bg_color = tuple(max(0, min(255, channel)) for channel in bg_color)
+    except (TypeError, ValueError):
+        bg_color = (255, 255, 255)
     max_text_width = max(100, right_x - left_x)
 
     # ------------------------------------------------------------------
@@ -683,7 +705,8 @@ def generate_certificate_image(
     # Student name: start at comfortable size, shrink until fits max_name_width
     configured_name_size = layout.get("name_font_size")
     name_font_size = int(configured_name_size) if configured_name_size else max(int(base * 0.052), 26)
-    min_name_font_size = layout.get("min_name_font_size") or max(int(base * 0.020), 14)
+    name_font_size = max(1, min(name_font_size, _MAX_TEMPLATE_FONT_SIZE))
+    min_name_font_size = max(1, min(layout.get("min_name_font_size") or max(int(base * 0.020), 14), _MAX_TEMPLATE_FONT_SIZE))
 
     while name_font_size > min_name_font_size:
         nf = _get_font(name_font_size, bold=True)
@@ -692,10 +715,10 @@ def generate_certificate_image(
         name_font_size -= 1
     name_font = _get_font(name_font_size, bold=True)
 
-    para_size = layout.get("para_font_size") or max(int(base * 0.021), 16)
+    para_size = max(1, min(layout.get("para_font_size") or max(int(base * 0.021), 16), _MAX_TEMPLATE_FONT_SIZE))
     para_font = _get_font(para_size, bold=False)
 
-    detail_size = layout.get("detail_font_size") or max(int(base * 0.017), 13)
+    detail_size = max(1, min(layout.get("detail_font_size") or max(int(base * 0.017), 13), _MAX_TEMPLATE_FONT_SIZE))
     detail_font = _get_font(detail_size, bold=False)
 
     # ------------------------------------------------------------------
@@ -814,7 +837,7 @@ def generate_certificate_image(
     pdf_resolution = float(img.info.get("_certify_pdf_resolution", 150.0))
     if fmt == "PNG":
         # Preserve full alpha transparency and resolution
-        img.save(buffer, format="PNG", optimize=True, dpi=(pdf_resolution, pdf_resolution))
+        img.save(buffer, format="PNG", compress_level=6, dpi=(pdf_resolution, pdf_resolution))
     elif fmt in ("JPEG", "JPG"):
         output_img = Image.new("RGB", img.size, (255, 255, 255))
         if img.mode == "RGBA":
@@ -836,14 +859,13 @@ def generate_certificate_image(
         output_img.save(buffer, format="PDF", resolution=pdf_resolution)
         output_img.close()
     else:
-        img.save(buffer, format="PNG", optimize=True)
+        img.save(buffer, format="PNG", compress_level=6)
 
     result_bytes = buffer.getvalue()
     sha256 = hashlib.sha256(result_bytes).hexdigest()
 
     logger.info(
-        "Generated certificate for %s — %s (%d bytes, fmt=%s, sha256=%.12s)",
-        student_name,
+        "Generated certificate %s (%d bytes, fmt=%s, sha256=%.12s)",
         certificate_number,
         len(result_bytes),
         fmt,
@@ -852,28 +874,6 @@ def generate_certificate_image(
 
     img.close()
     return result_bytes, sha256
-
-
-def convert_certificate_image_to_formats(png_bytes: bytes) -> dict[str, bytes]:
-    """
-    Produce PNG, JPEG, and PDF bytes from the same generated certificate raster.
-    Ensures 100% visual identity across all output formats.
-    """
-    with Image.open(io.BytesIO(png_bytes)) as source:
-        img = source.convert("RGB")
-    # JPEG
-    jpg_buf = io.BytesIO()
-    img.save(jpg_buf, format="JPEG", quality=95)
-
-    # PDF
-    pdf_bytes = certificate_image_to_pdf(png_bytes)
-    img.close()
-
-    return {
-        "png": png_bytes,
-        "jpeg": jpg_buf.getvalue(),
-        "pdf": pdf_bytes,
-    }
 
 
 def certificate_image_to_pdf(png_bytes: bytes) -> bytes:
@@ -887,24 +887,4 @@ def certificate_image_to_pdf(png_bytes: bytes) -> bytes:
         return pdf_buffer.getvalue()
     finally:
         image.close()
-
-
-
-# ---------------------------------------------------------------------------
-# Certificate number generator
-# ---------------------------------------------------------------------------
-
-def generate_certificate_number(prefix: str = "OSCV") -> str:
-    """
-    Generate a unique certificate number.
-
-    Format: OSCV-YYYY-XXXXXXXX  (X = random upper-case hex)
-    """
-    import secrets
-    from django.utils import timezone
-
-    now  = timezone.now()
-    year = now.strftime("%Y")
-    rand = secrets.token_hex(4).upper()
-    return f"{prefix}-{year}-{rand}"
 

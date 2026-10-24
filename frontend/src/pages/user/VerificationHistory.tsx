@@ -91,7 +91,7 @@ export default function VerificationHistory() {
               </thead>
               <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
                 {filtered.map(item => {
-                  const isFound = item.result === 'FOUND' || item.result === 'VERIFIED';
+                  const isFound = item.result === 'VERIFIED';
                   return (
                     <tr
                       key={item.id}

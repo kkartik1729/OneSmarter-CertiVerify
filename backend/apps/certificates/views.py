@@ -1,24 +1,29 @@
 import base64
 import csv
 import hashlib
+from itertools import chain
 import io
+import json
 import logging
+import os
 import re
+import tempfile
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from PIL import Image
 from django.contrib.auth import get_user_model
+from django.core.exceptions import ValidationError as DjangoValidationError
 from django.core.files.base import ContentFile
-from django.db import models, transaction
+from django.core.validators import validate_email
+from django.db import IntegrityError, models, transaction
 from django.db.models import Exists, OuterRef, Q
-from django.db.models.functions import Lower, Trim
-from django.http import FileResponse, HttpResponse
+from django.http import HttpResponse
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
 
 from rest_framework import generics, status
-from rest_framework.exceptions import APIException
+from rest_framework.exceptions import APIException, ValidationError
 from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
@@ -26,18 +31,25 @@ from rest_framework.views import APIView
 
 from apps.audit.models import AuditLog
 from apps.audit.services import log_action
+from apps.accounts.authentication import SessionInvalidatingJWTAuthentication
+from apps.accounts.throttles import PublicVerificationIPThrottle
 from apps.notifications.models import Notification
 from apps.verification.authentication import OptionalJWTAuthentication
 from apps.verification.models import VerificationAttempt
+from apps.verification.services import (
+    certificate_artifacts_are_intact,
+    certificate_verification_state,
+    record_verification_attempt,
+)
 
-from .emails import send_certificate_issued_email
+from .emails import resolve_certificate_email_recipient, send_certificate_issued_email
 from .generator import (
     TemplateImageError,
     certificate_image_to_pdf,
     generate_certificate_image,
     load_template_image,
 )
-from .models import Certificate, CertificatePDF, CertificateTemplate, Course, GenerationBatch
+from .models import MAX_PDF_BYTES, Certificate, CertificatePDF, CertificateTemplate, Course, GenerationBatch
 from .permissions import (
     IsCertiVerifyAdmin,
     IsOwnerOrCertiVerifyAdmin,
@@ -60,9 +72,21 @@ def _find_registered_user_by_email(email):
     normalized_email = (email or "").strip().lower()
     if not normalized_email:
         return None
-    return User.objects.annotate(
-        _normalized_email=Lower(Trim("email")),
-    ).filter(_normalized_email=normalized_email).first()
+    return User.objects.filter(email__iexact=normalized_email).first()
+
+
+def _request_json_object(request, key):
+    value = request.data.get(key, {})
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except json.JSONDecodeError as exc:
+            raise ValidationError({key: "Provide a valid JSON object."}) from exc
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise ValidationError({key: "Provide a JSON object."})
+    return value
 
 
 def _missing_template_fields(template, values, custom_values=None):
@@ -117,13 +141,17 @@ def _send_and_record_certificate_email(certificate):
 
 class CertificateListCreateView(generics.ListCreateAPIView):
     """
-    Authenticated users can create certificates and view their own records.
-    Administrators can view all certificate records.
+    Administrators create certificates; authenticated users view their own records.
     """
 
     serializer_class = CertificateSerializer
     permission_classes = [IsAuthenticated]
     parser_classes = [MultiPartParser, FormParser, JSONParser]
+
+    def get_permissions(self):
+        if self.request.method == "POST":
+            return [IsAuthenticated(), IsCertiVerifyAdmin()]
+        return [IsAuthenticated()]
 
     def get_queryset(self):
         pdf_exists = CertificatePDF.objects.filter(certificate_id=OuterRef("pk"))
@@ -132,15 +160,6 @@ class CertificateListCreateView(generics.ListCreateAPIView):
         )
         if is_certiverify_admin(self.request.user):
             return qs
-
-        user = self.request.user
-        if user and user.is_authenticated:
-            profile = getattr(user, "profile", None)
-            if profile and getattr(profile, "email_verified", False):
-                from apps.certificates.services import claim_unclaimed_certificates_for_user
-                claim_unclaimed_certificates_for_user(user)
-
-        # Re-evaluate queryset AFTER claiming so newly-claimed certs appear immediately
         return qs.filter(owner=self.request.user)
 
     def get_serializer_context(self):
@@ -151,11 +170,18 @@ class CertificateListCreateView(generics.ListCreateAPIView):
     def perform_create(self, serializer):
         uploaded_file = serializer.validated_data.get("file")
         file_hash = ""
+        uploaded_pdf_bytes = None
 
         if uploaded_file:
             digest = hashlib.sha256()
-            for chunk in uploaded_file.chunks():
+            chunks = iter(uploaded_file.chunks())
+            first_chunk = next(chunks, b"")
+            if first_chunk.startswith(b"%PDF"):
+                uploaded_pdf_bytes = bytearray()
+            for chunk in chain((first_chunk,), chunks):
                 digest.update(chunk)
+                if uploaded_pdf_bytes is not None:
+                    uploaded_pdf_bytes.extend(chunk)
             file_hash = digest.hexdigest()
             uploaded_file.seek(0)
 
@@ -177,17 +203,13 @@ class CertificateListCreateView(generics.ListCreateAPIView):
             )
 
             # If uploaded file is a PDF, also store directly in PostgreSQL via CertificatePDF
-            if uploaded_file:
+            if uploaded_file and uploaded_pdf_bytes is not None:
                 try:
-                    uploaded_file.seek(0)
-                    raw_bytes = uploaded_file.read()
-                    uploaded_file.seek(0)
-                    if raw_bytes[:4] == b"%PDF":
-                        CertificatePDF.store(
-                            certificate=certificate,
-                            raw_bytes=raw_bytes,
-                            filename=uploaded_file.name,
-                        )
+                    CertificatePDF.store(
+                        certificate=certificate,
+                        raw_bytes=bytes(uploaded_pdf_bytes),
+                        filename=uploaded_file.name,
+                    )
                 except Exception as exc:
                     logger.warning("Could not auto-store PDF in CertificatePDF: %s", exc)
 
@@ -243,48 +265,100 @@ class CertificateDetailView(generics.RetrieveUpdateAPIView):
         new_owner = certificate.owner
 
         if old_owner != new_owner:
+            old_owner_name = old_owner.username if old_owner else "(unassigned)"
+            new_owner_name = new_owner.username if new_owner else "(unassigned)"
             log_action(
                 action=AuditLog.Action.OTHER,
                 actor=self.request.user,
                 target_type="Certificate",
                 target_id=certificate.id,
-                description=f"Certificate owner reassigned from {old_owner.username} to {new_owner.username}",
+                description=f"Certificate owner reassigned from {old_owner_name} to {new_owner_name}",
                 metadata={
                     "certificate_number": certificate.certificate_number,
-                    "old_owner_id": old_owner.id,
-                    "old_owner_username": old_owner.username,
-                    "new_owner_id": new_owner.id,
-                    "new_owner_username": new_owner.username,
+                    "old_owner_id": old_owner.id if old_owner else None,
+                    "old_owner_username": old_owner_name,
+                    "new_owner_id": new_owner.id if new_owner else None,
+                    "new_owner_username": new_owner_name,
                 },
                 ip_address=self.request.META.get("REMOTE_ADDR"),
             )
 
 
 # ---------------------------------------------------------------------------
-# Certificate review (disabled — verification is by DB existence)
+# Certificate review
 # ---------------------------------------------------------------------------
 
 class CertificateReviewView(APIView):
     """
-    Manual certificate approval/rejection is disabled.
-    Verification is determined by database existence.
-    Kept to avoid breaking existing URL imports.
+    Administrator-controlled approval and rejection for certificate records.
     """
 
     permission_classes = [IsAuthenticated, IsCertiVerifyAdmin]
 
     def patch(self, request, pk):
-        get_object_or_404(Certificate, pk=pk)
-        return Response(
-            {
-                "detail": (
-                    "Manual status changes are disabled. "
-                    "Verification is determined by whether the "
-                    "certificate exists in the database."
+        new_status = str(request.data.get("status", "")).strip().upper()
+        if new_status not in (Certificate.Status.VERIFIED, Certificate.Status.REJECTED, Certificate.Status.REVOKED):
+            return Response({"status": ["Choose VERIFIED, REJECTED, or REVOKED."]}, status=status.HTTP_400_BAD_REQUEST)
+        with transaction.atomic():
+            certificate = get_object_or_404(Certificate.objects.select_for_update(), pk=pk)
+            if certificate.status == Certificate.Status.REVOKED and new_status != Certificate.Status.REVOKED:
+                return Response({"detail": "A revoked certificate cannot be reactivated."}, status=status.HTTP_409_CONFLICT)
+            if certificate.status == new_status:
+                return Response(CertificateSerializer(certificate, context={"request": request}).data)
+            if (
+                new_status == Certificate.Status.VERIFIED
+                and certificate.course_id
+                and certificate.recipient_email
+                and Certificate.objects.filter(
+                    course_id=certificate.course_id,
+                    recipient_email__iexact=certificate.recipient_email.strip(),
+                    status=Certificate.Status.VERIFIED,
+                ).exclude(pk=certificate.pk).exists()
+            ):
+                return Response(
+                    {"detail": "An active verified certificate already exists for this recipient and course."},
+                    status=status.HTTP_409_CONFLICT,
                 )
-            },
-            status=status.HTTP_405_METHOD_NOT_ALLOWED,
+            certificate.status = new_status
+            certificate.rejection_reason = (
+                str(request.data.get("rejection_reason", "")).strip()
+                if new_status in (Certificate.Status.REJECTED, Certificate.Status.REVOKED) else ""
+            )
+            if new_status in (Certificate.Status.REJECTED, Certificate.Status.REVOKED) and not certificate.rejection_reason:
+                return Response({"rejection_reason": ["A reason is required for this status change."]}, status=status.HTTP_400_BAD_REQUEST)
+            certificate.save(update_fields=["status", "rejection_reason", "updated_at"])
+            if certificate.owner_id:
+                notification_type = (
+                    Notification.NotificationType.CERTIFICATE_APPROVED
+                    if new_status == Certificate.Status.VERIFIED
+                    else Notification.NotificationType.CERTIFICATE_REJECTED
+                )
+                Notification.objects.create(
+                    recipient=certificate.owner,
+                    notification_type=notification_type,
+                    title=f"Certificate {new_status.title()}",
+                    message=(
+                        f"Your certificate {certificate.certificate_number} is now {new_status.lower()}."
+                        + (f" Reason: {certificate.rejection_reason}" if certificate.rejection_reason else "")
+                    ),
+                    certificate=certificate,
+                )
+        log_action(
+            action=(
+                AuditLog.Action.CERTIFICATE_APPROVED
+                if new_status == Certificate.Status.VERIFIED
+                else AuditLog.Action.CERTIFICATE_REJECTED
+                if new_status == Certificate.Status.REJECTED
+                else AuditLog.Action.OTHER
+            ),
+            actor=request.user,
+            target_type="Certificate",
+            target_id=certificate.pk,
+            description=f"Certificate {new_status.lower()} by administrator",
+            metadata={"certificate_number": certificate.certificate_number, "status": new_status},
+            ip_address=request.META.get("REMOTE_ADDR"),
         )
+        return Response(CertificateSerializer(certificate, context={"request": request}).data)
 
 
 # ---------------------------------------------------------------------------
@@ -301,6 +375,7 @@ class CertificateVerifyView(APIView):
 
     permission_classes = [AllowAny]
     authentication_classes = [OptionalJWTAuthentication]
+    throttle_classes = [PublicVerificationIPThrottle]
 
     def get(self, request, certificate_number):
         normalized_number = (certificate_number or "").strip().upper()
@@ -323,17 +398,8 @@ class CertificateVerifyView(APIView):
         ).first()
 
         with transaction.atomic():
-            VerificationAttempt.objects.create(
-                certificate=certificate,
-                certificate_number=normalized_number,
-                result=(
-                    VerificationAttempt.Result.FOUND
-                    if certificate is not None
-                    else VerificationAttempt.Result.NOT_FOUND
-                ),
-                requested_by=(
-                    request.user if request.user.is_authenticated else None
-                ),
+            _, result, message, is_verified = record_verification_attempt(
+                certificate, normalized_number, request
             )
 
         if certificate is None:
@@ -350,24 +416,11 @@ class CertificateVerifyView(APIView):
             return response
 
         certificate_status = certificate.status
-        is_verified = certificate_status == Certificate.Status.VERIFIED
-        if certificate_status == Certificate.Status.PENDING:
-            verification_result = "PENDING"
-            message = "This certificate is in the registry but is pending verification."
-        elif certificate_status == Certificate.Status.REJECTED:
-            verification_result = "REJECTED"
-            message = "This certificate was reviewed and rejected."
-        elif is_verified:
-            verification_result = "VERIFIED"
-            message = "This certificate has been verified against the OneSmarter-CertiVerify registry."
-        else:
-            verification_result = "NOT_VERIFIED"
-            message = "This certificate is not currently verified."
 
         data = {
             "certificate_number": certificate.certificate_number,
             "found": True,
-            "verification_result": verification_result,
+            "verification_result": result,
             "status": certificate_status,
             "message": message,
         }
@@ -382,8 +435,10 @@ class CertificateVerifyView(APIView):
                 "start_date": certificate.start_date,
                 "end_date": certificate.end_date,
                 "preview_url": (
-                    f"/certificates/verify/{certificate.certificate_number}/preview/"
-                    if _has_public_preview_source(certificate)
+                    request.build_absolute_uri(
+                        f"/api/certificates/verify/{certificate.certificate_number}/preview/"
+                    )
+                    if request and _has_public_preview_source(certificate)
                     else None
                 ),
             })
@@ -410,12 +465,17 @@ class PublicCertificatePreviewView(APIView):
     """Serve only the saved preview for a verified certificate, keyed by its public number."""
     permission_classes = [AllowAny]
     authentication_classes = [OptionalJWTAuthentication]
+    throttle_classes = [PublicVerificationIPThrottle]
 
     def get(self, request, certificate_number):
         certificate = get_object_or_404(
             Certificate, certificate_number=(certificate_number or "").strip().upper()
         )
-        if certificate.status != Certificate.Status.VERIFIED or not _has_public_preview_source(certificate):
+        if (
+            certificate.status != Certificate.Status.VERIFIED
+            or not certificate_artifacts_are_intact(certificate)
+            or not _has_public_preview_source(certificate)
+        ):
             return Response({"detail": "No public certificate preview is available."}, status=status.HTTP_404_NOT_FOUND)
         try:
             sources = []
@@ -494,6 +554,12 @@ class CertificatePDFUploadView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
+        if upload.size > MAX_PDF_BYTES:
+            return Response(
+                {"detail": f"PDF must not exceed {MAX_PDF_BYTES // (1024 * 1024)} MB."},
+                status=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            )
+
         raw_bytes = upload.read()
 
         try:
@@ -504,7 +570,7 @@ class CertificatePDFUploadView(APIView):
             )
         except ValueError as exc:
             return Response(
-                {"detail": str(exc)},
+                {"detail": "The uploaded PDF could not be accepted."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
         except Exception:
@@ -559,7 +625,7 @@ class CertificatePDFDownloadView(APIView):
     """
 
     permission_classes = [IsAuthenticated]
-    authentication_classes = [OptionalJWTAuthentication]
+    authentication_classes = [SessionInvalidatingJWTAuthentication]
 
     def get(self, request, pk):
         certificate = get_object_or_404(
@@ -619,7 +685,7 @@ class CertificatePDFDownloadView(APIView):
         response["Content-Disposition"] = (
             f'attachment; filename="{download_filename}"'
         )
-        response["Content-Length"] = pdf_doc.file_size
+        response["Content-Length"] = str(len(pdf_doc.content))
         response["X-Content-Type-Options"] = "nosniff"
         return response
 
@@ -633,9 +699,9 @@ class CourseListCreateView(generics.ListCreateAPIView):
     GET  /api/certificates/courses/ — list courses
     POST /api/certificates/courses/ — create course (admin only)
     """
-    queryset = Course.objects.all()
+    queryset = Course.objects.select_related("created_by").all()
     serializer_class = CourseSerializer
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, IsCertiVerifyAdmin]
 
     def perform_create(self, serializer):
         from rest_framework.exceptions import PermissionDenied
@@ -650,6 +716,12 @@ class CourseHasProtectedRecords(APIException):
         "This course is linked to certificates or generation history and cannot be deleted. "
         "Those records have been preserved."
     )
+
+
+class TemplateHasProtectedRecords(APIException):
+    status_code = status.HTTP_409_CONFLICT
+    default_detail = "This template is already used by certificate records or generation history and must be preserved."
+    default_code = "template_has_protected_records"
     default_code = "course_has_protected_records"
 
 
@@ -659,7 +731,7 @@ class CourseDetailView(generics.RetrieveUpdateDestroyAPIView):
     """
     queryset = Course.objects.all()
     serializer_class = CourseSerializer
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, IsCertiVerifyAdmin]
 
     def perform_update(self, serializer):
         from rest_framework.exceptions import PermissionDenied
@@ -688,7 +760,7 @@ class CertificateTemplateListCreateView(generics.ListCreateAPIView):
     GET  /api/certificates/templates/ — list templates (admin only)
     POST /api/certificates/templates/ — upload template (admin only)
     """
-    queryset = CertificateTemplate.objects.all()
+    queryset = CertificateTemplate.objects.select_related("uploaded_by").all()
     serializer_class = CertificateTemplateSerializer
     permission_classes = [IsAuthenticated, IsCertiVerifyAdmin]
     parser_classes = [MultiPartParser, FormParser, JSONParser]
@@ -712,13 +784,13 @@ class CertificateTemplateDetailView(generics.RetrieveUpdateDestroyAPIView):
     """
     GET/PUT/PATCH/DELETE /api/certificates/templates/<pk>/
     """
-    queryset = CertificateTemplate.objects.all()
+    queryset = CertificateTemplate.objects.select_related("uploaded_by").all()
     serializer_class = CertificateTemplateSerializer
     permission_classes = [IsAuthenticated, IsCertiVerifyAdmin]
     parser_classes = [MultiPartParser, FormParser, JSONParser]
 
     def perform_destroy(self, instance):
-        from rest_framework.exceptions import PermissionDenied, ValidationError
+        from rest_framework.exceptions import PermissionDenied
 
         if not is_certiverify_admin(self.request.user):
             raise PermissionDenied("Only administrators can delete templates.")
@@ -726,25 +798,20 @@ class CertificateTemplateDetailView(generics.RetrieveUpdateDestroyAPIView):
         batch_count = instance.generation_batches.count()
         cert_count = instance.certificates.count()
         if batch_count > 0 or cert_count > 0:
-            raise ValidationError({
-                "detail": (
-                    f"Cannot delete template '{instance.name}' because it has already been "
-                    f"used for {batch_count} certificate generation batch(es) and {cert_count} certificate(s). "
-                    f"Templates in use must be preserved to reproduce previously issued certificates."
-                )
-            })
+            raise TemplateHasProtectedRecords(
+                f"Cannot delete template '{instance.name}' because it has already been used for "
+                f"{batch_count} generation batch(es) and {cert_count} certificate(s)."
+            )
 
         template_id = instance.id
         template_name = instance.name
         image_field = instance.image
+        original_pdf_field = instance.original_pdf
 
         instance.delete()
 
-        if image_field and image_field.storage.exists(image_field.name):
-            try:
-                image_field.storage.delete(image_field.name)
-            except Exception as e:
-                logger.warning("Failed to delete template file %s: %s", image_field.name, e)
+        self._delete_unreferenced_template_file(image_field, "image")
+        self._delete_unreferenced_template_file(original_pdf_field, "original_pdf")
 
         log_action(
             action=AuditLog.Action.OTHER,
@@ -766,19 +833,23 @@ class CertificateTemplateDetailView(generics.RetrieveUpdateDestroyAPIView):
         cert_count = instance.certificates.count()
         fmt = getattr(serializer.validated_data.get("image"), "_template_format", None)
 
-        create_new_version = (
-            self.request.data.get("new_version") in ("true", "1", True)
-            or (new_image and (batch_count > 0 or cert_count > 0))
+        has_history = batch_count > 0 or cert_count > 0
+        explicitly_new_version = self.request.data.get("new_version") in ("true", "1", True)
+        create_new_version = bool(
+            explicitly_new_version
+            or (has_history and serializer.validated_data)
         )
-        if create_new_version and new_image:
+        if create_new_version:
             # Create a new version of the template to preserve historical reproducibility
             instance.pk = None
             instance.version += 1
-            if "(v" in instance.name:
-                base_name = instance.name.split("(v")[0].strip()
-                instance.name = f"{base_name} (v{instance.version})"
-            else:
-                instance.name = f"{instance.name} (v{instance.version})"
+            base_name = instance.name.split("(v")[0].strip() if "(v" in instance.name else instance.name
+            suffix = f" (v{instance.version})"
+            instance.name = f"{base_name[:200 - len(suffix)]}{suffix}"
+            if new_image and "original_pdf" not in serializer.validated_data:
+                # A replacement raster must not inherit a PDF source belonging
+                # to the previous version. The old row keeps its source file.
+                instance.original_pdf = None
             if fmt:
                 instance.file_format = fmt
             template = serializer.save(uploaded_by=self.request.user)
@@ -792,10 +863,29 @@ class CertificateTemplateDetailView(generics.RetrieveUpdateDestroyAPIView):
                 ip_address=self.request.META.get("REMOTE_ADDR"),
             )
         else:
+            old_image = instance.image
+            old_original_pdf = instance.original_pdf
             if fmt:
-                serializer.save(file_format=fmt)
+                updated = serializer.save(file_format=fmt)
             else:
-                serializer.save()
+                updated = serializer.save()
+            if new_image and old_image and old_image.name != updated.image.name:
+                self._delete_unreferenced_template_file(old_image, "image")
+            new_original_pdf = serializer.validated_data.get("original_pdf")
+            if new_original_pdf and old_original_pdf and old_original_pdf.name != updated.original_pdf.name:
+                self._delete_unreferenced_template_file(old_original_pdf, "original_pdf")
+
+    @staticmethod
+    def _delete_unreferenced_template_file(field, model_field):
+        if not field or not field.name:
+            return
+        if CertificateTemplate.objects.filter(**{model_field: field.name}).exists():
+            return
+        try:
+            if field.storage.exists(field.name):
+                field.storage.delete(field.name)
+        except Exception as exc:
+            logger.warning("Could not delete unreferenced template file (%s)", type(exc).__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -899,15 +989,22 @@ class ValidateCSVView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
+        max_csv_bytes = 5 * 1024 * 1024
+        if upload.size > max_csv_bytes:
+            return Response(
+                {"detail": "CSV upload must not exceed 5 MB."},
+                status=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            )
+
         course_id = request.data.get("course_id")
         selected_course = None
         if course_id:
             try:
                 selected_course = Course.objects.get(pk=course_id)
-            except (Course.DoesNotExist, ValueError):
+            except (Course.DoesNotExist, ValueError, TypeError):
                 return Response(
                     {"detail": f"Course ID {course_id} does not exist."},
-                    status=status.HTTP_400_BAD_REQUEST,
+                    status=status.HTTP_404_NOT_FOUND,
                 )
 
         # Batch-level defaults passed from the UI (editable before generation)
@@ -925,7 +1022,7 @@ class ValidateCSVView(APIView):
             if not batch_end_date and selected_course.end_date:
                 batch_end_date = selected_course.end_date.strftime("%d/%m/%Y")
             if not batch_issue_date:
-                batch_issue_date = timezone.now().date().strftime("%d/%m/%Y")
+                batch_issue_date = timezone.localdate().strftime("%d/%m/%Y")
 
         try:
             content = upload.read().decode("utf-8-sig")
@@ -979,12 +1076,20 @@ class ValidateCSVView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
+        try:
+            csv_rows = list(reader)
+        except csv.Error:
+            return Response(
+                {"detail": "The CSV contains malformed rows. Please correct the file and try again."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
         rows_result = []
         seen_emails_in_csv = set()
         valid_count = 0
         invalid_count = 0
 
-        for row_idx, raw_row in enumerate(reader, start=2):
+        for row_idx, raw_row in enumerate(csv_rows, start=2):
             # Read required fields
             student_name_raw = (raw_row.get(field_map.get("student_name", ""), "") or "").strip()
             student_email_raw = (raw_row.get(field_map.get("student_email", ""), "") or "").strip()
@@ -1013,7 +1118,6 @@ class ValidateCSVView(APIView):
             # 2. Student email & registered user lookup
             email = student_email_raw.lower()
             user_id = None
-            has_account = False
             if not email:
                 errors.append("Student email is required.")
             elif "@" not in email or "." not in email.split("@")[-1]:
@@ -1022,7 +1126,6 @@ class ValidateCSVView(APIView):
                 user = _find_registered_user_by_email(email)
                 if user:
                     user_id = user.id
-                    has_account = True
                     if not user.is_active:
                         errors.append(f"Student account '{student_email_raw}' is inactive.")
 
@@ -1078,8 +1181,6 @@ class ValidateCSVView(APIView):
                 "start_date": disp_start,
                 "end_date": disp_end,
                 "issue_date": disp_issue,
-                "user_id": user_id,
-                "has_account": has_account,
                 "is_valid": is_valid,
                 "errors": errors,
             })
@@ -1139,12 +1240,12 @@ class BulkGenerateView(APIView):
 
         try:
             course = Course.objects.get(pk=course_id)
-        except (Course.DoesNotExist, ValueError):
+        except (Course.DoesNotExist, ValueError, TypeError):
             return Response({"detail": f"Course ID {course_id} not found."}, status=status.HTTP_404_NOT_FOUND)
 
         try:
             template = CertificateTemplate.objects.get(pk=template_id)
-        except (CertificateTemplate.DoesNotExist, ValueError):
+        except (CertificateTemplate.DoesNotExist, ValueError, TypeError):
             return Response({"detail": f"Template ID {template_id} not found."}, status=status.HTTP_404_NOT_FOUND)
 
         if not template.image or not template.image.storage.exists(template.image.name):
@@ -1172,16 +1273,15 @@ class BulkGenerateView(APIView):
         batch_description = (request.data.get("completion_description") or "").strip()
 
         layout_settings = dict(template.layout_config or {})
-        shared_field_values = request.data.get("field_values", {})
-        if isinstance(shared_field_values, dict):
-            saved_field_values = dict(layout_settings.get("field_values", {}))
-            saved_field_values.update(shared_field_values)
-            layout_settings["field_values"] = saved_field_values
+        shared_field_values = _request_json_object(request, "field_values")
+        saved_field_values = dict(layout_settings.get("field_values", {}))
+        saved_field_values.update(shared_field_values)
+        layout_settings["field_values"] = saved_field_values
 
         # Decode the batch's template only once; each rendering call draws on its
         # own copy, so recipient text cannot leak into another recipient's image.
         try:
-            template_background = load_template_image(template.image.path)
+            template_background = load_template_image(template.image)
         except Exception as exc:
             logger.exception("Could not load template image for batch %s", batch.id)
             batch.status = GenerationBatch.Status.FAILED
@@ -1190,13 +1290,13 @@ class BulkGenerateView(APIView):
                 "row_number": (row.get("row_number", index + 1) if isinstance(row, dict) else index + 1),
                 "student_name": (row.get("student_name", "") if isinstance(row, dict) else ""),
                 "student_email": (row.get("student_email", "") if isinstance(row, dict) else ""),
-                "error": str(exc) if isinstance(exc, TemplateImageError) else "Template image could not be loaded safely; see the server log for details.",
+                "error": "Template image could not be loaded safely.",
             } for index, row in enumerate(rows)]
             batch.completed_at = timezone.now()
             batch.save(update_fields=["status", "failed", "error_report", "completed_at"])
             response_data = GenerationBatchSerializer(batch).data
             if isinstance(exc, TemplateImageError):
-                response_data["detail"] = str(exc)
+                response_data["detail"] = "Template image could not be loaded safely."
                 return Response(response_data, status=status.HTTP_400_BAD_REQUEST)
             return Response(response_data, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
@@ -1224,8 +1324,29 @@ class BulkGenerateView(APIView):
                 })
                 continue
 
+            try:
+                validate_email(student_email)
+            except DjangoValidationError:
+                failed_count += 1
+                error_report.append({
+                    "row_number": row_num,
+                    "student_name": student_name,
+                    "student_email": student_email,
+                    "error": "Enter a valid student email address.",
+                })
+                continue
+
             # Lookup student (optional for unregistered recipients)
             user = _find_registered_user_by_email(student_email)
+            if user and not user.is_active:
+                failed_count += 1
+                error_report.append({
+                    "row_number": row_num,
+                    "student_name": student_name,
+                    "student_email": student_email,
+                    "error": "Recipient account is inactive.",
+                })
+                continue
 
             # Duplicate check
             dup_qs = Certificate.objects.filter(course_name__iexact=course_name)
@@ -1293,7 +1414,7 @@ class BulkGenerateView(APIView):
                 if missing_fields:
                     raise ValueError("Missing values for configured template field(s): " + ", ".join(missing_fields))
                 png_bytes, sha256_hex = generate_certificate_image(
-                    template_path=template.image.path,
+                    template_path=template.image,
                     template_image=template_background,
                     student_name=student_name,
                     course_name=course_name,
@@ -1359,17 +1480,13 @@ class BulkGenerateView(APIView):
                 successful_count += 1
 
             except Exception as exc:
-                logger.exception("Failed to generate certificate for %s", student_email)
+                logger.exception("Failed to generate certificate in batch %s, row %s", batch.id, row_num)
                 failed_count += 1
                 error_report.append({
                     "row_number": row_num,
                     "student_name": student_name,
                     "student_email": student_email,
-                    "error": (
-                        str(exc)
-                        if isinstance(exc, ValueError)
-                        else "Certificate rendering or storage failed; see the server log for details."
-                    ),
+                    "error": "Certificate rendering or storage failed. Contact an administrator with the batch ID.",
                 })
 
         template_background.close()
@@ -1383,7 +1500,7 @@ class BulkGenerateView(APIView):
         batch.error_report = error_report
         batch.status = (
             GenerationBatch.Status.COMPLETED
-            if successful_count > 0 or len(rows) == 0
+            if successful_count > 0 or skipped_duplicates > 0 or len(rows) == 0
             else GenerationBatch.Status.FAILED
         )
         batch.completed_at = timezone.now()
@@ -1420,7 +1537,12 @@ class BulkGenerateView(APIView):
             logger.exception("Batch %s generated but its audit entry could not be written", batch.id)
             response_data["warning"] = "; ".join(filter(None, [response_data.get("warning"), "Batch generated; the audit entry could not be recorded."]))
 
-        return Response(response_data, status=status.HTTP_201_CREATED)
+        response_status = (
+            status.HTTP_201_CREATED
+            if batch.status == GenerationBatch.Status.COMPLETED
+            else status.HTTP_422_UNPROCESSABLE_ENTITY
+        )
+        return Response(response_data, status=response_status)
 
 
 # ---------------------------------------------------------------------------
@@ -1451,6 +1573,7 @@ class SingleGenerateView(APIView):
 
         # Support selecting existing template OR uploading a new template directly
         template = None
+        pending_template_serializer = None
         if not template_id and template_file:
             tpl_name = (request.data.get("template_name") or template_file.name or "Uploaded Template").strip()
             tpl_desc = (request.data.get("template_description") or request.data.get("completion_description") or "").strip()
@@ -1459,15 +1582,15 @@ class SingleGenerateView(APIView):
                 context={"request": request},
             )
             tpl_serializer.is_valid(raise_exception=True)
-            fmt = getattr(tpl_serializer.validated_data.get("image"), "_template_format", "PNG")
-            template = tpl_serializer.save(uploaded_by=request.user, file_format=fmt, version=1)
-            template_id = template.id
+            pending_template_serializer = tpl_serializer
+            from types import SimpleNamespace
+            template = SimpleNamespace(layout_config={})
         elif not template_id:
             return Response({"detail": "Certificate template or template file is required."}, status=status.HTTP_400_BAD_REQUEST)
         else:
             try:
                 template = CertificateTemplate.objects.get(pk=template_id)
-            except (CertificateTemplate.DoesNotExist, ValueError):
+            except (CertificateTemplate.DoesNotExist, ValueError, TypeError):
                 return Response({"detail": "Selected template not found."}, status=status.HTTP_404_NOT_FOUND)
 
         if not (user_id or student_email):
@@ -1483,7 +1606,7 @@ class SingleGenerateView(APIView):
 
         try:
             course = Course.objects.get(pk=course_id)
-        except (Course.DoesNotExist, ValueError):
+        except (Course.DoesNotExist, ValueError, TypeError):
             return Response({"detail": "Selected course not found."}, status=status.HTTP_404_NOT_FOUND)
 
         # The selected course is authoritative for course dates; issuance defaults
@@ -1492,13 +1615,18 @@ class SingleGenerateView(APIView):
         end_date_str = end_date_str or course.end_date.strftime("%Y-%m-%d")
         issue_date_str = issue_date_str or timezone.localdate().strftime("%Y-%m-%d")
 
-        if not template.image or not template.image.storage.exists(template.image.name):
+        if pending_template_serializer is None and (
+            not template.image or not template.image.storage.exists(template.image.name)
+        ):
             return Response({"detail": "Template image file is missing from storage."}, status=status.HTTP_400_BAD_REQUEST)
 
         # Lookup student user (optional — unregistered recipients supported)
         user = None
         if user_id:
-            user = User.objects.filter(pk=user_id).first()
+            try:
+                user = User.objects.filter(pk=user_id).first()
+            except (ValueError, TypeError):
+                return Response({"detail": "Selected recipient account was not found."}, status=status.HTTP_400_BAD_REQUEST)
             if user is None:
                 return Response({"detail": "Selected recipient account was not found."}, status=status.HTTP_400_BAD_REQUEST)
             matched_email_user = _find_registered_user_by_email(student_email) if student_email else None
@@ -1506,6 +1634,11 @@ class SingleGenerateView(APIView):
                 return Response({"detail": "Recipient email does not match the selected account."}, status=status.HTTP_400_BAD_REQUEST)
         elif student_email:
             user = _find_registered_user_by_email(student_email)
+        if user and not user.is_active:
+            return Response(
+                {"detail": "The selected recipient account is inactive."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
         if user and not student_email:
             student_email = user.email.lower()
 
@@ -1519,14 +1652,15 @@ class SingleGenerateView(APIView):
 
         # Formatting is taken only from the saved administrator-managed template.
         layout_settings = dict(template.layout_config or {})
-        shared_field_values = request.data.get("field_values", {})
-        if isinstance(shared_field_values, dict):
-            saved_field_values = dict(layout_settings.get("field_values", {}))
-            saved_field_values.update(shared_field_values)
-            layout_settings["field_values"] = saved_field_values
+        shared_field_values = _request_json_object(request, "field_values")
+        saved_field_values = dict(layout_settings.get("field_values", {}))
+        saved_field_values.update(shared_field_values)
+        layout_settings["field_values"] = saved_field_values
 
         # Check duplicate & reissue rules
-        dup_qs = Certificate.objects.filter(course_name__iexact=course_name)
+        dup_qs = Certificate.objects.exclude(
+            status__in=[Certificate.Status.REJECTED, Certificate.Status.REVOKED]
+        ).filter(course_name__iexact=course_name)
         if user:
             dup_qs = dup_qs.filter(models.Q(owner=user) | models.Q(recipient_email__iexact=student_email))
         else:
@@ -1538,7 +1672,12 @@ class SingleGenerateView(APIView):
                 "detail": f"A certificate for '{course_name}' has already been issued to this student.",
                 "existing_certificate_number": existing_cert.certificate_number,
                 "can_reissue": True,
-            }, status=status.HTTP_400_BAD_REQUEST)
+            }, status=status.HTTP_409_CONFLICT)
+        if existing_cert and reissue and existing_cert.status != Certificate.Status.VERIFIED:
+            return Response(
+                {"detail": "Only a verified certificate can be reissued."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
         # Parse dates (DD/MM/YYYY or YYYY-MM-DD)
         start_date, s_err = parse_date_flexible(start_date_str, "Start date")
@@ -1572,6 +1711,16 @@ class SingleGenerateView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
+        # Persist direct-upload templates only after the issuance request has
+        # passed recipient, course, duplicate, date, and layout validation.
+        if pending_template_serializer is not None:
+            fmt = getattr(pending_template_serializer.validated_data.get("image"), "_template_format", "PNG")
+            template = pending_template_serializer.save(
+                uploaded_by=request.user,
+                file_format=fmt,
+                version=1,
+            )
+
         # Unique certificate number
         year = issue_date.year
         cert_num = f"OSCV-{year}-{uuid.uuid4().hex[:8].upper()}"
@@ -1580,7 +1729,7 @@ class SingleGenerateView(APIView):
 
         try:
             png_bytes, sha256_hex = generate_certificate_image(
-                template_path=template.image.path,
+                template_path=template.image,
                 student_name=student_name,
                 course_name=course_name,
                 start_date=start_date.strftime("%d/%m/%Y"),
@@ -1593,6 +1742,19 @@ class SingleGenerateView(APIView):
             )
 
             with transaction.atomic():
+                if existing_cert:
+                    # Revoke the old verified credential in the same transaction
+                    # as the replacement, so a failed replacement leaves it valid.
+                    old_cert = Certificate.objects.select_for_update().get(pk=existing_cert.pk)
+                    if old_cert.status != Certificate.Status.VERIFIED:
+                        return Response(
+                            {"detail": "Only a verified certificate can be reissued."},
+                            status=status.HTTP_409_CONFLICT,
+                        )
+                    old_cert.status = Certificate.Status.REVOKED
+                    old_cert.rejection_reason = f"Superseded by reissued certificate {cert_num}."
+                    old_cert.save(update_fields=["status", "rejection_reason", "updated_at"])
+
                 cert = Certificate(
                     owner=user,
                     recipient_email=student_email,
@@ -1666,10 +1828,16 @@ class SingleGenerateView(APIView):
                 response_data["warning"] = audit_warning
             return Response(response_data, status=status.HTTP_201_CREATED)
 
+        except IntegrityError:
+            logger.info("Single certificate issuance rejected by a duplicate-record constraint")
+            return Response(
+                {"detail": "An active certificate already exists for this recipient and course."},
+                status=status.HTTP_409_CONFLICT,
+            )
         except Exception as exc:
             logger.exception("Failed to generate single certificate")
             if isinstance(exc, TemplateImageError):
-                return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+                return Response({"detail": "Template image could not be loaded safely."}, status=status.HTTP_400_BAD_REQUEST)
             return Response({"detail": "Certificate generation failed. Check the server log for diagnostic details."}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
@@ -1711,6 +1879,8 @@ class PreviewCertificateView(APIView):
         issuer_name = issuer_name or "OneSmarter, Inc."
 
         template = None
+        preview_temp_path = None
+        preview_upload_image = None
         if not template_id and template_file:
             tpl_name = (request.data.get("template_name") or template_file.name or "Preview Template").strip()
             tpl_desc = (request.data.get("template_description") or request.data.get("completion_description") or "").strip()
@@ -1719,9 +1889,9 @@ class PreviewCertificateView(APIView):
                 context={"request": request},
             )
             tpl_serializer.is_valid(raise_exception=True)
-            fmt = getattr(tpl_serializer.validated_data.get("image"), "_template_format", "PNG")
-            template = tpl_serializer.save(uploaded_by=request.user, file_format=fmt, version=1)
-            template_id = template.id
+            preview_upload_image = tpl_serializer.validated_data["image"]
+            from types import SimpleNamespace
+            template = SimpleNamespace(image=None, layout_config={})
         elif not template_id:
             return Response({"detail": "template_id or template_file is required."}, status=status.HTTP_400_BAD_REQUEST)
         else:
@@ -1730,17 +1900,20 @@ class PreviewCertificateView(APIView):
             except (CertificateTemplate.DoesNotExist, ValueError):
                 return Response({"detail": "Template not found."}, status=status.HTTP_404_NOT_FOUND)
 
-        if not template.image or not template.image.storage.exists(template.image.name):
+        if preview_upload_image is None and (
+            not template.image
+            or not template.image.name
+            or not template.image.storage.exists(template.image.name)
+        ):
             return Response({"detail": "Template image file missing from storage."}, status=status.HTTP_400_BAD_REQUEST)
 
         completion_description = (request.data.get("completion_description") or "").strip()
 
         layout_settings = dict(template.layout_config or {})
-        shared_field_values = request.data.get("field_values", {})
-        if isinstance(shared_field_values, dict):
-            saved_field_values = dict(layout_settings.get("field_values", {}))
-            saved_field_values.update(shared_field_values)
-            layout_settings["field_values"] = saved_field_values
+        shared_field_values = _request_json_object(request, "field_values")
+        saved_field_values = dict(layout_settings.get("field_values", {}))
+        saved_field_values.update(shared_field_values)
+        layout_settings["field_values"] = saved_field_values
 
         # Preview uses course dates when available, leaves unresolved optional dates blank,
         # and uses the real current date for the system-generated issue date.
@@ -1771,8 +1944,17 @@ class PreviewCertificateView(APIView):
             return Response({"detail": "Missing values for configured template field(s): " + ", ".join(missing_fields)}, status=status.HTTP_400_BAD_REQUEST)
 
         try:
+            if preview_upload_image is not None:
+                suffix = ".jpg" if (preview_upload_image.name or "").lower().endswith((".jpg", ".jpeg")) else ".png"
+                with tempfile.NamedTemporaryFile(prefix="certiverify-preview-", suffix=suffix, delete=False) as temp_image:
+                    for chunk in preview_upload_image.chunks():
+                        temp_image.write(chunk)
+                    preview_temp_path = temp_image.name
+                template_image_path = preview_temp_path
+            else:
+                template_image_path = template.image
             png_bytes, sha256_hex = generate_certificate_image(
-                template_path=template.image.path,
+                template_path=template_image_path,
                 student_name=student_name,
                 course_name=course_name,
                 start_date=start_disp,
@@ -1783,17 +1965,40 @@ class PreviewCertificateView(APIView):
                 completion_description=completion_description,
                 layout_overrides=layout_settings,
             )
-            b64_str = base64.b64encode(png_bytes).decode("ascii")
+            # The editor only needs a screen-sized preview. Keep the full
+            # resolution PNG for issuance, but avoid returning tens of MB of
+            # base64 JSON for large certificate templates.
+            with Image.open(io.BytesIO(png_bytes)) as preview_image:
+                preview_image.thumbnail((1800, 1800), Image.Resampling.LANCZOS)
+                if preview_image.mode not in ("RGB", "L"):
+                    background = Image.new("RGB", preview_image.size, "white")
+                    if "A" in preview_image.getbands():
+                        background.paste(preview_image, mask=preview_image.getchannel("A"))
+                    else:
+                        background.paste(preview_image.convert("RGB"))
+                    preview_image = background
+                elif preview_image.mode == "L":
+                    preview_image = preview_image.convert("RGB")
+                preview_buffer = io.BytesIO()
+                preview_image.save(preview_buffer, format="JPEG", quality=88)
+            preview_bytes = preview_buffer.getvalue()
+            b64_str = base64.b64encode(preview_bytes).decode("ascii")
             return Response({
-                "preview_url": f"data:image/png;base64,{b64_str}",
-                "file_size": len(png_bytes),
+                "preview_url": f"data:image/jpeg;base64,{b64_str}",
+                "file_size": len(preview_bytes),
                 "sha256": sha256_hex,
             })
         except Exception as exc:
             logger.exception("Failed generating preview certificate")
             if isinstance(exc, TemplateImageError):
-                return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+                return Response({"detail": "Template image could not be loaded safely."}, status=status.HTTP_400_BAD_REQUEST)
             return Response({"detail": "Could not generate preview. Check the server log for details."}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        finally:
+            if preview_temp_path:
+                try:
+                    os.unlink(preview_temp_path)
+                except OSError:
+                    logger.warning("Could not remove temporary certificate preview image")
 
 
 # ---------------------------------------------------------------------------
@@ -1832,7 +2037,7 @@ class RetryEmailView(APIView):
     def post(self, request, pk):
         with transaction.atomic():
             cert = get_object_or_404(
-                Certificate.objects.select_for_update().select_related("owner", "course"), pk=pk
+                Certificate.objects.select_for_update(of=("self",)).select_related("owner", "course"), pk=pk
             )
 
             if cert.email_sent:
@@ -1842,7 +2047,18 @@ class RetryEmailView(APIView):
                     "message": "Certificate email was already accepted by the mail backend; no duplicate was sent.",
                 }, status=status.HTTP_200_OK)
 
-            email_ok, email_err = _send_and_record_certificate_email(cert)
+            if cert.email_sending_at and cert.email_sending_at > timezone.now() - timedelta(minutes=2):
+                return Response(
+                    {"detail": "Certificate email delivery is already in progress. Try again shortly."},
+                    status=status.HTTP_409_CONFLICT,
+                )
+            cert.email_sending_at = timezone.now()
+            cert.save(update_fields=["email_sending_at"])
+
+        # SMTP is outside the row-locking transaction. A persisted short-lived
+        # claim prevents concurrent retries while the network operation runs.
+        email_ok, email_err = _send_and_record_certificate_email(cert)
+        Certificate.objects.filter(pk=cert.pk).update(email_sending_at=None)
 
         log_action(
             action=AuditLog.Action.EMAIL_RETRY,
@@ -1852,7 +2068,7 @@ class RetryEmailView(APIView):
             description=f"Email notification retry for {cert.certificate_number}: {'Success' if email_ok else 'Failed'}",
             metadata={
                 "certificate_number": cert.certificate_number,
-                "recipient_email": cert.owner.email if cert.owner else "",
+                "recipient_email": resolve_certificate_email_recipient(cert),
                 "success": email_ok,
                 "error": email_err,
             },
@@ -1879,7 +2095,7 @@ class CertificateImageView(APIView):
     Uses normal JWT Bearer authentication; credentials are never accepted in query strings.
     """
     permission_classes = [IsAuthenticated]
-    authentication_classes = [OptionalJWTAuthentication]
+    authentication_classes = [SessionInvalidatingJWTAuthentication]
 
     def get(self, request, pk):
         cert = get_object_or_404(Certificate.objects.select_related("owner"), pk=pk)
@@ -1911,8 +2127,40 @@ class CertificateImageView(APIView):
             with cert.file.open("rb") as f:
                 raw_bytes = f.read()
 
+            is_pdf = raw_bytes.startswith(b"%PDF-")
+            is_png = raw_bytes.startswith(b"\x89PNG\r\n\x1a\n")
+            is_jpeg = raw_bytes.startswith(b"\xff\xd8\xff")
+            if not (is_pdf or is_png or is_jpeg):
+                return Response(
+                    {"detail": "Stored certificate file is not a supported image or PDF."},
+                    status=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
+                )
+
             target_fmt = request.query_params.get("format", "").lower()
-            if target_fmt in ("jpeg", "jpg"):
+            thumb_value = request.query_params.get("thumb")
+            if thumb_value is not None:
+                if is_pdf:
+                    return Response({"detail": "PDF files do not have image thumbnails."}, status=400)
+                try:
+                    thumb_size = int(thumb_value)
+                except (TypeError, ValueError):
+                    return Response({"detail": "Thumbnail size must be an integer from 64 to 512."}, status=400)
+                if not 64 <= thumb_size <= 512:
+                    return Response({"detail": "Thumbnail size must be an integer from 64 to 512."}, status=400)
+                try:
+                    with Image.open(io.BytesIO(raw_bytes)) as source:
+                        source.thumbnail((thumb_size, thumb_size), Image.Resampling.LANCZOS)
+                        is_jpeg = source.format in {"JPEG", "JPG"}
+                        thumb = source.convert("RGB") if is_jpeg else source.convert("RGBA")
+                        buf = io.BytesIO()
+                        thumb.save(buf, format="JPEG" if is_jpeg else "PNG", quality=85, optimize=True)
+                        raw_bytes = buf.getvalue()
+                        content_type = "image/jpeg" if is_jpeg else "image/png"
+                        thumb.close()
+                except Exception as exc:
+                    logger.warning("Could not create certificate thumbnail for record %s (%s)", cert.pk, type(exc).__name__)
+                    return Response({"detail": "Certificate thumbnail could not be generated."}, status=404)
+            elif target_fmt in ("jpeg", "jpg") and not is_pdf:
                 try:
                     pil_img = Image.open(io.BytesIO(raw_bytes)).convert("RGB")
                     buf = io.BytesIO()
@@ -1921,7 +2169,9 @@ class CertificateImageView(APIView):
                     content_type = "image/jpeg"
                 except Exception:
                     content_type = "image/png"
-            elif cert.file.name.lower().endswith((".jpg", ".jpeg")):
+            elif is_pdf:
+                content_type = "application/pdf"
+            elif is_jpeg:
                 content_type = "image/jpeg"
             else:
                 content_type = "image/png"
@@ -1929,10 +2179,11 @@ class CertificateImageView(APIView):
             response = HttpResponse(raw_bytes, content_type=content_type)
             if request.query_params.get("download", "").lower() in ("true", "1"):
                 safe_cert_num = "".join(c for c in cert.certificate_number if c.isalnum() or c in "-_")
-                ext = "jpg" if "jpeg" in content_type else "png"
+                ext = "pdf" if content_type == "application/pdf" else ("jpg" if "jpeg" in content_type else "png")
                 response["Content-Disposition"] = f'attachment; filename="certificate_{safe_cert_num}.{ext}"'
             response["Content-Length"] = len(raw_bytes)
             response["X-Content-Type-Options"] = "nosniff"
+            response["Cache-Control"] = "private, max-age=300"
             return response
         except Exception as exc:
             logger.exception("Failed to open certificate file %s: %s", cert.pk, exc)

@@ -8,6 +8,7 @@ credentials/tokens are never printed to logs.
 """
 
 import logging
+from html import escape
 import smtplib
 import socket
 import time
@@ -76,7 +77,7 @@ def send_account_email(
 
     configured, error_reason = is_smtp_configured()
     if not configured:
-        logger.warning("Email dispatch to %s blocked: %s", clean_recipient, error_reason)
+        logger.warning("Email dispatch blocked: %s", error_reason)
         raise SMTPConfigurationError(error_reason)
 
     from_email = getattr(
@@ -100,9 +101,16 @@ def send_account_email(
 
         if attachments:
             for att in attachments:
-                if len(att) == 3:
-                    att_filename, att_content, att_mimetype = att
-                    msg.attach(att_filename, att_content, att_mimetype)
+                if (
+                    not isinstance(att, (tuple, list))
+                    or len(att) != 3
+                    or not isinstance(att[0], str)
+                    or not isinstance(att[1], bytes)
+                    or not isinstance(att[2], str)
+                ):
+                    raise EmailDeliveryError("Email attachment must contain a filename, bytes, and MIME type.")
+                att_filename, att_content, att_mimetype = att
+                msg.attach(att_filename, att_content, att_mimetype)
 
         # Use a private connection for this message. SMTP configuration/auth/TLS
         # failures happen before any message data is submitted, so opening can be
@@ -129,7 +137,12 @@ def send_account_email(
                         )
                     msg.connection = connection
                     break
-                except (smtplib.SMTPConnectError, smtplib.SMTPServerDisconnected, socket.timeout, OSError):
+                except (smtplib.SMTPConnectError, smtplib.SMTPServerDisconnected, socket.timeout, OSError) as exc:
+                    if isinstance(exc, smtplib.SMTPException) and not isinstance(
+                        exc,
+                        (smtplib.SMTPConnectError, smtplib.SMTPServerDisconnected),
+                    ):
+                        raise
                     try:
                         connection.close()
                     except Exception:
@@ -154,33 +167,31 @@ def send_account_email(
             msg.connection = connection
             sent_count = msg.send(fail_silently=False)
         if sent_count < 1:
-            logger.error("SMTP server rejected delivery for recipient: %s", clean_recipient)
+            logger.error("SMTP server did not accept the message.")
             raise EmailDeliveryError("Mail server did not accept the message for delivery.")
 
-        logger.info("Email '%s' accepted by SMTP server for recipient: %s", subject, clean_recipient)
+        logger.info("Email '%s' accepted by SMTP server.", subject)
         return True
 
     except smtplib.SMTPAuthenticationError as e:
         logger.error(
-            "SMTP authentication failure sending to %s (code %s): %s",
-            clean_recipient,
+            "SMTP authentication failure (code %s): %s",
             getattr(e, "smtp_code", "unknown"),
             getattr(e, "smtp_error", "Authentication failed"),
         )
         raise EmailDeliveryError("SMTP authentication failed. Verify EMAIL_HOST_USER and EMAIL_HOST_PASSWORD.")
     except smtplib.SMTPConnectError as e:
-        logger.error("SMTP connection error sending to %s: %s", clean_recipient, e)
+        logger.error("SMTP connection error: %s", e)
         raise EmailDeliveryError("Failed to connect to SMTP server. Verify EMAIL_HOST and EMAIL_PORT.")
     except socket.timeout:
-        logger.error("SMTP timeout connecting to mail server for %s", clean_recipient)
+        logger.error("SMTP timeout connecting to mail server.")
         raise EmailDeliveryError("SMTP connection timed out. Check network connection and EMAIL_TIMEOUT.")
     except smtplib.SMTPException as e:
-        logger.error("SMTP protocol error sending to %s: %s", clean_recipient, e)
+        logger.error("SMTP protocol error: %s", e)
         raise EmailDeliveryError(f"SMTP server error: {e}")
     except Exception as e:
         logger.error(
-            "Unexpected email delivery failure for %s: %s: %s",
-            clean_recipient,
+            "Unexpected email delivery failure: %s: %s",
             type(e).__name__,
             e,
         )
@@ -198,19 +209,21 @@ def _render_email_html(title: str, greeting: str, content_html: str, action_butt
     """
     btn_html = ""
     if action_button and action_button.get("url") and action_button.get("label"):
+        button_url = escape(str(action_button["url"]), quote=True)
+        button_label = escape(str(action_button["label"]))
         btn_html = f"""
         <table role="presentation" border="0" cellpadding="0" cellspacing="0" style="margin: 28px 0 24px 0;">
           <tr>
             <td align="left">
-              <a href="{action_button['url']}" target="_blank" style="display: inline-block; padding: 14px 28px; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; font-size: 15px; font-weight: 600; color: #ffffff; text-decoration: none; background: linear-gradient(135deg, #0d9488 0%, #0f766e 100%); border-radius: 10px; box-shadow: 0 4px 12px rgba(13, 148, 136, 0.25);">
-                {action_button['label']} &rarr;
+              <a href="{button_url}" target="_blank" style="display: inline-block; padding: 14px 28px; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; font-size: 15px; font-weight: 600; color: #ffffff; text-decoration: none; background: linear-gradient(135deg, #0d9488 0%, #0f766e 100%); border-radius: 10px; box-shadow: 0 4px 12px rgba(13, 148, 136, 0.25);">
+                {button_label} &rarr;
               </a>
             </td>
           </tr>
         </table>
         <p style="margin: 0 0 16px 0; font-size: 12px; color: #64748b; line-height: 1.5;">
           If the button above does not work, copy and paste this URL into your browser:<br>
-          <a href="{action_button['url']}" style="color: #0d9488; word-break: break-all;">{action_button['url']}</a>
+          <a href="{button_url}" style="color: #0d9488; word-break: break-all;">{button_url}</a>
         </p>
         """
 
@@ -219,7 +232,7 @@ def _render_email_html(title: str, greeting: str, content_html: str, action_butt
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>{title}</title>
+  <title>{escape(str(title))}</title>
 </head>
 <body style="margin: 0; padding: 0; background-color: #f1f5f9; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; color: #1e293b; -webkit-font-smoothing: antialiased;">
   <table role="presentation" border="0" cellpadding="0" cellspacing="0" width="100%" style="background-color: #f1f5f9; padding: 32px 16px;">
@@ -243,10 +256,10 @@ def _render_email_html(title: str, greeting: str, content_html: str, action_butt
           <tr>
             <td style="padding: 36px 36px 28px 36px;">
               <h1 style="margin: 0 0 16px 0; font-size: 20px; font-weight: 700; color: #0f172a; line-height: 1.3;">
-                {title}
+                {escape(str(title))}
               </h1>
               <p style="margin: 0 0 18px 0; font-size: 15px; color: #334155; line-height: 1.6;">
-                {greeting}
+                {escape(str(greeting))}
               </p>
               <div style="font-size: 14px; color: #334155; line-height: 1.6;">
                 {content_html}
@@ -428,37 +441,24 @@ def send_mfa_reset_notification_email(user) -> bool:
     return send_account_email(user.email, subject, plain_text, html)
 
 
-def send_password_reset_otp_email(user, otp: str) -> bool:
-    """Send 6-digit email OTP for password recovery (backward-compatible)."""
+def send_mfa_enabled_notification_email(user) -> bool:
+    """Notify the account owner after a first authenticator enrollment."""
     name = (getattr(user, "first_name", "") or getattr(user, "username", "")).strip() or "User"
-    subject = "OneSmarter CertiVerify — Password Reset Verification Code"
-
+    subject = "OneSmarter CertiVerify — Two-Factor Authentication Enabled"
     plain_text = (
         f"Hello {name},\n\n"
-        "A request was received to reset the password for your OneSmarter CertiVerify account.\n\n"
-        f"Your 6-digit verification code is:\n\n"
-        f"    {otp}\n\n"
-        "This verification code is valid for 10 minutes and can only be used once.\n\n"
-        "If you did not request a password reset, please ignore this email. Your current password remains secure.\n\n"
-        "Regards,\n"
-        "OneSmarter Support\n"
+        "Two-factor authentication was enabled for your OneSmarter CertiVerify account.\n\n"
+        "If you did not authorize this change, contact OneSmarter Support immediately.\n\n"
+        "Regards,\nOneSmarter Support\n"
     )
-
-    content_html = f"""
-      <p style="margin: 0 0 14px 0;">A request was received to reset the password for your OneSmarter CertiVerify account.</p>
-      <div style="background-color: #f8fafc; border: 2px dashed #cbd5e1; border-radius: 12px; padding: 20px; text-align: center; margin: 20px 0;">
-        <span style="font-family: monospace; font-size: 32px; font-weight: 700; letter-spacing: 6px; color: #0d9488;">{otp}</span>
-      </div>
-      <p style="margin: 0 0 14px 0; font-size: 13px; color: #64748b;">This verification code is valid for 10 minutes and can only be used once.</p>
-      <p style="margin: 0; font-size: 13px; color: #64748b;">If you did not request a password reset, you can safely ignore this email.</p>
-    """
-
     html = _render_email_html(
-        title="Password Reset Verification Code",
+        title="Two-Factor Authentication Enabled",
         greeting=f"Hello {name},",
-        content_html=content_html,
+        content_html=(
+            "<p>Two-factor authentication is now enabled for your account.</p>"
+            "<p>If you did not authorize this change, contact OneSmarter Support immediately.</p>"
+        ),
     )
-
     return send_account_email(user.email, subject, plain_text, html)
 
 
@@ -473,7 +473,7 @@ def send_email_verification_otp_email(user, otp: str) -> bool:
         "To verify your email address and link any issued certificates to your account, "
         f"enter the following 6-digit verification code:\n\n"
         f"    {otp}\n\n"
-        "This code is valid for 24 hours.\n\n"
+        "This code is valid for 10 minutes.\n\n"
         "If you did not register for a OneSmarter CertiVerify account, please ignore this email.\n\n"
         "Regards,\n"
         "OneSmarter Support\n"
@@ -485,7 +485,7 @@ def send_email_verification_otp_email(user, otp: str) -> bool:
       <div style="background-color: #f8fafc; border: 2px dashed #cbd5e1; border-radius: 12px; padding: 20px; text-align: center; margin: 20px 0;">
         <span style="font-family: monospace; font-size: 32px; font-weight: 700; letter-spacing: 6px; color: #0d9488;">{otp}</span>
       </div>
-      <p style="margin: 0 0 14px 0; font-size: 13px; color: #64748b;">This verification code is valid for 24 hours.</p>
+      <p style="margin: 0 0 14px 0; font-size: 13px; color: #64748b;">This verification code is valid for 10 minutes.</p>
       <p style="margin: 0; font-size: 13px; color: #64748b;">If you did not register for an account, you can safely ignore this email.</p>
     """
 

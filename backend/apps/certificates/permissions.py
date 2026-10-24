@@ -3,22 +3,10 @@ from rest_framework.permissions import BasePermission
 
 
 def is_certiverify_admin(user):
-    """
-    Return True for Django staff/superusers or users
-    whose UserProfile role is ADMIN.
-    """
+    """Django's staff/superuser flags are the authoritative admin grants."""
     if not user or not user.is_authenticated:
         return False
-
-    # Django admin and superuser accounts
-    if user.is_staff or user.is_superuser:
-        return True
-
-    # Application-level admin role
-    try:
-        return user.profile.role == "ADMIN"
-    except Exception:
-        return False
+    return bool(user.is_staff or user.is_superuser)
 
 
 class IsCertiVerifyAdmin(BasePermission):

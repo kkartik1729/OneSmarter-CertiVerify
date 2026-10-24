@@ -1,6 +1,7 @@
 
 from django.contrib.auth import get_user_model
 from django.contrib.auth.password_validation import validate_password
+from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db import transaction
 import re
 from rest_framework import serializers
@@ -34,6 +35,17 @@ class ExistingUserTokenRefreshSerializer(TokenRefreshSerializer):
                 )
                 if not user.is_active:
                     raise InvalidToken("Session expired. Please log in again.")
+                email_verified = UserProfile.objects.filter(user=user).values_list(
+                    "email_verified", flat=True
+                ).first()
+                if not email_verified:
+                    raise InvalidToken("Verify your email address before signing in.")
+                changed_at = UserProfile.objects.filter(user=user).values_list(
+                    "password_changed_at", flat=True
+                ).first()
+                issued_at = refresh.get("iat")
+                if changed_at and issued_at is not None and int(issued_at) <= int(changed_at.timestamp()):
+                    raise InvalidToken("Session expired. Please log in again.")
                 return super().validate(attrs)
         except User.DoesNotExist as exc:
             raise InvalidToken("Session expired. Please log in again.") from exc
@@ -66,6 +78,18 @@ class RegisterSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError({
                 "password_confirm": "Passwords do not match."
             })
+
+        # Include the submitted identity fields so similarity validators run
+        # against the account being created, not against user=None.
+        candidate = User(**{
+            key: value
+            for key, value in attrs.items()
+            if key in {"username", "email", "first_name", "last_name"}
+        })
+        try:
+            validate_password(attrs["password"], user=candidate)
+        except DjangoValidationError as exc:
+            raise serializers.ValidationError({"password": list(exc.messages)}) from exc
 
         email = str(attrs.get("email", "")).strip().lower()
         if not email:
@@ -103,8 +127,8 @@ class UserProfileSerializer(serializers.ModelSerializer):
     username = serializers.CharField(source="user.username", read_only=True)
     email = serializers.EmailField(source="user.email", read_only=True)
     # Writable so that PATCH /accounts/me/ can update them
-    first_name = serializers.CharField(source="user.first_name", required=False)
-    last_name = serializers.CharField(source="user.last_name", required=False, allow_blank=True)
+    first_name = serializers.CharField(source="user.first_name", required=False, max_length=150)
+    last_name = serializers.CharField(source="user.last_name", required=False, allow_blank=True, max_length=150)
     role = serializers.SerializerMethodField()
     mfa_enabled = serializers.BooleanField(read_only=True)
     email_verified = serializers.BooleanField(read_only=True)
@@ -153,22 +177,17 @@ class UserProfileSerializer(serializers.ModelSerializer):
         user = getattr(obj, "user", None)
         if not user or not user.email or getattr(obj, "email_verified", False):
             return False
-        try:
-            from apps.certificates.models import Certificate
-            from django.db.models.functions import Lower, Trim
-            return Certificate.objects.annotate(
-                clean_recipient_email=Trim(Lower("recipient_email")),
-            ).filter(
-                clean_recipient_email=user.email.strip().lower(),
-                owner__isnull=True,
-                status=Certificate.Status.VERIFIED,
-            ).exists()
-        except Exception:
-            return False
+        from apps.certificates.models import Certificate
+
+        return Certificate.objects.filter(
+            recipient_email__iexact=user.email.strip(),
+            owner__isnull=True,
+            status=Certificate.Status.VERIFIED,
+        ).exists()
 
     def validate_organization(self, value):
         value = value.strip()
-        if value and (not re.search(r"[^\W\d_]", value, re.UNICODE) or re.search(r"[^\w\s.,&'’()\-/+]", value, re.UNICODE) or re.search(r"\d", value)):
+        if value and (not re.search(r"[^\W\d_]", value, re.UNICODE) or re.search(r"[^\w\s.,&'’()\-/+]", value, re.UNICODE)):
             raise serializers.ValidationError("Please enter a valid organization name.")
         return value
 
@@ -211,6 +230,8 @@ class AdminUserSerializer(serializers.ModelSerializer):
     mfa_enabled = serializers.SerializerMethodField()
     email_verified = serializers.SerializerMethodField()
     full_name = serializers.SerializerMethodField()
+    phone = serializers.SerializerMethodField()
+    organization = serializers.SerializerMethodField()
 
     class Meta:
         model = User
@@ -225,6 +246,8 @@ class AdminUserSerializer(serializers.ModelSerializer):
             "is_active",
             "mfa_enabled",
             "email_verified",
+            "phone",
+            "organization",
             "date_joined",
         ]
 
@@ -233,20 +256,32 @@ class AdminUserSerializer(serializers.ModelSerializer):
             return "ADMIN"
         try:
             return obj.profile.role
-        except Exception:
+        except UserProfile.DoesNotExist:
             return "USER"
 
     def get_email_verified(self, obj):
         try:
             return obj.profile.email_verified
-        except Exception:
+        except UserProfile.DoesNotExist:
             return False
 
     def get_mfa_enabled(self, obj):
         try:
             return obj.profile.mfa_enabled
-        except Exception:
+        except UserProfile.DoesNotExist:
             return False
+
+    def get_phone(self, obj):
+        try:
+            return obj.profile.phone or ""
+        except UserProfile.DoesNotExist:
+            return ""
+
+    def get_organization(self, obj):
+        try:
+            return obj.profile.organization or ""
+        except UserProfile.DoesNotExist:
+            return ""
 
     def get_full_name(self, obj):
         name = f"{obj.first_name} {obj.last_name}".strip()

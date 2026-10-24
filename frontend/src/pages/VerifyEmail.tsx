@@ -1,10 +1,10 @@
-import { useState, useEffect, type FormEvent } from 'react';
+import { useState, useEffect, useRef, type FormEvent } from 'react';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { MailCheck, CheckCircle2, AlertCircle, ArrowRight } from 'lucide-react';
 import Field from '../components/Field';
 import { useAuth } from '../context/AuthContext';
 import { Brand, ThemeToggle, toast } from '../lib/ui';
-import { PATHS } from '../lib/paths';
+import { homeFor } from '../lib/paths';
 import { errMsg } from '../services';
 
 export default function VerifyEmail() {
@@ -22,10 +22,12 @@ export default function VerifyEmail() {
   const [resending, setResending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<{ message: string; count: number } | null>(null);
+  const autoVerifyStarted = useRef<string | null>(null);
 
   // Auto-verify if token is present in query parameters
   useEffect(() => {
-    if (queryToken && !success && !busy) {
+    if (queryToken && autoVerifyStarted.current !== queryToken) {
+      autoVerifyStarted.current = queryToken;
       setBusy(true);
       verifyEmail({ token: queryToken })
         .then(res => {
@@ -56,7 +58,7 @@ export default function VerifyEmail() {
       setError('Please enter your email address.');
       return;
     }
-    if (!cleanOtp) {
+    if (!/^\d{6}$/.test(cleanOtp)) {
       setError('Please enter the 6-digit verification code.');
       return;
     }
@@ -126,7 +128,7 @@ export default function VerifyEmail() {
             <div className="pt-2">
               <button
                 type="button"
-                onClick={() => go(user ? PATHS.userHome : PATHS.login, { state: { verified: true } })}
+                onClick={() => go(user ? homeFor(user.role) : '/login', { state: { verified: true } })}
                 className="btn inline-flex items-center justify-center gap-2"
                 style={{ width: '100%' }}
               >
@@ -163,9 +165,11 @@ export default function VerifyEmail() {
               label="6-Digit Verification Code"
               type="text"
               value={otp}
-              onChange={setOtp}
+              onChange={value => setOtp(value.replace(/\D/g, '').slice(0, 6))}
               placeholder="e.g. 123456"
               autoComplete="one-time-code"
+              inputMode="numeric"
+              maxLength={6}
             />
 
             {error && (
@@ -178,7 +182,7 @@ export default function VerifyEmail() {
             <button
               className="btn"
               style={{ width: '100%', marginTop: 14 }}
-              disabled={busy || !otp.trim()}
+              disabled={busy || !/^\d{6}$/.test(otp)}
             >
               {busy ? 'Verifying…' : 'Verify & Claim Certificates'}
             </button>

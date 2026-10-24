@@ -5,6 +5,7 @@ import { useAuth } from '../context/AuthContext';
 import { Brand, ThemeToggle, toast } from '../lib/ui';
 import { homeFor } from '../lib/paths';
 import { ApiError, errMsg } from '../services';
+import { isPasswordPolicyValid, PASSWORD_RULE_MESSAGE } from '../lib/password';
 
 type F = 'name' | 'email' | 'pw' | 'pc';
 
@@ -39,7 +40,7 @@ export default function Register() {
     if (!email) E.email = 'Enter your email.';
     else if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) E.email = 'Enter a valid email address.';
     if (!v.pw) E.pw = 'Enter your password.';
-    else if (v.pw.length < 8 || !/[a-z]/i.test(v.pw) || !/\d/.test(v.pw)) E.pw = 'Use 8+ characters with a letter and a number.';
+    else if (!isPasswordPolicyValid(v.pw)) E.pw = PASSWORD_RULE_MESSAGE;
     if (v.pw !== v.pc) E.pc = 'Passwords do not match.';
     setE(E);
     if (Object.keys(E).length) return;
@@ -47,9 +48,9 @@ export default function Register() {
     const [first, ...rest] = v.name.trim().split(/\s+/);
     setBusy(true);
     try {
-      await register({ username: email, email, first_name: first, last_name: rest.join(' '), password: v.pw, password_confirm: v.pc });
-      toast('Account created successfully! Please sign in to complete two-factor authentication setup.');
-      go('/login', { state: { registered: true, message: 'Account created successfully! Please sign in to set up two-factor authentication.' } });
+      const result = await register({ username: email, email, first_name: first, last_name: rest.join(' '), password: v.pw, password_confirm: v.pc });
+      toast(result.message);
+      go(`/verify-email?email=${encodeURIComponent(email)}`);
     } catch (x) {
       // Show each backend validation message next to the field it belongs to.
       const next: typeof e = {};

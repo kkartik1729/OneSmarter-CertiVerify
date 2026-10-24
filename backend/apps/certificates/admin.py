@@ -16,11 +16,12 @@ import io
 
 from django import forms
 from django.contrib import admin, messages
+from django.db.models import Exists, OuterRef
 from django.http import HttpResponse
 from django.urls import path
 from django.utils.html import format_html
 
-from .models import Certificate, CertificatePDF
+from .models import Certificate, CertificatePDF, CertificateTemplate, Course, GenerationBatch
 
 
 # ---------------------------------------------------------------------------
@@ -104,11 +105,10 @@ class CertificateAdmin(admin.ModelAdmin):
         "owner__email",
     )
 
-    list_filter = ("status", "issuer", "issue_date", "created_at")
+    list_filter = ("status", "issue_date", "created_at")
     ordering = ("-created_at",)
 
     readonly_fields = (
-        "verification_code",
         "file_sha256",
         "created_at",
         "updated_at",
@@ -121,11 +121,21 @@ class CertificateAdmin(admin.ModelAdmin):
             {
                 "fields": (
                     "owner",
+                    "recipient_email",
                     "title",
                     "issuer",
+                    "course",
+                    "course_name",
                     "certificate_number",
                     "recipient_name",
+                    "start_date",
+                    "end_date",
                     "issue_date",
+                    "template",
+                    "generation_batch",
+                    "completion_description",
+                    "email_sent",
+                    "email_error",
                 )
             },
         ),
@@ -135,7 +145,6 @@ class CertificateAdmin(admin.ModelAdmin):
                 "fields": (
                     "status",
                     "rejection_reason",
-                    "verification_code",
                 )
             },
         ),
@@ -167,17 +176,17 @@ class CertificateAdmin(admin.ModelAdmin):
 
     inlines = [CertificatePDFInline]
 
+    def get_queryset(self, request):
+        queryset = super().get_queryset(request)
+        pdf_exists = CertificatePDF.objects.filter(certificate_id=OuterRef("pk"))
+        return queryset.annotate(_has_pdf=Exists(pdf_exists))
+
     # ------------------------------------------------------------------
     # Custom list column: has PDF stored in PostgreSQL?
     # ------------------------------------------------------------------
     def _has_pdf(self, obj: Certificate) -> str:
-        try:
-            if obj.pdf_document is not None:
-                return format_html(
-                    '<span style="color:green;font-weight:bold;">✔ PDF stored</span>'
-                )
-        except CertificatePDF.DoesNotExist:
-            pass
+        if getattr(obj, "_has_pdf", False):
+            return format_html('<span style="color:green;font-weight:bold;">✔ PDF stored</span>')
         return format_html('<span style="color:#aaa;">—</span>')
     _has_pdf.short_description = "PDF in DB"
 
@@ -207,7 +216,7 @@ class CertificateAdmin(admin.ModelAdmin):
     # Inline PDF save hook  (called after the Certificate is saved)
     # ------------------------------------------------------------------
     def save_formset(self, request, form, formset, change):
-        instances = formset.save(commit=False)
+        formset.save(commit=False)
 
         for obj in formset.deleted_objects:
             obj.delete()
@@ -244,9 +253,10 @@ class CertificateAdmin(admin.ModelAdmin):
                     f"Unexpected error storing PDF: {exc}",
                 )
 
-        for obj in instances:
-            obj.save()
-
+        # The inline exposes no editable model fields; its only write path is
+        # CertificatePDF.store() above. Saving the stale formset instances here
+        # would overwrite a replacement with the previously loaded bytes (or
+        # try to insert an empty BinaryField for a newly uploaded PDF).
         formset.save_m2m()
 
     # ------------------------------------------------------------------
@@ -287,7 +297,7 @@ class CertificateAdmin(admin.ModelAdmin):
             content_type="application/pdf",
         )
         response["Content-Disposition"] = f'attachment; filename="{filename}"'
-        response["Content-Length"] = pdf_doc.file_size
+        response["Content-Length"] = str(len(pdf_doc.content))
         response["X-Content-Type-Options"] = "nosniff"
         return response
 
@@ -334,6 +344,9 @@ class CertificatePDFAdmin(admin.ModelAdmin):
     def has_change_permission(self, request, obj=None):
         return False
 
+    def has_delete_permission(self, request, obj=None):
+        return False
+
     def _size_kb(self, obj: CertificatePDF) -> str:
         return f"{obj.file_size / 1024:,.1f} KB"
     _size_kb.short_description = "Size"
@@ -357,3 +370,28 @@ class CertificatePDFAdmin(admin.ModelAdmin):
         "created_at",
         "_pdf_download_link",
     )
+
+
+@admin.register(Course)
+class CourseAdmin(admin.ModelAdmin):
+    list_display = ("name", "title", "issuer", "start_date", "end_date", "created_by")
+    search_fields = ("name", "title", "issuer")
+    list_filter = ("start_date", "end_date")
+
+
+@admin.register(CertificateTemplate)
+class CertificateTemplateAdmin(admin.ModelAdmin):
+    list_display = ("name", "version", "file_format", "uploaded_by", "created_at")
+    search_fields = ("name", "description")
+    list_filter = ("file_format", "created_at")
+    readonly_fields = ("created_at", "updated_at")
+
+
+@admin.register(GenerationBatch)
+class GenerationBatchAdmin(admin.ModelAdmin):
+    list_display = ("id", "status", "course", "successful", "failed", "skipped_duplicates", "created_at")
+    list_filter = ("status", "created_at")
+    readonly_fields = tuple(field.name for field in GenerationBatch._meta.fields)
+
+    def has_add_permission(self, request):
+        return False

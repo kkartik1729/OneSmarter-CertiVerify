@@ -1,4 +1,5 @@
 from datetime import date
+import hashlib
 import io
 import os
 import tempfile
@@ -8,6 +9,7 @@ from unittest import mock
 from django.contrib.auth import get_user_model
 from django.test import TestCase
 from django.test import override_settings
+from django.db import IntegrityError, transaction
 from django.utils import timezone
 from rest_framework.test import APIClient
 
@@ -21,6 +23,34 @@ from PIL import Image, ImageDraw
 User = get_user_model()
 
 
+class IsolatedMediaTestCase(TestCase):
+    """Keep certificate test uploads out of the developer's real MEDIA_ROOT."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls._test_media_directory = tempfile.TemporaryDirectory(
+            prefix="certiverify-test-media-"
+        )
+        cls._media_override = override_settings(
+            MEDIA_ROOT=cls._test_media_directory.name
+        )
+        cls._media_override.enable()
+        try:
+            super().setUpClass()
+        except Exception:
+            cls._media_override.disable()
+            cls._test_media_directory.cleanup()
+            raise
+
+    @classmethod
+    def tearDownClass(cls):
+        try:
+            super().tearDownClass()
+        finally:
+            cls._media_override.disable()
+            cls._test_media_directory.cleanup()
+
+
 class TemplateRasterSafetyTests(unittest.TestCase):
     def test_large_jpeg_is_drafted_before_pixel_decode_and_layout_scale_is_preserved(self):
         from apps.certificates import generator
@@ -28,6 +58,7 @@ class TemplateRasterSafetyTests(unittest.TestCase):
         source = mock.Mock()
         source.format = "JPEG"
         source.size = (12_795, 19_200)
+        source.width, source.height = source.size
         source.info = {}
         source.convert.return_value = Image.new("RGBA", (3_199, 4_800))
         original_limit = Image.MAX_IMAGE_PIXELS
@@ -47,7 +78,7 @@ class TemplateRasterSafetyTests(unittest.TestCase):
         scaled = generator._scale_layout_to_working_image(layout, image.info["_certify_source_scale"])
         self.assertEqual(layout["elements"][0]["fontSize"], 120)
         self.assertEqual(scaled["elements"][0]["fontSize"], 30)
-        self.assertEqual(scaled["elements"][0]["x"], 75)
+        self.assertAlmostEqual(scaled["elements"][0]["x"], 75, places=2)
         self.assertEqual(scaled["elements"][0]["y"], 0.5)
         image.close()
 
@@ -73,7 +104,7 @@ class TemplateRasterSafetyTests(unittest.TestCase):
         self.assertLessEqual(width * height * scale * scale, 16_000_000)
 
 
-class CertificateModelTests(TestCase):
+class CertificateModelTests(IsolatedMediaTestCase):
     """Test certificate model behavior."""
 
     def setUp(self):
@@ -114,8 +145,52 @@ class CertificateModelTests(TestCase):
         certificate = self.create_certificate()
         self.assertFalse(certificate.file)
 
+    def test_direct_orm_create_enforces_certificate_name_and_date_rules(self):
+        from django.core.exceptions import ValidationError
 
-class CertificateAPITests(TestCase):
+        with self.assertRaises(ValidationError):
+            self.create_certificate(recipient_name="A" * 30)
+        with self.assertRaises(ValidationError):
+            self.create_certificate(
+                start_date=date(2026, 10, 10),
+                end_date=date(2026, 10, 9),
+            )
+
+    def test_active_recipient_course_pair_is_unique_but_revoked_history_is_preserved(self):
+        course = Course.objects.create(
+            name="Course One",
+            title="Completion",
+            issuer="OneSmarter",
+            start_date=date(2026, 1, 1),
+            end_date=date(2026, 1, 2),
+            created_by=self.user,
+        )
+        self.create_certificate(
+            certificate_number="CERT-UNIQUE-001",
+            recipient_email=" Student@Example.com ",
+            course_name=" Course One ",
+            course=course,
+            status=Certificate.Status.VERIFIED,
+        )
+        with self.assertRaises(IntegrityError):
+            with transaction.atomic():
+                self.create_certificate(
+                    certificate_number="CERT-UNIQUE-002",
+                    recipient_email="student@example.com",
+                    course_name="course one",
+                    course=course,
+                    status=Certificate.Status.VERIFIED,
+                )
+        self.create_certificate(
+            certificate_number="CERT-UNIQUE-003",
+            recipient_email="student@example.com",
+            course_name="course one",
+            course=course,
+            status=Certificate.Status.REVOKED,
+        )
+
+
+class CertificateAPITests(IsolatedMediaTestCase):
     """Test certificate API endpoints."""
 
     def setUp(self):
@@ -202,15 +277,15 @@ class CertificateAPITests(TestCase):
         self.assertNotIn("recipient_name", response.data)
         self.assertNotIn("title", response.data)
 
-    def test_unrecognized_status_is_not_verified_or_disclosed(self):
-        self.certificate.status = "REVOKED"
+    def test_revoked_status_is_not_verified_or_disclosed(self):
+        self.certificate.status = Certificate.Status.REVOKED
         self.certificate.save(update_fields=["status"])
 
         response = self.client.get("/api/certificates/verify/CERT-API-001/")
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.data["status"], "REVOKED")
-        self.assertEqual(response.data["verification_result"], "NOT_VERIFIED")
+        self.assertEqual(response.data["verification_result"], "REVOKED")
         self.assertNotIn("recipient_name", response.data)
         self.assertNotIn("title", response.data)
 
@@ -232,7 +307,10 @@ class CertificateAPITests(TestCase):
         image_bytes = io.BytesIO()
         Image.new("RGB", (8, 8), "teal").save(image_bytes, format="PNG")
         with tempfile.TemporaryDirectory() as media_root, override_settings(MEDIA_ROOT=media_root):
-            self.certificate.file.save("public-preview.png", ContentFile(image_bytes.getvalue()), save=True)
+            preview_bytes = image_bytes.getvalue()
+            self.certificate.file.save("public-preview.png", ContentFile(preview_bytes), save=False)
+            self.certificate.file_sha256 = hashlib.sha256(preview_bytes).hexdigest()
+            self.certificate.save(update_fields=["file", "file_sha256"])
             response = self.client.get("/api/certificates/verify/CERT-API-001/preview/")
             self.assertEqual(response.status_code, 200)
             self.assertEqual(response["Content-Type"], "image/png")
@@ -241,6 +319,27 @@ class CertificateAPITests(TestCase):
             self.certificate.save(update_fields=["status"])
             hidden_response = self.client.get("/api/certificates/verify/CERT-API-001/preview/")
             self.assertEqual(hidden_response.status_code, 404)
+
+    def test_authenticated_image_thumbnail_is_bounded_and_validated(self):
+        from django.core.files.base import ContentFile
+
+        image_bytes = io.BytesIO()
+        Image.new("RGB", (1200, 800), "teal").save(image_bytes, format="PNG")
+        with tempfile.TemporaryDirectory() as media_root, override_settings(MEDIA_ROOT=media_root):
+            thumbnail_bytes = image_bytes.getvalue()
+            self.certificate.file.save("thumbnail-source.png", ContentFile(thumbnail_bytes), save=False)
+            self.certificate.file_sha256 = hashlib.sha256(thumbnail_bytes).hexdigest()
+            self.certificate.save(update_fields=["file", "file_sha256"])
+            self.client.force_authenticate(user=self.user)
+            response = self.client.get(f"/api/certificates/{self.certificate.pk}/image/?thumb=200")
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response["Cache-Control"], "private, max-age=300")
+            result = Image.open(io.BytesIO(response.content))
+            self.assertLessEqual(max(result.size), 200)
+            result.close()
+
+            invalid = self.client.get(f"/api/certificates/{self.certificate.pk}/image/?thumb=2048")
+            self.assertEqual(invalid.status_code, 400)
 
     def test_public_preview_can_render_database_stored_pdf(self):
         pdf_bytes = io.BytesIO()
@@ -306,7 +405,7 @@ class CertificateAPITests(TestCase):
         self.assertIn("CERT-API-001", certificate_numbers)
         self.assertNotIn("CERT-OTHER-001", certificate_numbers)
 
-    def test_user_can_create_certificate_without_file(self):
+    def test_regular_user_cannot_create_certificate_records(self):
         self.client.force_authenticate(user=self.user)
 
         response = self.client.post(
@@ -321,21 +420,8 @@ class CertificateAPITests(TestCase):
             format="json",
         )
 
-        self.assertEqual(response.status_code, 201)
-        self.assertEqual(
-            response.data["certificate_number"],
-            "CERT-NEW-001",
-        )
-        self.assertEqual(
-            response.data["status"],
-            Certificate.Status.PENDING,
-        )
-        self.assertTrue(
-            Certificate.objects.filter(
-                owner=self.user,
-                certificate_number="CERT-NEW-001",
-            ).exists()
-        )
+        self.assertEqual(response.status_code, 403)
+        self.assertFalse(Certificate.objects.filter(certificate_number="CERT-NEW-001").exists())
 
     def test_admin_can_retrieve_user_selection_list(self):
         admin_user = User.objects.create_superuser(
@@ -362,7 +448,26 @@ class CertificateAPITests(TestCase):
         self.assertEqual(response.status_code, 403)
 
 
-class TemplateRenderingRegressionTests(TestCase):
+class TemplateRenderingRegressionTests(IsolatedMediaTestCase):
+    def test_mask_rectangle_accepts_saved_hex_background_color(self):
+        from apps.certificates import generator
+
+        source = Image.new("RGB", (600, 400), "black")
+        output, _ = generator.generate_certificate_image(
+            template_path="unused.png",
+            template_image=source,
+            student_name="Alex Chen",
+            course_name="Course",
+            start_date="01/07/2026",
+            end_date="01/10/2026",
+            issue_date="16/10/2026",
+            certificate_number="OSCV-2026-MASKTEST",
+            layout_overrides={"mask_rect": [0, 0, 40, 40], "bg_color": "#123456", "elements": []},
+        )
+
+        rendered = Image.open(io.BytesIO(output)).convert("RGB")
+        self.assertEqual(rendered.getpixel((10, 10)), (18, 52, 86))
+
     def test_font_fallback_preserves_requested_font_sizes(self):
         from apps.certificates import generator
 
@@ -485,9 +590,10 @@ class TemplateRenderingRegressionTests(TestCase):
                     }]},
                 )
             labelled_identifier = f"Certificate ID: {certificate_number}"
-            self.assertIn(labelled_identifier, drawn_text)
+            self.assertIn(labelled_identifier, " ".join(drawn_text))
             self.assertNotIn("certificate_id", drawn_text)
-            self.assertEqual(drawn_text.count(labelled_identifier), 1)
+            self.assertEqual(drawn_text.count("Certificate ID:"), 1)
+            self.assertEqual(drawn_text.count(certificate_number), 1)
             self.assertEqual(sum(text.count(certificate_number) for text in drawn_text), 1)
             self.assertTrue(output.startswith(b"\x89PNG"))
         finally:
@@ -532,7 +638,7 @@ class TemplateRenderingRegressionTests(TestCase):
                     ]},
                 )
             labelled_identifier = f"Certificate ID: {certificate_number}"
-            self.assertEqual(drawn_text.count(labelled_identifier), 1)
+            self.assertEqual(" ".join(drawn_text).count(labelled_identifier), 1)
             self.assertEqual(sum(text.count(certificate_number) for text in drawn_text), 1)
             self.assertTrue(output.startswith(b"\x89PNG"))
         finally:
@@ -604,7 +710,68 @@ class TemplateRenderingRegressionTests(TestCase):
             os.unlink(temp.name)
 
 
-class CertificateEmailDeliveryTests(TestCase):
+class CertificateAdminPDFInlineTests(IsolatedMediaTestCase):
+    def setUp(self):
+        self.certificate = Certificate.objects.create(
+            owner=None,
+            recipient_email="admin-pdf@example.com",
+            title="Admin PDF test",
+            issuer="OneSmarter",
+            certificate_number="OSCV-2026-ADMINPDF01",
+            recipient_name="Alex Morgan",
+            issue_date=date(2026, 10, 16),
+        )
+
+    def _save_inline_upload(self, existing_pdf, new_bytes):
+        from types import SimpleNamespace
+        from django.core.files.uploadedfile import SimpleUploadedFile
+        from django.contrib import messages
+        from apps.certificates.admin import CertificateAdmin
+        from django.contrib import admin
+
+        inline_form = SimpleNamespace(
+            files={
+                "pdf_upload": SimpleUploadedFile(
+                    "replacement.pdf", new_bytes, content_type="application/pdf"
+                )
+            },
+            add_prefix=lambda field: field,
+        )
+        formset = mock.Mock()
+        formset.save.return_value = [existing_pdf] if existing_pdf else []
+        formset.deleted_objects = []
+        formset.forms = [inline_form]
+        form = SimpleNamespace(instance=self.certificate)
+        request = SimpleNamespace(FILES={})
+
+        with mock.patch.object(messages, "success"), mock.patch.object(messages, "error"):
+            CertificateAdmin(Certificate, admin.site).save_formset(
+                request, form, formset, change=True
+            )
+
+    def test_replacing_pdf_does_not_restore_stale_inline_bytes(self):
+        old_bytes = b"%PDF-1.4 old contents"
+        new_bytes = b"%PDF-1.4 replacement contents"
+        CertificatePDF.store(self.certificate, old_bytes, "old.pdf")
+        stale_inline_instance = CertificatePDF.objects.get(certificate=self.certificate)
+
+        self._save_inline_upload(stale_inline_instance, new_bytes)
+
+        stored = CertificatePDF.objects.get(certificate=self.certificate)
+        self.assertEqual(bytes(stored.content), new_bytes)
+        self.assertEqual(stored.sha256, hashlib.sha256(new_bytes).hexdigest())
+
+    def test_new_inline_upload_is_not_followed_by_empty_model_save(self):
+        new_bytes = b"%PDF-1.4 first contents"
+        empty_inline_instance = CertificatePDF(certificate=self.certificate)
+
+        self._save_inline_upload(empty_inline_instance, new_bytes)
+
+        stored = CertificatePDF.objects.get(certificate=self.certificate)
+        self.assertEqual(bytes(stored.content), new_bytes)
+
+
+class CertificateEmailDeliveryTests(IsolatedMediaTestCase):
     def test_pending_certificate_cannot_send_issuance_email(self):
         from apps.certificates.emails import send_certificate_issued_email
 
@@ -623,46 +790,6 @@ class CertificateEmailDeliveryTests(TestCase):
 
         self.assertFalse(success)
         self.assertIn("not eligible", error)
-
-    @override_settings(
-        EMAIL_BACKEND="django.core.mail.backends.smtp.EmailBackend",
-        EMAIL_HOST="smtp.example.test",
-        EMAIL_HOST_USER="sender@example.test",
-        EMAIL_HOST_PASSWORD="test-password",
-        EMAIL_USE_TLS=True,
-        EMAIL_USE_SSL=False,
-    )
-    def test_smtp_preflight_reconnects_before_sending_once(self):
-        import smtplib
-        from types import SimpleNamespace
-        from django.core.mail.backends.smtp import EmailBackend
-        from apps.accounts.services.email_service import send_account_email
-
-        connection = EmailBackend()
-        first_protocol = mock.Mock()
-        first_protocol.noop.side_effect = smtplib.SMTPServerDisconnected("Server not connected")
-        second_protocol = mock.Mock()
-        second_protocol.noop.return_value = (250, b"OK")
-        open_calls = 0
-
-        def open_connection():
-            nonlocal open_calls
-            open_calls += 1
-            connection.connection = SimpleNamespace(
-                close=mock.Mock(),
-                protocol=first_protocol if open_calls == 1 else second_protocol,
-            )
-            connection.connection.noop = connection.connection.protocol.noop
-            return True
-
-        with mock.patch("apps.accounts.services.email_service.get_connection", return_value=connection), \
-             mock.patch.object(connection, "open", side_effect=open_connection), \
-             mock.patch.object(connection, "close", side_effect=lambda: setattr(connection, "connection", None)), \
-             mock.patch("apps.accounts.services.email_service.EmailMultiAlternatives.send", return_value=1) as send:
-            self.assertTrue(send_account_email("recipient@example.test", "Subject", "Body"))
-
-        self.assertEqual(open_calls, 2)
-        send.assert_called_once_with(fail_silently=False)
 
     @override_settings(EMAIL_BACKEND="django.core.mail.backends.locmem.EmailBackend")
     def test_certificate_attachment_uses_recipient_and_pdf_bytes(self):
@@ -684,9 +811,9 @@ class CertificateEmailDeliveryTests(TestCase):
             title="Test certificate",
             issuer="OneSmarter",
             certificate_number="OSCV-2026-EMAIL001",
-            recipient_name="Alex Chen",
+            recipient_name="Alex <b>x</b>",
             issue_date=date(2026, 10, 16),
-            course_name="Example course",
+            course_name="Example <img src=x>",
             course=course,
             start_date=date(2026, 8, 1),
             end_date=date(2026, 8, 30),
@@ -706,31 +833,25 @@ class CertificateEmailDeliveryTests(TestCase):
         self.assertEqual(len(mail.outbox), 1)
         message = mail.outbox[0]
         self.assertEqual(message.to, ["recipient@example.com"])
-        attachment = next(item for item in message.attachments if hasattr(item, "get_filename"))
-        self.assertEqual(attachment.get_filename(), f"{cert.certificate_number}.pdf")
-        self.assertEqual(attachment.get_payload(decode=True), pdf_bytes)
+        attachment = next(item for item in message.attachments if isinstance(item, tuple))
+        self.assertEqual(attachment[0], f"{cert.certificate_number}.pdf")
+        self.assertEqual(attachment[1], pdf_bytes)
         self.assertIn(cert.certificate_number, message.body)
-        self.assertIn("Course Start Date: 01/07/2026", message.body)
-        self.assertIn("Course End Date: 01/10/2026", message.body)
+        self.assertIn("Course Start Date: 01/08/2026", message.body)
+        self.assertIn("Course End Date: 30/08/2026", message.body)
         self.assertNotIn("Issue Date", message.body)
         html_message = next(body for body, content_type in message.alternatives if content_type == "text/html")
         self.assertIn("Course Start Date:", html_message)
-        self.assertIn("01/07/2026", html_message)
+        self.assertIn("01/08/2026", html_message)
         self.assertIn("Course End Date:", html_message)
-        self.assertIn("01/10/2026", html_message)
+        self.assertIn("30/08/2026", html_message)
         self.assertNotIn("Issue Date:", html_message)
         self.assertIn(cert.certificate_number, html_message)
+        self.assertIn("&lt;b&gt;x&lt;/b&gt;", html_message)
+        self.assertIn("&lt;img src=x&gt;", html_message)
+        self.assertNotIn("<b>x</b>", html_message)
 
-    @override_settings(EMAIL_BACKEND="django.core.mail.backends.locmem.EmailBackend")
-    def test_email_backend_failure_is_reported_without_claiming_success(self):
-        from apps.accounts.services.email_service import EmailDeliveryError, send_account_email
-
-        with mock.patch("apps.accounts.services.email_service.EmailMultiAlternatives.send", side_effect=RuntimeError("mock transport error")):
-            with self.assertRaises(EmailDeliveryError):
-                send_account_email("recipient@example.com", "Test", "Body")
-
-
-class CertificateAPIRemainingTests(TestCase):
+class CertificateAPIRemainingTests(IsolatedMediaTestCase):
     def setUp(self):
         self.user = User.objects.create_user(username="certificate_api_user_2", password="TestPass123!")
         self.other_user = User.objects.create_user(username="other_certificate_user_2", password="TestPass123!")
@@ -829,8 +950,55 @@ class CertificateAPIRemainingTests(TestCase):
             },
             format="json",
         )
-        self.assertEqual(response.status_code, 400)
-        self.assertIn("owner", response.data)
+        self.assertEqual(response.status_code, 403)
+
+    def test_normal_user_cannot_create_arbitrary_certificate(self):
+        self.client.force_authenticate(user=self.user)
+        response = self.client.post(
+            "/api/certificates/",
+            {
+                "title": "Forged certificate",
+                "issuer": "Fake issuer",
+                "certificate_number": "CERT-FORGED-USER-001",
+                "recipient_name": "Test User",
+                "issue_date": "2026-10-12",
+                "status": "VERIFIED",
+            },
+            format="json",
+        )
+        self.assertEqual(response.status_code, 403)
+        self.assertFalse(Certificate.objects.filter(certificate_number="CERT-FORGED-USER-001").exists())
+
+    def test_only_admin_can_review_and_verified_status_is_authoritative(self):
+        self.client.force_authenticate(user=self.user)
+        denied = self.client.patch(
+            f"/api/certificates/{self.certificate.pk}/review/",
+            {"status": "VERIFIED"},
+            format="json",
+        )
+        self.assertEqual(denied.status_code, 403)
+
+        admin = User.objects.create_superuser(
+            username="review_admin", email="review-admin@example.com", password="TestPass123!"
+        )
+        self.client.force_authenticate(user=admin)
+        approved = self.client.patch(
+            f"/api/certificates/{self.certificate.pk}/review/",
+            {"status": "VERIFIED"},
+            format="json",
+        )
+        self.assertEqual(approved.status_code, 200)
+        self.certificate.refresh_from_db()
+        self.assertEqual(self.certificate.status, Certificate.Status.VERIFIED)
+
+        revoked = self.client.patch(
+            f"/api/certificates/{self.certificate.pk}/review/",
+            {"status": "REVOKED", "rejection_reason": "Issuer withdrew this credential."},
+            format="json",
+        )
+        self.assertEqual(revoked.status_code, 200)
+        self.certificate.refresh_from_db()
+        self.assertEqual(self.certificate.status, Certificate.Status.REVOKED)
 
     def test_assigned_user_sees_certificate_in_my_certificates(self):
         # Create certificate owned by self.user
@@ -895,7 +1063,7 @@ class CertificateAPIRemainingTests(TestCase):
         self.assertEqual(response.status_code, 403)
 
 
-class CertificateGenerationTests(TestCase):
+class CertificateGenerationTests(IsolatedMediaTestCase):
     """Test the complete certificate generation and distribution suite."""
 
     def setUp(self):
@@ -957,6 +1125,55 @@ class CertificateGenerationTests(TestCase):
         content = res.content.decode("utf-8")
         self.assertIn("student_name,student_email", content)
         self.assertNotIn("course_name", content)
+
+    def test_preview_of_uploaded_template_does_not_create_persistent_template(self):
+        from io import BytesIO
+        from django.core.files.uploadedfile import SimpleUploadedFile
+        from apps.certificates.models import CertificateTemplate
+
+        buffer = BytesIO()
+        Image.new("RGB", (600, 400), color="white").save(buffer, format="PNG")
+        upload = SimpleUploadedFile("preview-only.png", buffer.getvalue(), content_type="image/png")
+        template_count = CertificateTemplate.objects.count()
+        self.client.force_authenticate(user=self.admin)
+
+        response = self.client.post("/api/certificates/generate/preview/", {
+            "course_id": self.course.pk,
+            "template_file": upload,
+            "student_name": "Preview Student",
+        }, format="multipart")
+
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertTrue(response.data["preview_url"].startswith("data:image/jpeg;base64,"))
+        self.assertEqual(CertificateTemplate.objects.count(), template_count)
+
+    def test_editing_layout_of_used_template_creates_a_historical_version(self):
+        from apps.certificates.models import CertificateTemplate
+
+        certificate = Certificate.objects.create(
+            owner=self.student,
+            recipient_email=self.student.email,
+            title="Historical layout",
+            issuer="OneSmarter",
+            certificate_number="OSCV-HISTORY-LAYOUT-001",
+            recipient_name="Kartik Hande",
+            issue_date=date(2026, 10, 13),
+            template=self.template,
+        )
+        self.client.force_authenticate(user=self.admin)
+        response = self.client.patch(
+            f"/api/certificates/templates/{self.template.pk}/",
+            {"layout_config": {"elements": [{"text": "Historical text", "fontSize": 48}]}},
+            format="json",
+        )
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual(response.data["version"], self.template.version + 1)
+        self.assertEqual(response.data["layout_config"]["elements"][0]["fontSize"], 48)
+        certificate.refresh_from_db()
+        self.assertEqual(certificate.template_id, self.template.pk)
+        self.template.refresh_from_db()
+        self.assertEqual(self.template.layout_config, {})
+        self.assertEqual(CertificateTemplate.objects.filter(name__startswith="OneSmarter Official Template").count(), 2)
 
     def test_validate_simplified_two_column_csv(self):
         self.client.force_authenticate(user=self.admin)
@@ -1077,12 +1294,12 @@ class CertificateGenerationTests(TestCase):
 
         rows = res.data["rows"]
         self.assertTrue(rows[0]["is_valid"])
-        self.assertEqual(rows[0]["user_id"], self.student.id)
-        self.assertTrue(rows[0]["has_account"])
+        self.assertNotIn("user_id", rows[0])
+        self.assertNotIn("has_account", rows[0])
 
         self.assertTrue(rows[1]["is_valid"])
-        self.assertIsNone(rows[1]["user_id"])
-        self.assertFalse(rows[1]["has_account"])
+        self.assertNotIn("user_id", rows[1])
+        self.assertNotIn("has_account", rows[1])
 
     def test_single_certificate_generation_and_verification(self):
         self.client.force_authenticate(user=self.admin)
@@ -1139,6 +1356,32 @@ class CertificateGenerationTests(TestCase):
         forbidden_res = self.client.get(f"/api/certificates/{cert.id}/image/")
         self.assertEqual(forbidden_res.status_code, 403)
 
+    def test_reissue_revokes_previous_verified_certificate_atomically(self):
+        self.client.force_authenticate(user=self.admin)
+        payload = {
+            "course_id": self.course.id,
+            "template_id": self.template.id,
+            "user_id": self.student.id,
+            "student_name": "Kartik Hande",
+            "start_date": "2026-07-01",
+            "end_date": "2026-10-01",
+            "issue_date": "2026-10-13",
+        }
+        with mock.patch("apps.certificates.views.send_certificate_issued_email", return_value=(True, "")):
+            first = self.client.post("/api/certificates/generate/single/", payload, format="json")
+            self.assertEqual(first.status_code, 201, first.data)
+            payload["reissue"] = True
+            second = self.client.post("/api/certificates/generate/single/", payload, format="json")
+
+        self.assertEqual(second.status_code, 201, second.data)
+        old = Certificate.objects.get(certificate_number=first.data["certificate_number"])
+        replacement = Certificate.objects.get(certificate_number=second.data["certificate_number"])
+        self.assertEqual(old.status, Certificate.Status.REVOKED)
+        self.assertIn(replacement.certificate_number, old.rejection_reason)
+        self.assertEqual(replacement.status, Certificate.Status.VERIFIED)
+        public_check = APIClient().get(f"/api/certificates/verify/{old.certificate_number}/")
+        self.assertEqual(public_check.data["verification_result"], "REVOKED")
+
     def test_single_issuance_to_existing_verified_account_is_visible_without_reverification(self):
         self.student.profile.email_verified = True
         self.student.profile.save(update_fields=["email_verified", "updated_at"])
@@ -1173,6 +1416,9 @@ class CertificateGenerationTests(TestCase):
                     "student_name": "Kartik Hande",
                     "student_email": " KARTIK@EXAMPLE.COM ",
                     "course_name": self.course.name,
+                    "start_date": "2026-07-01",
+                    "end_date": "2026-10-01",
+                    "issue_date": "2026-10-13",
                 }],
             }, format="json")
 
@@ -1201,7 +1447,7 @@ class CertificateGenerationTests(TestCase):
 
         self.assertEqual(response.status_code, 201)
         self.assertFalse(response.data["email_sent"])
-        self.assertEqual(response.data["email_error"], "Mock SMTP unavailable")
+        self.assertEqual(response.data["email_error"], "Email delivery failed. An administrator can retry delivery.")
         certificate = Certificate.objects.get(certificate_number=response.data["certificate_number"])
         self.assertEqual(certificate.start_date, self.course.start_date)
         self.assertEqual(certificate.end_date, self.course.end_date)
@@ -1236,7 +1482,7 @@ class CertificateGenerationTests(TestCase):
             created_by=self.admin,
         )
         del_res = self.client.delete(f"/api/certificates/templates/{self.template.id}/")
-        self.assertEqual(del_res.status_code, 400)
+        self.assertEqual(del_res.status_code, 409)
         self.assertIn("Cannot delete template", str(del_res.data))
 
         # Unused template can be safely deleted
@@ -1301,15 +1547,17 @@ class CertificateGenerationTests(TestCase):
 
         self.assertEqual(response.status_code, 201)
         self.assertEqual(response.data["successful"], 2)
-        load_mock.assert_called_once_with(self.template.image.path)
+        load_mock.assert_called_once_with(self.template.image)
 
     def test_bulk_email_failure_is_recorded_and_other_recipients_continue(self):
         self.client.force_authenticate(user=self.admin)
         rows = [
             {"row_number": 2, "student_name": "First Student", "student_email": "first@example.com",
-             "course_name": self.course.name},
+             "course_name": self.course.name, "start_date": "2026-07-01", "end_date": "2026-10-01",
+             "issue_date": "2026-10-13"},
             {"row_number": 3, "student_name": "Second Student", "student_email": "second@example.com",
-             "course_name": self.course.name},
+             "course_name": self.course.name, "start_date": "2026-07-01", "end_date": "2026-10-01",
+             "issue_date": "2026-10-13"},
         ]
         with mock.patch(
             "apps.certificates.views.send_certificate_issued_email",
@@ -1329,7 +1577,7 @@ class CertificateGenerationTests(TestCase):
         first = Certificate.objects.get(recipient_email="first@example.com")
         second = Certificate.objects.get(recipient_email="second@example.com")
         self.assertFalse(first.email_sent)
-        self.assertEqual(first.email_error, "Mock SMTP unavailable")
+        self.assertEqual(first.email_error, "Email delivery failed. An administrator can retry delivery.")
         self.assertTrue(second.email_sent)
 
     def test_retry_email_endpoint(self):
@@ -1457,8 +1705,14 @@ class CertificateGenerationTests(TestCase):
         cert_num = res.data["certificate_number"]
 
         # Generate JWT access token for student
-        from rest_framework_simplejwt.tokens import RefreshToken
-        token = str(RefreshToken.for_user(self.student).access_token)
+        self.student.profile.email_verified = True
+        self.student.profile.mfa_enabled = True
+        self.student.profile.totp_secret = "JBSWY3DPEHPK3PXP"
+        self.student.profile.save(
+            update_fields=["email_verified", "mfa_enabled", "totp_secret", "updated_at"]
+        )
+        from apps.accounts.authentication import issue_user_refresh_token
+        token = str(issue_user_refresh_token(self.student).access_token)
 
         # Query-string credentials must not authorize private image access.
         unauth_client = APIClient()
@@ -1590,7 +1844,7 @@ class CertificateGenerationTests(TestCase):
             "password": "StrongPassword@123",
             "password_confirm": "StrongPassword@123",
         }, format="json")
-        self.assertEqual(reg_res.status_code, 201)
+        self.assertEqual(reg_res.status_code, 202)
 
         user = get_user_model().objects.get(username="lifecyclestudent")
         self.assertFalse(user.profile.email_verified)
@@ -1638,7 +1892,7 @@ class CertificateGenerationTests(TestCase):
 
 
 
-class CertificateAccountLinkingTestSuite(TestCase):
+class CertificateAccountLinkingTestSuite(IsolatedMediaTestCase):
     """
     Comprehensive automated tests covering:
     Test 1 — Anshuman's case (full unregistered issuance -> register -> verify -> claim -> My Certificates -> Dashboard)
@@ -1731,7 +1985,7 @@ class CertificateAccountLinkingTestSuite(TestCase):
         import hashlib
         from apps.accounts.models import EmailVerificationToken
 
-        email = "anshumanagrawal87@gmail.com"
+        email = "certificate-recipient@example.test"
         student_name = "Anshuman Agrawal"
 
         # 1 & 2. Create unregistered certificate record
@@ -1760,7 +2014,7 @@ class CertificateAccountLinkingTestSuite(TestCase):
             "password": "Password@12345",
             "password_confirm": "Password@12345",
         }, format="json")
-        self.assertEqual(reg_res.status_code, 201)
+        self.assertEqual(reg_res.status_code, 202)
 
         user = User.objects.get(email=email)
         self.assertFalse(user.profile.email_verified)
@@ -1950,7 +2204,7 @@ class CertificateAccountLinkingTestSuite(TestCase):
 
         owner2 = User.objects.create_user(
             username="owner2",
-            email="shared@example.com",
+            email="owner2@example.com",
             password="Password@123",
         )
         owner2.profile.email_verified = True

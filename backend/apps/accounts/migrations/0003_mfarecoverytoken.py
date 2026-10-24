@@ -6,7 +6,7 @@ from django.db import migrations, models
 
 
 def sync_admin_roles(apps, schema_editor):
-    User = apps.get_model("auth", "User")
+    User = apps.get_model(*settings.AUTH_USER_MODEL.split("."))
     UserProfile = apps.get_model("accounts", "UserProfile")
     for u in User.objects.filter(models.Q(is_superuser=True) | models.Q(is_staff=True)):
         profile, _ = UserProfile.objects.get_or_create(

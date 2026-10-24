@@ -5,6 +5,7 @@ from django.contrib.auth import get_user_model
 from rest_framework.test import APITestCase
 
 from apps.certificates.models import Certificate
+from apps.audit.models import AuditLog
 from apps.verification.models import VerificationAttempt
 
 
@@ -36,7 +37,7 @@ class VerificationAPITests(APITestCase):
             format="json",
         )
 
-    def test_verified_certificate_is_found(self):
+    def test_verified_certificate_is_verified(self):
         self.create_certificate(
             "VERIFY-TEST-001",
             Certificate.Status.VERIFIED,
@@ -46,10 +47,11 @@ class VerificationAPITests(APITestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertTrue(response.data["found"])
-        self.assertEqual(response.data["verification_result"], "FOUND")
-        self.assertEqual(response.data["status"], "FOUND")
+        self.assertEqual(response.data["verification_result"], "VERIFIED")
+        self.assertEqual(response.data["status"], "VERIFIED")
+        self.assertIn("certificate", response.data)
 
-    def test_pending_certificate_is_still_found(self):
+    def test_pending_certificate_is_not_verified_or_disclosed(self):
         self.create_certificate(
             "VERIFY-TEST-002",
             Certificate.Status.PENDING,
@@ -59,9 +61,16 @@ class VerificationAPITests(APITestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertTrue(response.data["found"])
-        self.assertEqual(response.data["verification_result"], "FOUND")
+        self.assertEqual(response.data["verification_result"], "PENDING")
+        self.assertEqual(response.data["status"], "PENDING")
+        self.assertNotIn("certificate", response.data)
 
-    def test_rejected_certificate_is_still_found(self):
+        public_response = self.client.get("/api/certificates/verify/VERIFY-TEST-002/")
+        self.assertEqual(public_response.status_code, 200)
+        self.assertEqual(public_response.data["verification_result"], "PENDING")
+        self.assertNotIn("recipient_name", public_response.data)
+
+    def test_rejected_certificate_is_not_verified_or_disclosed(self):
         self.create_certificate(
             "VERIFY-TEST-003",
             Certificate.Status.REJECTED,
@@ -71,7 +80,21 @@ class VerificationAPITests(APITestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertTrue(response.data["found"])
-        self.assertEqual(response.data["verification_result"], "FOUND")
+        self.assertEqual(response.data["verification_result"], "REJECTED")
+        self.assertEqual(response.data["status"], "REJECTED")
+        self.assertNotIn("certificate", response.data)
+
+        public_response = self.client.get("/api/certificates/verify/VERIFY-TEST-003/")
+        self.assertEqual(public_response.status_code, 200)
+        self.assertEqual(public_response.data["verification_result"], "REJECTED")
+        self.assertNotIn("recipient_name", public_response.data)
+
+    def test_revoked_certificate_is_not_verified_or_disclosed(self):
+        self.create_certificate("VERIFY-REVOKED-001", Certificate.Status.REVOKED)
+        response = self.check_number("VERIFY-REVOKED-001")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["verification_result"], "REVOKED")
+        self.assertNotIn("certificate", response.data)
 
     def test_unknown_certificate(self):
         response = self.check_number("VERIFY-NOT-FOUND")
@@ -135,4 +158,20 @@ class VerificationAPITests(APITestCase):
 
         attempt = VerificationAttempt.objects.latest("created_at")
         self.assertEqual(attempt.certificate_number, "VERIFY-TEST-004")
-        self.assertEqual(attempt.result, VerificationAttempt.Result.FOUND)
+        self.assertEqual(attempt.result, VerificationAttempt.Result.VERIFIED)
+
+    def test_both_public_verifiers_record_the_same_status_and_lookup_audit(self):
+        certificate = self.create_certificate("VERIFY-AUDIT-001", Certificate.Status.PENDING)
+        post_response = self.check_number(certificate.certificate_number)
+        get_response = self.client.get(f"/api/certificates/verify/{certificate.certificate_number}/")
+        self.assertEqual(post_response["Cache-Control"], "no-store, no-cache, must-revalidate, max-age=0")
+        self.assertEqual(get_response["Cache-Control"], "no-store, no-cache, must-revalidate, max-age=0")
+        attempts = list(VerificationAttempt.objects.filter(certificate=certificate).order_by("id"))
+        self.assertEqual([row.result for row in attempts], ["PENDING", "PENDING"])
+        self.assertEqual(
+            AuditLog.objects.filter(
+                action=AuditLog.Action.CERTIFICATE_LOOKUP_FAILED,
+                target_id=str(certificate.pk),
+            ).count(),
+            2,
+        )

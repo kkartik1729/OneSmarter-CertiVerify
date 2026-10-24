@@ -12,16 +12,17 @@ User = get_user_model()
 
 
 class CertificateNotificationTests(APITestCase):
-    """Test that manual certificate review is disabled."""
+    """Certificate review transitions notify and audit their owner-facing outcome."""
 
     def setUp(self):
         self.owner = User.objects.create_user(
             username="certificate_owner_test",
+            email="certificate-owner@example.test",
             password="TestPass123!",
         )
         self.admin = User.objects.create_superuser(
             username="certificate_review_admin",
-            email="certificate-review@example.com",
+            email="certificate-review@example.test",
             password="TestPass123!",
         )
 
@@ -36,120 +37,69 @@ class CertificateNotificationTests(APITestCase):
             status=Certificate.Status.PENDING,
         )
 
-    def test_admin_cannot_manually_approve_certificate(self):
-        certificate = self.create_pending_certificate(
-            "NOTIFY-APPROVE-001"
-        )
+    def test_admin_can_approve_pending_certificate_and_notify_owner(self):
+        certificate = self.create_pending_certificate("NOTIFY-APPROVE-001")
         self.client.force_authenticate(user=self.admin)
-
         response = self.client.patch(
             f"/api/certificates/{certificate.id}/review/",
             {"status": "VERIFIED"},
             format="json",
         )
-
-        self.assertEqual(response.status_code, 405)
-
+        self.assertEqual(response.status_code, 200)
         certificate.refresh_from_db()
-        self.assertEqual(
-            certificate.status,
-            Certificate.Status.PENDING,
-        )
+        self.assertEqual(certificate.status, Certificate.Status.VERIFIED)
+        self.assertTrue(Notification.objects.filter(
+            recipient=self.owner,
+            certificate=certificate,
+            notification_type=Notification.NotificationType.CERTIFICATE_APPROVED,
+        ).exists())
+        self.assertTrue(AuditLog.objects.filter(
+            actor=self.admin,
+            action=AuditLog.Action.CERTIFICATE_APPROVED,
+            target_id=str(certificate.id),
+        ).exists())
 
-        self.assertFalse(
-            Notification.objects.filter(
-                certificate=certificate,
-                notification_type=(
-                    Notification.NotificationType.CERTIFICATE_APPROVED
-                ),
-            ).exists()
-        )
-
-        self.assertFalse(
-            AuditLog.objects.filter(
-                actor=self.admin,
-                action=AuditLog.Action.CERTIFICATE_APPROVED,
-                target_id=str(certificate.id),
-            ).exists()
-        )
-
-    def test_admin_cannot_manually_reject_certificate(self):
-        certificate = self.create_pending_certificate(
-            "NOTIFY-REJECT-001"
-        )
+    def test_admin_can_reject_pending_certificate_with_reason_and_notify_owner(self):
+        certificate = self.create_pending_certificate("NOTIFY-REJECT-001")
         self.client.force_authenticate(user=self.admin)
-
         response = self.client.patch(
             f"/api/certificates/{certificate.id}/review/",
-            {
-                "status": "REJECTED",
-                "rejection_reason": "Test rejection reason",
-            },
+            {"status": "REJECTED", "rejection_reason": "Test rejection reason"},
             format="json",
         )
-
-        self.assertEqual(response.status_code, 405)
-
+        self.assertEqual(response.status_code, 200)
         certificate.refresh_from_db()
-        self.assertEqual(
-            certificate.status,
-            Certificate.Status.PENDING,
-        )
+        self.assertEqual(certificate.status, Certificate.Status.REJECTED)
+        self.assertEqual(certificate.rejection_reason, "Test rejection reason")
+        self.assertTrue(Notification.objects.filter(
+            recipient=self.owner,
+            certificate=certificate,
+            notification_type=Notification.NotificationType.CERTIFICATE_REJECTED,
+        ).exists())
+        self.assertTrue(AuditLog.objects.filter(
+            actor=self.admin,
+            action=AuditLog.Action.CERTIFICATE_REJECTED,
+            target_id=str(certificate.id),
+        ).exists())
 
-        self.assertFalse(
-            Notification.objects.filter(
-                certificate=certificate,
-                notification_type=(
-                    Notification.NotificationType.CERTIFICATE_REJECTED
-                ),
-            ).exists()
-        )
-
-        self.assertFalse(
-            AuditLog.objects.filter(
-                actor=self.admin,
-                action=AuditLog.Action.CERTIFICATE_REJECTED,
-                target_id=str(certificate.id),
-            ).exists()
-        )
-
-    def test_repeated_review_attempts_do_not_change_certificate(self):
-        certificate = self.create_pending_certificate(
-            "NOTIFY-ONCE-001"
-        )
+    def test_repeated_same_transition_is_idempotent_and_revoked_is_terminal(self):
+        certificate = self.create_pending_certificate("NOTIFY-ONCE-001")
         self.client.force_authenticate(user=self.admin)
+        url = f"/api/certificates/{certificate.id}/review/"
+        first = self.client.patch(url, {"status": "VERIFIED"}, format="json")
+        self.assertEqual(first.status_code, 200)
+        notification_count = Notification.objects.filter(certificate=certificate).count()
+        second = self.client.patch(url, {"status": "VERIFIED"}, format="json")
+        self.assertEqual(second.status_code, 200)
+        self.assertEqual(Notification.objects.filter(certificate=certificate).count(), notification_count)
 
-        first_response = self.client.patch(
-            f"/api/certificates/{certificate.id}/review/",
-            {"status": "VERIFIED"},
+        revoke = self.client.patch(
+            url,
+            {"status": "REVOKED", "rejection_reason": "Withdrawn"},
             format="json",
         )
-
-        self.assertEqual(first_response.status_code, 405)
-
-        notifications_before = Notification.objects.filter(
-            certificate=certificate
-        ).count()
-
-        second_response = self.client.patch(
-            f"/api/certificates/{certificate.id}/review/",
-            {
-                "status": "REJECTED",
-                "rejection_reason": "Second attempt",
-            },
-            format="json",
-        )
-
-        self.assertEqual(second_response.status_code, 405)
-
+        self.assertEqual(revoke.status_code, 200)
+        reactivate = self.client.patch(url, {"status": "VERIFIED"}, format="json")
+        self.assertEqual(reactivate.status_code, 409)
         certificate.refresh_from_db()
-        self.assertEqual(
-            certificate.status,
-            Certificate.Status.PENDING,
-        )
-        self.assertEqual(
-            Notification.objects.filter(
-                certificate=certificate
-            ).count(),
-            notifications_before,
-        )
+        self.assertEqual(certificate.status, Certificate.Status.REVOKED)

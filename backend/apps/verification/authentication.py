@@ -1,8 +1,10 @@
 
-from rest_framework_simplejwt.authentication import JWTAuthentication
+from apps.accounts.authentication import SessionInvalidatingJWTAuthentication
+from rest_framework.exceptions import AuthenticationFailed
+from rest_framework_simplejwt.exceptions import InvalidToken
 
 
-class OptionalJWTAuthentication(JWTAuthentication):
+class OptionalJWTAuthentication(SessionInvalidatingJWTAuthentication):
     """
     Attempt to authenticate request if a JWT Bearer header is present.
     If no token is provided, or if an invalid/expired token is supplied
@@ -22,7 +24,7 @@ class OptionalJWTAuthentication(JWTAuthentication):
         try:
             validated_token = self.get_validated_token(raw_token)
             return self.get_user(validated_token), validated_token
-        except Exception:
+        except (InvalidToken, AuthenticationFailed):
             # For public lookup endpoints, an invalid/expired token should
             # not prevent unauthenticated lookup; fall back to AnonymousUser.
             return None

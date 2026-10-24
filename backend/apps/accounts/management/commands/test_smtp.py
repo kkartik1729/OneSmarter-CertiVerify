@@ -5,8 +5,8 @@ and account email workflows using the centralized OneSmarter email service.
 
 import smtplib
 import socket
-from datetime import datetime
 from unittest.mock import MagicMock
+from django.utils import timezone
 
 from django.conf import settings
 from django.core.mail import get_connection
@@ -89,8 +89,8 @@ class Command(BaseCommand):
                 self.style.WARNING(
                     f"WARNING: Central SMTP check flagged: {reason}\n"
                     "To enable real email dispatch via IONOS SMTP:\n"
-                    "  1. Ensure EMAIL_HOST=smtp.ionos.com and EMAIL_PORT=587 in backend/.env.\n"
-                    "  2. Set EMAIL_HOST_USER=akshay.kumar@onesmarter.com in backend/.env.\n"
+                    "  1. Set EMAIL_HOST and EMAIL_PORT in backend/.env according to your SMTP provider.\n"
+                    "  2. Set EMAIL_HOST_USER in backend/.env to the authorized sender account.\n"
                     "  3. Set EMAIL_HOST_PASSWORD to your active IONOS account password in backend/.env."
                 )
             )
@@ -104,8 +104,11 @@ class Command(BaseCommand):
                 timeout=timeout,
             )
             connection.open()
+            transport_security = "STARTTLS" if getattr(settings, "EMAIL_USE_TLS", False) else (
+                "SSL/TLS" if getattr(settings, "EMAIL_USE_SSL", False) else "no TLS"
+            )
             self.stdout.write(
-                self.style.SUCCESS(f"SUCCESS: Successfully connected and authenticated to {host}:{port} via STARTTLS!")
+                self.style.SUCCESS(f"SUCCESS: Connected and authenticated to {host}:{port} ({transport_security}).")
             )
             connection.close()
         except socket.timeout:
@@ -117,7 +120,7 @@ class Command(BaseCommand):
             self.stdout.write(
                 self.style.ERROR(
                     f"ERROR: SMTP Authentication failed (code {e.smtp_code}).\n"
-                    "The mail server rejected the credentials for akshay.kumar@onesmarter.com.\n"
+                    "The mail server rejected the configured sender credentials.\n"
                     "Please verify that EMAIL_HOST_PASSWORD in backend/.env is set to the correct IONOS account password."
                 )
             )
@@ -157,7 +160,7 @@ class Command(BaseCommand):
                     sample_link = f"{frontend_base}/mfa-recovery?token=sample_diagnostic_token_12345"
                     send_mfa_recovery_email(fake_user, sample_link)
                 else:
-                    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    timestamp = timezone.now().strftime("%Y-%m-%d %H:%M:%S %Z")
                     subject = "OneSmarter-CertiVerify — SMTP Delivery Test"
                     message = (
                         f"Hello,\n\n"

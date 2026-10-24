@@ -3,6 +3,7 @@ import { Component, type ErrorInfo, type ReactNode } from 'react';
 interface Props {
   children: ReactNode;
   fallback?: ReactNode;
+  onError?: (error: Error, errorInfo: ErrorInfo) => void;
 }
 
 interface State {
@@ -21,7 +22,8 @@ export default class ErrorBoundary extends Component<Props, State> {
   }
 
   componentDidCatch(error: Error, errorInfo: ErrorInfo) {
-    console.error('ErrorBoundary caught an unhandled error:', error, errorInfo);
+    if (this.props.onError) this.props.onError(error, errorInfo);
+    else if (import.meta.env.DEV) console.error('ErrorBoundary caught an unhandled error:', error, errorInfo);
   }
 
   render() {
@@ -41,11 +43,10 @@ export default class ErrorBoundary extends Component<Props, State> {
               className="btn"
               onClick={() => {
                 this.setState({ hasError: false, error: null });
-                window.location.reload();
               }}
               style={{ width: '100%' }}
             >
-              Reload Page
+              Try Again
             </button>
           </div>
         </div>

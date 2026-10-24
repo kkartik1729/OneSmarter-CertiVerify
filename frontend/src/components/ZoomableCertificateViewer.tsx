@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type MouseEvent, type PointerEvent, type WheelEvent } from 'react';
+import { useEffect, useRef, useState, type MouseEvent, type PointerEvent } from 'react';
 import { createPortal } from 'react-dom';
 import { Maximize2, X, ZoomIn, ZoomOut } from 'lucide-react';
 
@@ -36,6 +36,9 @@ function midpoint(a: Point, b: Point): Point {
 /** Full-screen image viewer that initially fits the complete certificate. */
 export default function ZoomableCertificateViewer({ src, alt, onClose }: Props) {
   const viewportRef = useRef<HTMLDivElement>(null);
+  const dialogRef = useRef<HTMLDivElement>(null);
+  const closeRef = useRef(onClose);
+  closeRef.current = onClose;
   const imageRef = useRef<HTMLImageElement>(null);
   const pointersRef = useRef(new Map<number, Point>());
   const gestureRef = useRef<{
@@ -84,15 +87,16 @@ export default function ZoomableCertificateViewer({ src, alt, onClose }: Props) 
   useEffect(() => {
     const priorOverflow = document.body.style.overflow;
     document.body.style.overflow = 'hidden';
+    dialogRef.current?.focus();
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') onClose();
+      if (event.key === 'Escape') closeRef.current();
     };
     window.addEventListener('keydown', onKeyDown);
     return () => {
       document.body.style.overflow = priorOverflow;
       window.removeEventListener('keydown', onKeyDown);
     };
-  }, [onClose]);
+  }, []);
 
   useEffect(() => {
     const viewport = viewportRef.current;
@@ -128,9 +132,21 @@ export default function ZoomableCertificateViewer({ src, alt, onClose }: Props) 
     };
   };
 
+  const clampOffset = (candidate: Point, scale = zoom): Point => {
+    const viewport = viewportRef.current;
+    if (!viewport || !fitSize || scale <= MIN_ZOOM) return { x: 0, y: 0 };
+    const bounds = viewport.getBoundingClientRect();
+    const maxX = Math.max(0, (fitSize.width * scale - bounds.width) / 2);
+    const maxY = Math.max(0, (fitSize.height * scale - bounds.height) / 2);
+    return {
+      x: Math.min(maxX, Math.max(-maxX, candidate.x)),
+      y: Math.min(maxY, Math.max(-maxY, candidate.y)),
+    };
+  };
+
   const toggleZoomAt = (point: Point) => {
     const nextZoom = zoom > MIN_ZOOM ? MIN_ZOOM : 2;
-    setOffset(nextZoom === MIN_ZOOM ? { x: 0, y: 0 } : centerOffsetForZoom(point, nextZoom));
+    setOffset(nextZoom === MIN_ZOOM ? { x: 0, y: 0 } : clampOffset(centerOffsetForZoom(point, nextZoom), nextZoom));
     setZoom(nextZoom);
   };
 
@@ -201,14 +217,15 @@ export default function ZoomableCertificateViewer({ src, alt, onClose }: Props) 
         x: (startCenter.x - gesture.startOffset.x) / gesture.startZoom,
         y: (startCenter.y - gesture.startOffset.y) / gesture.startZoom,
       };
-      setOffset({
+      setOffset(clampOffset({
         x: currentCenter.x - imagePoint.x * nextZoom,
         y: currentCenter.y - imagePoint.y * nextZoom,
-      });
+      }, nextZoom));
       setZoom(nextZoom);
     } else if (points.length === 1 && gesture.kind === 'pan' && gesture.lastPoint && zoom > MIN_ZOOM) {
       const point = points[0];
-      setOffset(current => ({ x: current.x + point.x - gesture.lastPoint!.x, y: current.y + point.y - gesture.lastPoint!.y }));
+      const lastPoint = gesture.lastPoint;
+      setOffset(current => clampOffset({ x: current.x + point.x - lastPoint.x, y: current.y + point.y - lastPoint.y }));
       gesture.lastPoint = point;
     }
   };
@@ -229,13 +246,22 @@ export default function ZoomableCertificateViewer({ src, alt, onClose }: Props) 
     }
   };
 
-  const handleWheel = (event: WheelEvent<HTMLDivElement>) => {
-    event.preventDefault();
-    const nextZoom = clampZoom(zoom * (event.deltaY < 0 ? 1.15 : 1 / 1.15));
-    if (nextZoom === MIN_ZOOM) setOffset({ x: 0, y: 0 });
-    else setOffset(centerOffsetForZoom(getPoint(event), nextZoom));
-    setZoom(nextZoom);
-  };
+  useEffect(() => {
+    const viewport = viewportRef.current;
+    if (!viewport) return;
+    const handleWheel = (event: globalThis.WheelEvent) => {
+      event.preventDefault();
+      const nextZoom = clampZoom(zoom * (event.deltaY < 0 ? 1.15 : 1 / 1.15));
+      if (nextZoom === MIN_ZOOM) setOffset({ x: 0, y: 0 });
+      else {
+        const point = getPoint({ currentTarget: viewport, clientX: event.clientX, clientY: event.clientY });
+        setOffset(clampOffset(centerOffsetForZoom(point, nextZoom), nextZoom));
+      }
+      setZoom(nextZoom);
+    };
+    viewport.addEventListener('wheel', handleWheel, { passive: false });
+    return () => viewport.removeEventListener('wheel', handleWheel);
+  }, [zoom, offset, fitSize]);
 
   const adjustZoom = (factor: number) => {
     const nextZoom = clampZoom(zoom * factor);
@@ -244,7 +270,7 @@ export default function ZoomableCertificateViewer({ src, alt, onClose }: Props) 
   };
 
   return createPortal(
-    <div className="fixed inset-0 z-[70] flex flex-col bg-slate-950 text-white overscroll-none px-3 pt-[calc(env(safe-area-inset-top)+0.5rem)] pb-[calc(env(safe-area-inset-bottom)+0.5rem)]" role="dialog" aria-modal="true" aria-label="Certificate viewer">
+    <div ref={dialogRef} tabIndex={-1} className="fixed inset-0 z-[70] flex flex-col bg-slate-950 text-white overscroll-none px-3 pt-[calc(env(safe-area-inset-top)+0.5rem)] pb-[calc(env(safe-area-inset-bottom)+0.5rem)]" role="dialog" aria-modal="true" aria-label="Certificate viewer">
       <header className="flex h-12 shrink-0 items-center justify-between gap-3">
         <span className="min-w-0 truncate text-sm font-semibold">{alt}</span>
         <button type="button" onClick={onClose} className="rounded-lg p-2 text-white/80 hover:bg-white/10 hover:text-white" aria-label="Close certificate viewer">
@@ -259,7 +285,6 @@ export default function ZoomableCertificateViewer({ src, alt, onClose }: Props) 
         onPointerMove={handlePointerMove}
         onPointerUp={handlePointerUp}
         onPointerCancel={handlePointerUp}
-        onWheel={handleWheel}
         onDoubleClick={(event: MouseEvent<HTMLDivElement>) => {
           if (Date.now() - lastTouchDoubleTapRef.current < 500) return;
           toggleZoomAt(getPoint(event));

@@ -1,6 +1,6 @@
 # OneSmarter CertiVerify
 
-Smart, tamper-proof Certificate Issuance and Verification System built with Django REST Framework and React.js.
+Certificate issuance and record lookup application built with Django REST Framework and React.
 
 ---
 
@@ -10,7 +10,7 @@ Smart, tamper-proof Certificate Issuance and Verification System built with Djan
 - **Frontend:** React 18 + TypeScript + Vite + Tailwind CSS
 - **Database:** PostgreSQL (with SQLite zero-config fallback for quick local testing)
 - **Authentication:** JWT (SimpleJWT) + Email OTP verification + TOTP MFA + Google Sign-In (OAuth 2.0)
-- **Document & Media Engine:** Pillow (PIL) + PyPDF + PyPDFium2 + QRCode generator
+- **Document & Media Engine:** Pillow (PIL) + PyPDFium2
 - **Email Service:** Centralized SMTP configuration with automated certificate delivery
 
 ---
@@ -82,11 +82,11 @@ npm run dev
 ## 💡 Key Features
 
 - **Multi-Role Dashboards:**
-  - **Admin Dashboard (`/admin`):** Issue single certificates, bulk CSV certificate issuance, manage courses, upload custom templates (Figma PNG/JPG), track verification logs, view audit trail.
-  - **Student / Recipient Dashboard (`/dashboard`):** View issued certificates, automatic claiming of certificates issued prior to registration, download PDF/PNG certificates, view verification links.
-  - **Public Verification (`/verify`):** Instant verification by Certificate ID, QR code scan, or document upload with cryptographic tamper checking.
-- **Dynamic Template Renderer:** Supports custom high-resolution Figma PNGs, JPEG templates, custom coordinates, font scaling, and automated QR code embedding.
-- **Enterprise Security:** JWT tokens, email OTP verification, TOTP two-factor authentication, rate-limiting, and immutable audit logs.
+  - **Admin Dashboard (`/admin`):** Issue certificates singly or from CSV, manage courses and templates, and review verification and audit records.
+  - **Student / Recipient Dashboard (`/dashboard`):** View certificates associated with the account, claim eligible certificates after email verification, download available certificate files, and review verification history.
+  - **Public Verification (`/verify`):** Check a certificate ID against the stored record and see its current status.
+- **Dynamic Template Renderer:** Supports raster and PDF templates, saved text-layer positions and formatting, and certificate image/PDF output.
+- **Account Security:** JWT sessions, email verification, TOTP MFA, password recovery, and audit records.
 
 ---
 
